@@ -259,6 +259,33 @@ Tight cadence on purpose. The first run fires immediately, giving a near-real-ti
 
 The GitHub Release body is populated automatically by the `Release Notes Sync` workflow (`.github/workflows/release-notes-sync.yml`). It triggers on every `v*` tag push and on any push to `main` that touches `CHANGELOG.md`, then runs `scripts/sync-release-notes-from-changelog.mjs` to mirror the matching changelog entry into the release body. You don't need to write release notes on GitHub manually — keep `CHANGELOG.md` correct and the workflow will sync it. To force a re-sync, dispatch the workflow with the tag input.
 
+## CLI tarball assets
+
+The `CLI Tarball Release` workflow (`.github/workflows/cli-tarball-release.yml`) runs on every push to `main` and on every `v*` tag push. It uploads fixed-name npm tarballs to GitHub Releases:
+
+```text
+paseo-cli.tgz
+paseo-client.tgz
+paseo-highlight.tgz
+paseo-protocol.tgz
+paseo-relay.tgz
+paseo-server.tgz
+```
+
+Pushes to `main` update the rolling `cli-latest` prerelease and force-move the synthetic `cli-latest` tag to the pushed commit. This supports installing the newest pushed CLI directly from GitHub Releases without manually cutting a version tag and without using the npm registry for Paseo's own workspace packages:
+
+```bash
+npm install -g https://github.com/getpaseo/paseo/releases/download/cli-latest/paseo-cli.tgz
+```
+
+Stable releases still upload the same assets to the matching `v*` release, so the latest stable CLI can be installed with:
+
+```bash
+npm install -g https://github.com/getpaseo/paseo/releases/latest/download/paseo-cli.tgz
+```
+
+Before packing, the workflow rewrites internal `@getpaseo/*` dependencies in the temporary checkout to point at the current release's tarball URLs, for example `https://github.com/getpaseo/paseo/releases/download/cli-latest/paseo-server.tgz` on rolling builds or `https://github.com/getpaseo/paseo/releases/download/v0.1.97/paseo-server.tgz` on stable builds. The top-level stable install URL can use GitHub's `latest` redirect, but internal dependencies must stay pinned to the same release target so a new CLI install cannot mix one build's CLI with another build's server/client/protocol packages.
+
 ## Website behavior
 
 - The website download page points to GitHub's latest published **stable** release.

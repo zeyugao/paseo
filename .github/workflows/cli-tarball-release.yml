@@ -1,0 +1,244 @@
+name: CLI Tarball Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to package (e.g. v0.1.0). Leave empty to update cli-latest from the selected ref."
+        required: false
+        type: string
+
+concurrency:
+  group: cli-tarball-release-${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.tag || github.ref) || github.ref }}
+  cancel-in-progress: false
+
+env:
+  ROLLING_RELEASE_TAG: "cli-latest"
+
+jobs:
+  publish-cli-tarballs:
+    permissions:
+      contents: write
+      packages: read
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.tag || github.ref) || github.ref }}
+
+      - name: Resolve release metadata
+        env:
+          INPUT_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_TAG:-}" ]; then
+            node scripts/emit-release-env.mjs --source-tag "$INPUT_TAG" >> "$GITHUB_ENV"
+            echo "IS_ROLLING_CLI_RELEASE=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            node scripts/emit-release-env.mjs --source-tag "$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+            echo "IS_ROLLING_CLI_RELEASE=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          {
+            echo "SOURCE_TAG=$ROLLING_RELEASE_TAG"
+            echo "RELEASE_TAG=$ROLLING_RELEASE_TAG"
+            echo "RELEASE_VERSION=rolling"
+            echo "RELEASE_BASE_VERSION=rolling"
+            echo "RELEASE_PRERELEASE=rolling"
+            echo "IS_PRERELEASE=true"
+            echo "IS_BETA=false"
+            echo "RELEASE_TYPE=prerelease"
+            echo "RELEASE_CHANNEL=rolling"
+            echo "DESKTOP_VERSION=rolling"
+            echo "IS_SMOKE_TAG=false"
+            echo "IS_ROLLING_CLI_RELEASE=true"
+          } >> "$GITHUB_ENV"
+
+      - name: Update rolling CLI tag
+        if: env.IS_ROLLING_CLI_RELEASE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$RELEASE_TAG" --force
+
+      - name: Ensure GitHub release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            if [[ "$IS_ROLLING_CLI_RELEASE" == "true" ]]; then
+              gh release edit "$RELEASE_TAG" \
+                --repo "${{ github.repository }}" \
+                --title "Paseo CLI latest" \
+                --notes "Rolling CLI tarball build from ${GITHUB_SHA}." \
+                --prerelease
+            fi
+            exit 0
+          fi
+
+          release_args=(
+            release create "$RELEASE_TAG"
+            --repo "${{ github.repository }}"
+          )
+
+          if [[ "$IS_ROLLING_CLI_RELEASE" == "true" ]]; then
+            release_args+=(
+              --target "$GITHUB_SHA"
+              --title "Paseo CLI latest"
+              --notes "Rolling CLI tarball build from ${GITHUB_SHA}."
+              --prerelease
+            )
+          else
+            release_args+=(
+              --title "Paseo $RELEASE_TAG"
+              --notes ""
+            )
+          fi
+
+          if [[ "$IS_PRERELEASE" == "true" && "$IS_ROLLING_CLI_RELEASE" != "true" ]]; then
+            release_args+=(--prerelease)
+          fi
+
+          if ! gh "${release_args[@]}"; then
+            echo "Release creation raced with another workflow; continuing."
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@boudra"
+
+      - name: Install JS dependencies
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rewrite internal dependencies to release tarballs
+        env:
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const repository = process.env.REPOSITORY;
+          const releaseTag = process.env.RELEASE_TAG;
+          if (!repository) throw new Error("REPOSITORY is missing");
+          if (!releaseTag) throw new Error("RELEASE_TAG is missing");
+
+          const packages = [
+            {
+              name: "@getpaseo/highlight",
+              path: "packages/highlight/package.json",
+              assetName: "paseo-highlight.tgz",
+            },
+            {
+              name: "@getpaseo/relay",
+              path: "packages/relay/package.json",
+              assetName: "paseo-relay.tgz",
+            },
+            {
+              name: "@getpaseo/protocol",
+              path: "packages/protocol/package.json",
+              assetName: "paseo-protocol.tgz",
+            },
+            {
+              name: "@getpaseo/client",
+              path: "packages/client/package.json",
+              assetName: "paseo-client.tgz",
+            },
+            {
+              name: "@getpaseo/server",
+              path: "packages/server/package.json",
+              assetName: "paseo-server.tgz",
+            },
+            {
+              name: "@getpaseo/cli",
+              path: "packages/cli/package.json",
+              assetName: "paseo-cli.tgz",
+            },
+          ];
+
+          const assetUrls = new Map(
+            packages.map((pkg) => [
+              pkg.name,
+              `https://github.com/${repository}/releases/download/${releaseTag}/${pkg.assetName}`,
+            ]),
+          );
+
+          for (const pkg of packages) {
+            const packageJsonPath = path.resolve(pkg.path);
+            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+
+            for (const field of ["dependencies", "optionalDependencies"]) {
+              const dependencies = packageJson[field];
+              if (!dependencies) continue;
+
+              for (const dependencyName of Object.keys(dependencies)) {
+                const assetUrl = assetUrls.get(dependencyName);
+                if (assetUrl) {
+                  dependencies[dependencyName] = assetUrl;
+                }
+              }
+            }
+
+            fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
+          }
+          NODE
+
+      - name: Pack workspace tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/paseo-tarballs"
+
+          pack_workspace() {
+            local workspace="$1"
+            local asset_name="$2"
+            local packed
+
+            packed="$(npm pack --workspace="$workspace" --pack-destination "$RUNNER_TEMP/paseo-tarballs" --silent)"
+            mv "$RUNNER_TEMP/paseo-tarballs/$packed" "$RUNNER_TEMP/paseo-tarballs/$asset_name"
+          }
+
+          pack_workspace "@getpaseo/highlight" "paseo-highlight.tgz"
+          pack_workspace "@getpaseo/relay" "paseo-relay.tgz"
+          pack_workspace "@getpaseo/protocol" "paseo-protocol.tgz"
+          pack_workspace "@getpaseo/client" "paseo-client.tgz"
+          pack_workspace "@getpaseo/server" "paseo-server.tgz"
+          pack_workspace "@getpaseo/cli" "paseo-cli.tgz"
+
+      - name: Upload tarballs to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/paseo-tarballs/*.tgz --clobber --repo "${{ github.repository }}"

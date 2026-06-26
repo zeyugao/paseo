@@ -201,6 +201,12 @@ describe("projects settings routes", () => {
     );
   });
 
+  it("buildProjectSettingsRoute encodes subpath project keys as a single segment", () => {
+    expect(buildProjectSettingsRoute("remote:github.com/acme/app#subpath:packages/server")).toBe(
+      "/settings/projects/remote%3Agithub.com%2Facme%2Fapp%23subpath%3Apackages%2Fserver",
+    );
+  });
+
   it("buildProjectSettingsRoute encodes a local repo-root key", () => {
     expect(buildProjectSettingsRoute("/Users/me/dev/paseo")).toBe(
       "/settings/projects/%2FUsers%2Fme%2Fdev%2Fpaseo",
@@ -208,7 +214,7 @@ describe("projects settings routes", () => {
   });
 
   it("project keys round-trip through decodeURIComponent", () => {
-    const projectKey = "remote:github.com/acme/app";
+    const projectKey = "remote:github.com/acme/app#subpath:packages/server";
     const route = buildProjectSettingsRoute(projectKey);
     const segment = route.slice("/settings/projects/".length);
     expect(decodeURIComponent(segment)).toBe(projectKey);

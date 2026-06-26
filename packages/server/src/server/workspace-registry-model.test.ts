@@ -34,6 +34,12 @@ describe("deriveProjectGroupingName", () => {
     expect(deriveProjectGroupingName("remote:github.com/acme/app")).toBe("acme/app");
   });
 
+  test("includes a project subpath suffix when present", () => {
+    expect(deriveProjectGroupingName("remote:github.com/acme/app#subpath:packages/server")).toBe(
+      "acme/app/packages/server",
+    );
+  });
+
   test("returns owner/repo for a gitlab remote project key", () => {
     expect(deriveProjectGroupingName("remote:gitlab.com/acme/app")).toBe("acme/app");
   });
@@ -105,7 +111,7 @@ describe("detectStaleWorkspaces", () => {
 });
 
 describe("deriveWorkspaceDirectoryKey", () => {
-  test("uses git worktree root when available", () => {
+  test("uses the exact normalized cwd even when a git worktree root is available", () => {
     expect(
       deriveWorkspaceDirectoryKey("/tmp/repo/packages/app", {
         cwd: "/tmp/repo/packages/app",
@@ -116,7 +122,7 @@ describe("deriveWorkspaceDirectoryKey", () => {
         isPaseoOwnedWorktree: false,
         mainRepoRoot: null,
       }),
-    ).toBe("/tmp/repo");
+    ).toBe(resolve("/tmp/repo/packages/app"));
   });
 
   test("falls back to normalized cwd when git worktree root contains multiple lines", () => {
@@ -177,6 +183,53 @@ describe("opaque workspace id versus directory key", () => {
 });
 
 describe("git worktree grouping", () => {
+  test("keeps the repo-root project key and display name for the root checkout", () => {
+    const membership = classifyDirectoryForProjectMembership({
+      cwd: "/tmp/repo",
+      checkout: {
+        cwd: "/tmp/repo",
+        isGit: true,
+        currentBranch: "main",
+        remoteUrl: "https://github.com/acme/repo.git",
+        worktreeRoot: "/tmp/repo",
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: null,
+      },
+    });
+
+    expect(membership).toMatchObject({
+      projectKey: "remote:github.com/acme/repo",
+      projectName: "acme/repo",
+      projectRootPath: "/tmp/repo",
+      projectKind: "git",
+    });
+  });
+
+  test("adds repo-relative subpaths to git project keys and display names", () => {
+    const membership = classifyDirectoryForProjectMembership({
+      cwd: "/tmp/repo/packages/server",
+      checkout: {
+        cwd: "/tmp/repo/packages/server",
+        isGit: true,
+        currentBranch: "main",
+        remoteUrl: "https://github.com/acme/repo.git",
+        worktreeRoot: "/tmp/repo",
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: null,
+      },
+    });
+
+    expect(membership).toMatchObject({
+      cwd: resolve("/tmp/repo/packages/server"),
+      workspaceDirectoryKey: resolve("/tmp/repo/packages/server"),
+      workspaceKind: "local_checkout",
+      projectKey: "remote:github.com/acme/repo#subpath:packages/server",
+      projectName: "acme/repo/packages/server",
+      projectRootPath: resolve("/tmp/repo/packages/server"),
+      projectKind: "git",
+    });
+  });
+
   test("classifies plain git worktrees for project membership from git facts", () => {
     const membership = classifyDirectoryForProjectMembership({
       cwd: "/tmp/repo-feature",

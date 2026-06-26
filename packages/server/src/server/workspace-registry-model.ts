@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import type {
   ProjectCheckoutLitePayload,
@@ -36,10 +36,49 @@ export function generateWorkspaceId(): string {
 // workspace identity (see generateWorkspaceId); never persist or compare it as one.
 export function deriveWorkspaceDirectoryKey(
   cwd: string,
-  checkout: ProjectCheckoutLitePayload,
+  _checkout: ProjectCheckoutLitePayload,
 ): string {
-  const worktreeRoot = checkout.worktreeRoot ? parseGitRevParsePath(checkout.worktreeRoot) : null;
-  return worktreeRoot ?? resolve(cwd);
+  return resolve(cwd);
+}
+
+const PROJECT_SUBPATH_MARKER = "#subpath:";
+
+function splitProjectSubpath(projectKey: string): { baseKey: string; subpath: string | null } {
+  const markerIndex = projectKey.indexOf(PROJECT_SUBPATH_MARKER);
+  if (markerIndex < 0) {
+    return { baseKey: projectKey, subpath: null };
+  }
+  const baseKey = projectKey.slice(0, markerIndex);
+  const subpath = projectKey.slice(markerIndex + PROJECT_SUBPATH_MARKER.length);
+  return { baseKey, subpath: subpath || null };
+}
+
+function normalizeSubpath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+function deriveProjectSubpath(options: {
+  cwd: string;
+  worktreeRoot: string | null;
+}): string | null {
+  const worktreeRoot = options.worktreeRoot ? parseGitRevParsePath(options.worktreeRoot) : null;
+  if (!worktreeRoot) {
+    return null;
+  }
+
+  const normalizedCwd = resolve(options.cwd);
+  const normalizedRoot = resolve(worktreeRoot);
+  const rel = relative(normalizedRoot, normalizedCwd);
+  if (!rel || rel === "." || rel.startsWith("..") || isAbsolute(rel)) {
+    return null;
+  }
+
+  const subpath = normalizeSubpath(rel);
+  return subpath || null;
+}
+
+function appendProjectSubpath(baseKey: string, subpath: string | null): string {
+  return subpath ? `${baseKey}${PROJECT_SUBPATH_MARKER}${subpath}` : baseKey;
 }
 
 function deriveRemoteProjectKey(remoteUrl: string | null): string | null {
@@ -93,35 +132,39 @@ export function deriveProjectGroupingKey(options: {
   cwd: string;
   remoteUrl: string | null;
   mainRepoRoot: string | null;
+  worktreeRoot?: string | null;
 }): string {
   const remoteKey = deriveRemoteProjectKey(options.remoteUrl);
-  if (remoteKey) {
-    return remoteKey;
-  }
-
   const mainRepoRoot = options.mainRepoRoot?.trim();
-  if (mainRepoRoot) {
-    return mainRepoRoot;
-  }
-
-  return options.cwd;
+  const worktreeRoot = options.worktreeRoot?.trim();
+  const baseKey = remoteKey ?? mainRepoRoot ?? worktreeRoot ?? options.cwd;
+  const subpath = deriveProjectSubpath({
+    cwd: options.cwd,
+    worktreeRoot: worktreeRoot ?? null,
+  });
+  return appendProjectSubpath(baseKey, subpath);
 }
 
 export function deriveProjectGroupingName(projectKey: string): string {
-  if (projectKey.startsWith("remote:")) {
-    const remainder = projectKey.slice("remote:".length);
+  const { baseKey, subpath } = splitProjectSubpath(projectKey);
+  let baseName: string;
+
+  if (baseKey.startsWith("remote:")) {
+    const remainder = baseKey.slice("remote:".length);
     const pathSegments = remainder.split("/").filter(Boolean).slice(1);
     if (pathSegments.length >= 2) {
-      return pathSegments.slice(-2).join("/");
+      baseName = pathSegments.slice(-2).join("/");
+    } else if (pathSegments.length === 1) {
+      baseName = pathSegments[0] ?? baseKey;
+    } else {
+      baseName = baseKey;
     }
-    if (pathSegments.length === 1) {
-      return pathSegments[0];
-    }
-    return projectKey;
+  } else {
+    const segments = baseKey.split(/[\\/]/).filter(Boolean);
+    baseName = segments[segments.length - 1] || baseKey;
   }
 
-  const segments = projectKey.split(/[\\/]/).filter(Boolean);
-  return segments[segments.length - 1] || projectKey;
+  return subpath ? `${baseName}/${subpath}` : baseName;
 }
 
 function deriveWorkspaceDirectoryName(cwd: string): string {
@@ -145,10 +188,17 @@ export function deriveProjectRootPath(input: {
   cwd: string;
   checkout: ProjectCheckoutLitePayload;
 }): string {
+  const subpath = deriveProjectSubpath({
+    cwd: input.cwd,
+    worktreeRoot: input.checkout.worktreeRoot,
+  });
+  if (subpath) {
+    return resolve(input.cwd);
+  }
   if (input.checkout.isGit && input.checkout.mainRepoRoot) {
     return input.checkout.mainRepoRoot;
   }
-  return input.cwd;
+  return input.checkout.worktreeRoot ?? input.cwd;
 }
 
 export function deriveProjectKind(checkout: ProjectCheckoutLitePayload): PersistedProjectKind {
@@ -249,9 +299,10 @@ export function classifyDirectoryForProjectMembership(input: {
   };
 
   const projectKey = deriveProjectGroupingKey({
-    cwd: checkout.worktreeRoot ?? normalizedCwd,
+    cwd: normalizedCwd,
     remoteUrl: checkout.remoteUrl,
     mainRepoRoot: checkout.mainRepoRoot,
+    worktreeRoot: checkout.worktreeRoot,
   });
 
   return {

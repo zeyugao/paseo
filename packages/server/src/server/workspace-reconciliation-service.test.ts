@@ -468,6 +468,91 @@ describe("WorkspaceReconciliationService", () => {
     expect(projects.get(repoDir)!.archivedAt).toBeTruthy();
   });
 
+  test("keeps subpath project ids canonical over legacy repo-keyed duplicates for the same subdirectory", async () => {
+    const repoDir = createTempGitRepo("reconcile-subpath-project-");
+    tempDirs.push(repoDir);
+    const subdir = path.join(repoDir, "packages", "server");
+    mkdirSync(subdir, { recursive: true });
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    const legacyProjectId = "remote:github.com/acme/repo";
+    const subpathProjectId = `${legacyProjectId}#subpath:packages/server`;
+
+    projects.set(
+      legacyProjectId,
+      createPersistedProjectRecord({
+        projectId: legacyProjectId,
+        rootPath: subdir,
+        kind: "git",
+        displayName: "acme/repo",
+        customName: "Server",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    projects.set(
+      subpathProjectId,
+      createPersistedProjectRecord({
+        projectId: subpathProjectId,
+        rootPath: subdir,
+        kind: "git",
+        displayName: "acme/repo/packages/server",
+        createdAt: "2026-03-02T12:00:00.000Z",
+        updatedAt: "2026-03-02T12:00:00.000Z",
+      }),
+    );
+    workspaces.set(
+      "legacy-subdir",
+      createPersistedWorkspaceRecord({
+        workspaceId: "legacy-subdir",
+        projectId: legacyProjectId,
+        cwd: subdir,
+        kind: "local_checkout",
+        displayName: "main",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: createWorkspaceGitServiceStub({
+        [subdir]: {
+          projectKind: "git",
+          projectDisplayName: "acme/repo/packages/server",
+          workspaceDisplayName: "main",
+          gitRemote: "git@github.com:acme/repo.git",
+        },
+      }),
+    });
+
+    const result = await service.runOnce();
+
+    expect(result.changesApplied).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "workspace_updated",
+          workspaceId: "legacy-subdir",
+          fields: { projectId: subpathProjectId },
+        }),
+        expect.objectContaining({
+          kind: "project_updated",
+          projectId: subpathProjectId,
+          fields: { customName: "Server" },
+        }),
+        expect.objectContaining({
+          kind: "project_archived",
+          projectId: legacyProjectId,
+          reason: "merged_duplicate",
+        }),
+      ]),
+    );
+    expect(workspaces.get("legacy-subdir")!.projectId).toBe(subpathProjectId);
+    expect(projects.get(subpathProjectId)!.customName).toBe("Server");
+    expect(projects.get(legacyProjectId)!.archivedAt).toBeTruthy();
+  });
+
   test("updates project display name when git remote changes", async () => {
     const dir = createTempGitRepo("reconcile-remote-");
     tempDirs.push(dir);

@@ -818,7 +818,7 @@ test("create_agent_request keeps requested child cwd when grouped under an exist
     await expect(
       session.buildProjectPlacementForWorkspaceId(createdAgent!.workspaceId!),
     ).resolves.toMatchObject({
-      projectKey: parent,
+      projectKey: `${parent}#subpath:child`,
       checkout: { cwd: child },
     });
     expect(findByType(emitted, "status")?.payload).toMatchObject({
@@ -4153,11 +4153,12 @@ test("open_project_request reclassifies an active directory workspace when git m
   });
 
   const response = findByType(emitted, "open_project_response");
+  const remoteProjectId = "remote:github.com/getpaseo/paseo";
 
   expect(response?.payload.error).toBeNull();
-  expect(response?.payload.workspace?.projectId).toBe(repoRoot);
+  expect(response?.payload.workspace?.projectId).toBe(remoteProjectId);
   expect(response?.payload.workspace?.workspaceKind).toBe("worktree");
-  expect(workspaces.get(workspaceId)?.projectId).toBe(repoRoot);
+  expect(workspaces.get(workspaceId)?.projectId).toBe(remoteProjectId);
   expect(workspaces.get(workspaceId)?.kind).toBe("worktree");
   expect(workspaces.get(workspaceId)?.displayName).toBe("feature/desktop-daemon-settings");
 });
@@ -4246,14 +4247,15 @@ test("open_project_request groups a plain git worktree under an existing repo pr
   });
 
   const response = findByType(emitted, "open_project_response");
+  const remoteProjectId = "remote:github.com/getpaseo/paseo";
 
   expect(response?.payload.error).toBeNull();
-  expect(response?.payload.workspace?.projectId).toBe(repoRoot);
+  expect(response?.payload.workspace?.projectId).toBe(remoteProjectId);
   expect(response?.payload.workspace?.workspaceKind).toBe("worktree");
   const worktreeWorkspace = Array.from(workspaces.values()).find(
     (workspace) => workspace.cwd === cwd,
   );
-  expect(worktreeWorkspace?.projectId).toBe(repoRoot);
+  expect(worktreeWorkspace?.projectId).toBe(remoteProjectId);
   expect(worktreeWorkspace?.kind).toBe("worktree");
 });
 
@@ -4976,13 +4978,25 @@ test("recreateOwningWorktreeForRestore throws a typed WorktreeRequestError and l
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-test.skip("open_project_request collapses a git subdirectory onto the repo root workspace", async () => {
+test("open_project_request creates a separate git project for a repo subdirectory", async () => {
   const emitted: SessionOutboundMessage[] = [];
-  const session = createSessionForWorkspaceTests();
-  const projects = new Map<string, ReturnType<typeof createPersistedProjectRecord>>();
-  const workspaces = new Map<string, ReturnType<typeof createPersistedWorkspaceRecord>>();
   const repoRoot = REPO_CWD;
   const subdir = "/tmp/repo/packages/app";
+  const session = createSessionForWorkspaceTests({
+    workspaceGitService: createNoopWorkspaceGitService({
+      getCheckout: async (cwd: string) => ({
+        cwd,
+        isGit: true,
+        currentBranch: "main",
+        remoteUrl: "https://github.com/acme/repo.git",
+        worktreeRoot: repoRoot,
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: null,
+      }),
+    }),
+  });
+  const projects = new Map<string, ReturnType<typeof createPersistedProjectRecord>>();
+  const workspaces = new Map<string, ReturnType<typeof createPersistedWorkspaceRecord>>();
 
   session.emit = (message) => {
     if (isSessionOutboundMessage(message)) emitted.push(message);
@@ -5002,19 +5016,6 @@ test.skip("open_project_request collapses a git subdirectory onto the repo root 
   };
   session.projectRegistry.list = async () => Array.from(projects.values());
   session.workspaceRegistry.list = async () => Array.from(workspaces.values());
-  session.buildProjectPlacement = async (cwd: string) => ({
-    projectKey: repoRoot,
-    projectName: "repo",
-    checkout: {
-      cwd,
-      isGit: true,
-      currentBranch: "main",
-      remoteUrl: null,
-      worktreeRoot: repoRoot,
-      isPaseoOwnedWorktree: false,
-      mainRepoRoot: null,
-    },
-  });
 
   await session.handleMessage({
     type: "open_project_request",
@@ -5022,11 +5023,24 @@ test.skip("open_project_request collapses a git subdirectory onto the repo root 
     requestId: "req-open-subdir",
   });
 
-  expect(workspaces.get(repoRoot)).toBeTruthy();
-  expect(workspaces.has(subdir)).toBe(false);
+  const subpathProjectId = "remote:github.com/acme/repo#subpath:packages/app";
+  expect(projects.get(subpathProjectId)).toMatchObject({
+    projectId: subpathProjectId,
+    rootPath: subdir,
+    displayName: "acme/repo/packages/app",
+    kind: "git",
+  });
+  expect(Array.from(workspaces.values())).toEqual([
+    expect.objectContaining({
+      projectId: subpathProjectId,
+      cwd: subdir,
+      kind: "local_checkout",
+    }),
+  ]);
   const response = findByType(emitted, "open_project_response");
   expect(response?.payload.error).toBeNull();
-  expect(response?.payload.workspace?.id).toBe(repoRoot);
+  expect(response?.payload.workspace?.projectId).toBe(subpathProjectId);
+  expect(response?.payload.workspace?.projectDisplayName).toBe("acme/repo/packages/app");
 });
 
 test("legacy editor RPC requests return daemon unsupported errors", async () => {
@@ -5405,8 +5419,7 @@ test.skip("fetch_workspaces_request reconciles remote URL changes for existing w
   }
 });
 
-test.skip("reconcile archives stale subdirectory workspace records when collapsing to the repo root", async () => {
-  const session = createSessionForWorkspaceTests();
+test("open_project_request upgrades a legacy repo-keyed subdirectory workspace to a subpath project", async () => {
   const projects = new Map<string, ReturnType<typeof createPersistedProjectRecord>>();
   const workspaces = new Map<string, ReturnType<typeof createPersistedWorkspaceRecord>>();
 
@@ -5414,6 +5427,20 @@ test.skip("reconcile archives stale subdirectory workspace records when collapsi
   const repoRoot = path.join(tempDir, "repo");
   const subdirWorkspaceId = path.join(repoRoot, "packages", "app");
   const projectId = "remote:github.com/acme/repo";
+  const subpathProjectId = `${projectId}#subpath:packages/app`;
+  const session = createSessionForWorkspaceTests({
+    workspaceGitService: createNoopWorkspaceGitService({
+      getCheckout: async (cwd: string) => ({
+        cwd,
+        isGit: true,
+        currentBranch: "main",
+        remoteUrl: "https://github.com/acme/repo.git",
+        worktreeRoot: repoRoot,
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: null,
+      }),
+    }),
+  });
 
   mkdirSync(subdirWorkspaceId, { recursive: true });
 
@@ -5474,28 +5501,27 @@ test.skip("reconcile archives stale subdirectory workspace records when collapsi
     if (!existing) return;
     workspaces.set(workspaceId, { ...existing, archivedAt, updatedAt: archivedAt });
   };
-  session.buildProjectPlacement = async (cwd: string) => ({
-    projectKey: projectId,
-    projectName: "acme/repo",
-    checkout: {
-      cwd,
-      isGit: true,
-      currentBranch: "main",
-      remoteUrl: "https://github.com/acme/repo.git",
-      worktreeRoot: repoRoot,
-      isPaseoOwnedWorktree: false,
-      mainRepoRoot: null,
-    },
-  });
-
   try {
-    const result = await session.reconcileWorkspaceRecord(subdirWorkspaceId);
+    await session.handleMessage({
+      type: "open_project_request",
+      cwd: subdirWorkspaceId,
+      requestId: "req-open-legacy-subdir",
+    });
 
-    expect(result.changed).toBe(true);
-    expect(result.workspace?.["workspaceId"]).toBe(repoRoot);
-    expect(result.removedWorkspaceId).toBe(subdirWorkspaceId);
+    expect(workspaces.get(subdirWorkspaceId)).toMatchObject({
+      workspaceId: subdirWorkspaceId,
+      projectId: subpathProjectId,
+      cwd: subdirWorkspaceId,
+      kind: "local_checkout",
+      archivedAt: null,
+    });
+    expect(projects.get(subpathProjectId)).toMatchObject({
+      projectId: subpathProjectId,
+      rootPath: subdirWorkspaceId,
+      displayName: "acme/repo/packages/app",
+      kind: "git",
+    });
     expect(workspaces.get(repoRoot)?.archivedAt).toBeNull();
-    expect(workspaces.get(subdirWorkspaceId)?.archivedAt).toBeTruthy();
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }

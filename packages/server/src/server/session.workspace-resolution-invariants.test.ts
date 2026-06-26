@@ -309,10 +309,10 @@ test("S3: re-open active workspace by exact path returns the same record", async
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// S4. Open a subdir of an active git workspace: canonicalizes UP to the repo
-//     root, returns the existing workspace. (Per "always go to the nearest git".)
+// S4. Open a subdir of an active git workspace: creates a separate workspace
+//     with a project id scoped to the repo-relative subpath.
 // ─────────────────────────────────────────────────────────────────────────────
-test("S4: open subdir of active git workspace returns the repo-root workspace", async () => {
+test("S4: open subdir of active git workspace creates a separate subpath workspace", async () => {
   const h = createHarness({
     workspaces: [gitWorkspace(FOO)],
     projects: [gitProject(FOO)],
@@ -320,8 +320,12 @@ test("S4: open subdir of active git workspace returns the repo-root workspace", 
   });
   await openProject(h.session, FOO_SUB);
   const resp = getOpenResponse(h.emitted, "req-1");
-  expect(resp?.workspace?.id).toBe(workspaceByCwd(h.workspaces, FOO)?.workspaceId);
-  expect(h.workspaces.size).toBe(1);
+  expect(resp?.workspace?.workspaceDirectory).toBe(FOO_SUB);
+  expect(resp?.workspace?.projectId).toBe(`${FOO}#subpath:sub`);
+  expect(resp?.workspace?.projectDisplayName).toBe("foo/sub");
+  expect(hasWorkspaceCwd(h.workspaces, FOO)).toBe(true);
+  expect(hasWorkspaceCwd(h.workspaces, FOO_SUB)).toBe(true);
+  expect(h.workspaces.size).toBe(2);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -472,16 +476,10 @@ test("S12: resolveWorkspaceIdForPath does not return archived ancestor via prefi
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// S13. Open a subfolder of an archived git repo when that subfolder is not
-//      itself a separate git project: the new workspace is a plain directory.
-//
-// Archive is sticky (S9). The archived parent is out of scope, so there is
-// no git project that owns the subfolder. Reviving the parent or inventing
-// a second git project pointing at the same repo would both be worse than
-// being explicit. To get git features back the user unarchives the parent
-// (S6/S11).
+// S13. Open a subfolder of an archived git repo: archive remains sticky for the
+//      parent record, but the explicit subpath opens as its own git workspace.
 // ─────────────────────────────────────────────────────────────────────────────
-test("S13: subfolder of an archived git repo opens as a directory workspace", async () => {
+test("S13: subfolder of an archived git repo opens as a git subpath workspace", async () => {
   const archivedAt = "2026-04-22T13:08:05.400Z";
   const h = createHarness({
     workspaces: [gitWorkspace(TOOLBOX, archivedAt)],
@@ -491,5 +489,8 @@ test("S13: subfolder of an archived git repo opens as a directory workspace", as
   await openProject(h.session, TOOLBOX_FLOMO);
   const resp = getOpenResponse(h.emitted, "req-1");
   expect(resp?.error).toBeNull();
-  expect(resp?.workspace?.workspaceKind).toBe("directory");
+  expect(resp?.workspace?.workspaceKind).toBe("local_checkout");
+  expect(resp?.workspace?.projectId).toBe(`${TOOLBOX}#subpath:flomo-cli`);
+  expect(workspaceByCwd(h.workspaces, TOOLBOX)?.archivedAt).toBe(archivedAt);
+  expect(h.projects.get(TOOLBOX)?.archivedAt).toBe(archivedAt);
 });

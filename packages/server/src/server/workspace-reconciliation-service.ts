@@ -27,6 +27,11 @@ function chooseCanonicalProject(projects: PersistedProjectRecord[]): PersistedPr
     if (leftRemote !== rightRemote) {
       return leftRemote ? -1 : 1;
     }
+    const leftSubpath = left.projectId.includes("#subpath:");
+    const rightSubpath = right.projectId.includes("#subpath:");
+    if (leftSubpath !== rightSubpath) {
+      return leftSubpath ? -1 : 1;
+    }
     const createdAt = Date.parse(left.createdAt) - Date.parse(right.createdAt);
     if (createdAt !== 0) {
       return createdAt;

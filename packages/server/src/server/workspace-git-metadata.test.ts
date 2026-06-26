@@ -186,6 +186,20 @@ describe("buildWorkspaceGitMetadataFromSnapshot", () => {
     expect(result.projectDisplayName).toBe("acme/widgets");
   });
 
+  test("includes repo-relative subpaths in the display name for git subdirectories", () => {
+    const result = buildWorkspaceGitMetadataFromSnapshot({
+      cwd: "/repos/widgets/packages/server",
+      directoryName: "server",
+      isGit: true,
+      repoRoot: "/repos/widgets",
+      mainRepoRoot: null,
+      currentBranch: "main",
+      remoteUrl: "git@github.com:acme/widgets.git",
+    });
+
+    expect(result.projectDisplayName).toBe("acme/widgets/packages/server");
+  });
+
   test("uses owner/repo as the display name for non-GitHub remotes", () => {
     const result = buildWorkspaceGitMetadataFromSnapshot({
       cwd: "/repos/random-name",

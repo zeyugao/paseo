@@ -204,13 +204,15 @@ test("createWorkspaceForDirectory always mints a fresh workspace even when one a
   expect(await workspaceRegistry.list()).toHaveLength(2);
 });
 
-test("findOrCreateProjectForDirectory reuses the active project for the same root", async () => {
+test("findOrCreateProjectForDirectory creates a subpath project under an active git root", async () => {
   const repo = path.join(tmpDir, "repo");
   gitRoots.add(repo);
 
   const first = await provisioning.findOrCreateProjectForDirectory(repo);
   const second = await provisioning.findOrCreateProjectForDirectory(path.join(repo, "sub"));
 
-  expect(second.projectId).toBe(first.projectId);
-  expect(await projectRegistry.list()).toHaveLength(1);
+  expect(first.projectId).toBe(repo);
+  expect(second.projectId).toBe(`${repo}#subpath:sub`);
+  expect(second.displayName).toBe("repo/sub");
+  expect(await projectRegistry.list()).toHaveLength(2);
 });

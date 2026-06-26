@@ -59,13 +59,10 @@ export function createWorkspaceProvisioningService(deps: {
     options?: { refreshGit?: boolean },
   ): Promise<string> {
     const normalizedCwd = resolve(cwd);
-    if (options?.refreshGit === false) {
-      const snapshot = workspaceGitService.peekSnapshot(normalizedCwd);
-      return resolve(snapshot?.git.repoRoot ?? normalizedCwd);
+    if (options?.refreshGit !== false) {
+      await workspaceGitService.getCheckout(normalizedCwd);
     }
-
-    const checkout = await workspaceGitService.getCheckout(normalizedCwd);
-    return resolve(checkout.worktreeRoot ?? normalizedCwd);
+    return normalizedCwd;
   }
 
   async function findExactWorkspaceByDirectory(
@@ -84,12 +81,27 @@ export function createWorkspaceProvisioningService(deps: {
     const rootPath = input.membership.projectRootPath;
     const kind = input.membership.projectKind;
     const projects = await projectRegistry.list();
-    const existingProject =
+    const existingProject = projects.find(
+      (project) => project.projectId === input.membership.projectKey,
+    );
+
+    if (existingProject) {
+      return {
+        ...existingProject,
+        rootPath,
+        kind,
+        displayName: input.membership.projectName,
+        archivedAt: null,
+        updatedAt: input.timestamp,
+      };
+    }
+
+    const legacyProjectWithSameRoot =
       projects.find((project) => !project.archivedAt && project.rootPath === rootPath) ??
       projects.find((project) => project.rootPath === rootPath) ??
       null;
 
-    if (!existingProject) {
+    if (!legacyProjectWithSameRoot) {
       return createPersistedProjectRecord({
         projectId: input.membership.projectKey,
         rootPath,
@@ -100,13 +112,15 @@ export function createWorkspaceProvisioningService(deps: {
       });
     }
 
-    return {
-      ...existingProject,
+    return createPersistedProjectRecord({
+      projectId: input.membership.projectKey,
       rootPath,
       kind,
-      archivedAt: null,
+      displayName: input.membership.projectName,
+      customName: legacyProjectWithSameRoot.customName,
+      createdAt: legacyProjectWithSameRoot.createdAt,
       updatedAt: input.timestamp,
-    };
+    });
   }
 
   async function reclassifyOrUnarchiveWorkspaceForDirectory(input: {

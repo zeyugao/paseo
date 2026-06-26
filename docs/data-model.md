@@ -426,10 +426,13 @@ Array of project records.
 | `updatedAt`   | `string` (ISO 8601)         |                                          |
 | `archivedAt`  | `string \| null` (ISO 8601) | Soft-delete timestamp; required nullable |
 
-Active git projects are unique by normalized `rootPath`. Startup reconciliation repairs older bad
-states by moving workspaces from duplicate path-keyed projects onto the canonical project,
-preferring remote-keyed project IDs such as `remote:github.com/owner/repo`, then archiving the
-emptied duplicate.
+Active git project ids are derived from the git remote (or main repo root) plus an optional
+repo-relative subpath. The repo root keeps the base id such as
+`remote:github.com/owner/repo`; a git subdirectory uses
+`remote:github.com/owner/repo#subpath:packages/app` and its display name includes the same
+subpath (`owner/repo/packages/app`). Startup reconciliation still repairs older duplicate
+records that point at the same normalized `rootPath`, preferring subpath-aware remote-keyed
+project IDs, then archiving the emptied duplicate.
 
 ---
 

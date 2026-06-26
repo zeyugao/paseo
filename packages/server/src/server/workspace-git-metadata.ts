@@ -60,9 +60,10 @@ export function buildWorkspaceGitMetadataFromSnapshot(input: {
   const isWorktree =
     input.mainRepoRoot !== null && input.repoRoot !== null && input.mainRepoRoot !== input.repoRoot;
   const projectKey = deriveProjectGroupingKey({
-    cwd: input.repoRoot ?? input.cwd,
+    cwd: input.cwd,
     remoteUrl: input.remoteUrl,
     mainRepoRoot: input.mainRepoRoot,
+    worktreeRoot: input.repoRoot,
   });
   const projectDisplayName = projectKey.startsWith("remote:")
     ? deriveProjectGroupingName(projectKey)

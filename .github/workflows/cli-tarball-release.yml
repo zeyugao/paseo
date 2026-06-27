@@ -222,9 +222,16 @@ jobs:
           pack_workspace() {
             local workspace="$1"
             local asset_name="$2"
+            local pack_output
             local packed
 
-            packed="$(npm pack --workspace="$workspace" --pack-destination "$RUNNER_TEMP/paseo-tarballs" --silent)"
+            pack_output="$(npm pack --workspace="$workspace" --pack-destination "$RUNNER_TEMP/paseo-tarballs" --silent)"
+            packed="$(printf '%s\n' "$pack_output" | awk '/^[^[:space:]]+\.tgz$/ { name = $0 } END { print name }')"
+            if [[ -z "$packed" ]]; then
+              printf '%s\n' "$pack_output"
+              echo "Unable to determine npm pack tarball name for $workspace" >&2
+              return 1
+            fi
             mv "$RUNNER_TEMP/paseo-tarballs/$packed" "$RUNNER_TEMP/paseo-tarballs/$asset_name"
           }
 

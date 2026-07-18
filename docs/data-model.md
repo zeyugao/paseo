@@ -191,6 +191,9 @@ result. Normal config patches persist only the requested fields, so launch overr
 defaults never leak into the file. Startup-only fields remain compared with the daemon's launch
 snapshot so a mixed edit can apply its live subset and still name the paths that require restart.
 
+Configuration saves are atomic. When `config.json` is a symbolic link, Paseo writes and atomically
+replaces the link target in its own directory, preserving the symbolic link itself.
+
 ```
 {
   version: 1,

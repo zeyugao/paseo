@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 
@@ -369,6 +369,17 @@ function getConfigPath(paseoHome: string): string {
   return path.join(paseoHome, CONFIG_FILENAME);
 }
 
+function getConfigWritePath(configPath: string): string {
+  try {
+    return lstatSync(configPath).isSymbolicLink() ? realpathSync(configPath) : configPath;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return configPath;
+    }
+    throw error;
+  }
+}
+
 function getLogger(logger: LoggerLike | undefined): LoggerLike | undefined {
   return logger?.child({ module: "config" });
 }
@@ -480,7 +491,10 @@ export function savePersistedConfig(
   }
 
   try {
-    writePrivateFileAtomicSync(configPath, JSON.stringify(result.data, null, 2) + "\n");
+    const configWritePath = getConfigWritePath(configPath);
+    writePrivateFileAtomicSync(configWritePath, JSON.stringify(result.data, null, 2) + "\n", {
+      ensurePrivateParent: configWritePath === configPath,
+    });
     log?.info(`Saved to ${configPath}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

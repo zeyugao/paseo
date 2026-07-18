@@ -1,4 +1,13 @@
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -12,6 +21,7 @@ import { PRIVATE_FILE_MODE } from "./private-files.js";
 
 const MODE_MASK = 0o777;
 const PERMISSIVE_FILE_MODE = 0o644;
+const SHARED_DIRECTORY_MODE = 0o755;
 
 function createTempHome(): string {
   return mkdtempSync(path.join(tmpdir(), "paseo-config-"));
@@ -777,6 +787,40 @@ describe.skipIf(process.platform === "win32")("persisted config file permissions
       expect(modeOf(path.join(home, "config.json"))).toBe(PRIVATE_FILE_MODE);
     } finally {
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("saves through a config.json symlink without replacing the link", () => {
+    const home = createTempHome();
+    const targetHome = createTempHome();
+    const configPath = path.join(home, "config.json");
+    const targetPath = path.join(targetHome, "config.json");
+    try {
+      chmodSync(targetHome, SHARED_DIRECTORY_MODE);
+      writeFileSync(targetPath, "{}\n");
+      symlinkSync(targetPath, configPath);
+
+      savePersistedConfig(home, {
+        providers: {
+          openai: {
+            apiKey: "secret",
+          },
+        },
+      });
+
+      expect(lstatSync(configPath).isSymbolicLink()).toBe(true);
+      expect(JSON.parse(readFileSync(targetPath, "utf-8"))).toEqual({
+        providers: {
+          openai: {
+            apiKey: "secret",
+          },
+        },
+      });
+      expect(modeOf(targetPath)).toBe(PRIVATE_FILE_MODE);
+      expect(modeOf(targetHome)).toBe(SHARED_DIRECTORY_MODE);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(targetHome, { recursive: true, force: true });
     }
   });
 });

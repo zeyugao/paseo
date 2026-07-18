@@ -26,8 +26,11 @@ export function ensurePrivateFile(filePath: string): void {
 export function writePrivateFileAtomicSync(
   filePath: string,
   data: string | NodeJS.ArrayBufferView,
+  options: { ensurePrivateParent?: boolean } = {},
 ): void {
-  ensurePrivateDirectory(path.dirname(filePath));
+  if (options.ensurePrivateParent !== false) {
+    ensurePrivateDirectory(path.dirname(filePath));
+  }
   const parent = path.dirname(filePath);
   const temporary = path.join(parent, `.${path.basename(filePath)}.${process.pid}.${randomUUID()}`);
   try {

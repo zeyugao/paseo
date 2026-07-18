@@ -60,6 +60,23 @@ async function loadCheckoutGitWithRevParseTopLevelOutput(stdout: string) {
   return { getCheckoutStatus: checkoutGit.getCheckoutStatus, runGitCommand };
 }
 
+async function loadCheckoutGitWithRevParseTopLevelError(message: string) {
+  vi.resetModules();
+
+  const runGitCommand = vi.fn(async (args: string[]) => {
+    if (args.join(" ") === "rev-parse --show-toplevel") {
+      throw new Error(message);
+    }
+
+    throw new Error(`Unexpected git command: git ${args.join(" ")}`);
+  });
+
+  vi.doMock("./run-git-command.js", () => ({ runGitCommand }));
+
+  const checkoutGit = await import("./checkout-git.js");
+  return { getCheckoutStatus: checkoutGit.getCheckoutStatus, runGitCommand };
+}
+
 describe("checkout git rev-parse path handling", () => {
   afterEach(() => {
     vi.doUnmock("./run-git-command.js");
@@ -105,5 +122,16 @@ describe("checkout git rev-parse path handling", () => {
       ["rev-parse", "--git-common-dir"],
       expect.anything(),
     );
+  });
+
+  it("treats Git's filesystem-boundary discovery failure as a non-git directory", async () => {
+    const { getCheckoutStatus, runGitCommand } = await loadCheckoutGitWithRevParseTopLevelError(
+      "Git command failed: git rev-parse --show-toplevel (exit code: 128, signal: none)\n" +
+        "fatal: not a git repository (or any parent up to mount point /home)\n" +
+        "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).",
+    );
+
+    await expect(getCheckoutStatus("/Code/query")).resolves.toEqual({ isGit: false });
+    expect(runGitCommand).toHaveBeenCalledTimes(1);
   });
 });

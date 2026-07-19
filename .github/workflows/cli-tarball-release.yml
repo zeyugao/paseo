@@ -128,6 +128,9 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build server dependencies
+        run: npm run build:server-deps
+
       - name: Pack server tarball
         shell: bash
         run: |

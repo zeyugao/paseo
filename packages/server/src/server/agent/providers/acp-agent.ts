@@ -1424,6 +1424,8 @@ export class ACPAgentClient implements AgentClient {
       async sessionUpdate(params): Promise<void> {
         await onSessionUpdate?.(params);
       },
+      // Probes only discover catalog metadata, so vendor extensions are informational.
+      async extNotification(): Promise<void> {},
       async readTextFile(params: ReadTextFileRequest) {
         const content = await fs.readFile(params.path, "utf8");
         return { content };

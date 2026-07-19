@@ -2072,6 +2072,34 @@ describe("ACPAgentClient sessionResponseTransformer", () => {
 });
 
 describe("ACPAgentClient fetchCatalog", () => {
+  test("acknowledges vendor MCP notifications during a catalog probe", async () => {
+    class TestACPAgentClient extends ACPAgentClient {
+      getProbeClient() {
+        return this.buildProbeClient();
+      }
+    }
+
+    const client = new TestACPAgentClient({
+      provider: "grok",
+      logger: createTestLogger(),
+      defaultCommand: ["grok", "agent", "stdio"],
+      defaultModes: [],
+    });
+    const probeClient = client.getProbeClient();
+
+    expect(probeClient.extNotification).toEqual(expect.any(Function));
+    await expect(
+      Promise.all([
+        probeClient.extNotification!("_x.ai/mcp/servers_updated", { mcpServers: [] }),
+        probeClient.extNotification!("_x.ai/mcp_initialized", {
+          sessionId: "session-1",
+          mcpToolCount: 0,
+          elapsedMs: 0,
+        }),
+      ]),
+    ).resolves.toEqual([undefined, undefined]);
+  });
+
   test("passes the requested cwd to the catalog probe", async () => {
     const newSession = vi.fn().mockResolvedValue({ modes: null, models: null, configOptions: [] });
 

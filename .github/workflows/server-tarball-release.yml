@@ -1,0 +1,115 @@
+name: Server Tarball Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: server-tarball-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: "server-latest"
+
+jobs:
+  publish-server-tarball:
+    permissions:
+      contents: write
+      packages: read
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update rolling server tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$RELEASE_TAG" --force
+
+      - name: Ensure GitHub release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "${{ github.repository }}" \
+              --title "Paseo Server latest" \
+              --notes "Rolling server tarball build from ${GITHUB_SHA}." \
+              --prerelease
+            exit 0
+          fi
+
+          if ! gh release create "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --target "$GITHUB_SHA" \
+            --title "Paseo Server latest" \
+            --notes "Rolling server tarball build from ${GITHUB_SHA}." \
+            --prerelease; then
+            echo "Release creation raced with another workflow; continuing."
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@boudra"
+
+      - name: Install JS dependencies
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build server dependencies
+        run: npm run build:server-deps
+
+      - name: Pack server tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          output_dir="$RUNNER_TEMP/paseo-server-tarball"
+          mkdir -p "$output_dir"
+
+          set +e
+          pack_output="$(npm pack --workspace=@getpaseo/server --pack-destination "$output_dir" 2>&1)"
+          pack_status=$?
+          set -e
+          if (( pack_status != 0 )); then
+            printf '%s\n' "$pack_output"
+            exit "$pack_status"
+          fi
+
+          packed="$(printf '%s\n' "$pack_output" | awk '/^[^[:space:]]+\.tgz$/ { name = $0 } END { print name }')"
+          if [[ -z "$packed" ]]; then
+            printf '%s\n' "$pack_output"
+            echo "Unable to determine the server tarball name" >&2
+            exit 1
+          fi
+
+          mv "$output_dir/$packed" "$output_dir/paseo-server.tgz"
+
+      - name: Upload server tarball to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload \
+            "$RELEASE_TAG" \
+            "$RUNNER_TEMP/paseo-server-tarball/paseo-server.tgz" \
+            --clobber \
+            --repo "${{ github.repository }}"

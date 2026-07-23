@@ -112,7 +112,7 @@ npm run release:patch
 npm run release:minor
 ```
 
-This bumps the version across all workspaces, runs checks, publishes to npm, and pushes the branch + tag. The tag push triggers `Desktop Release`, `Android APK Release`, `Docker`, and `Release Notes Sync` on GitHub Actions. The workflows create the GitHub Release as a draft while builds and release-note sync run. EAS picks up the same tag via the EAS GitHub app and starts the iOS + Android store builds in parallel (see "Mobile builds (EAS)" below) — there is no mobile-release workflow under `.github/workflows`.
+This bumps the version across all workspaces, runs checks, publishes to npm, and pushes the branch + tag. The tag push triggers `Desktop Release`, `Android APK Release`, `CLI Tarball Release`, `Docker`, and `Release Notes Sync` on GitHub Actions. The workflows create the GitHub Release as a draft while builds and release-note sync run. EAS picks up the same tag via the EAS GitHub app and starts the iOS + Android store builds in parallel (see "Mobile builds (EAS)" below) — there is no mobile-release workflow under `.github/workflows`.
 
 After the stable release succeeds, move npm's `beta` pointer to the new stable
 version for every published package. This changes dist-tags only; do not
@@ -402,6 +402,16 @@ npm install -g https://github.com/getpaseo/paseo/releases/latest/download/paseo-
 ```
 
 Before packing, the workflow rewrites internal `@getpaseo/*` dependencies in the temporary checkout to point at the current release's tarball URLs, for example `https://github.com/getpaseo/paseo/releases/download/cli-latest/paseo-server.tgz` on rolling builds or `https://github.com/getpaseo/paseo/releases/download/v0.1.97/paseo-server.tgz` on stable builds. The top-level stable install URL can use GitHub's `latest` redirect, but internal dependencies must stay pinned to the same release target so a new CLI install cannot mix one build's CLI with another build's server/client/protocol packages.
+
+## Rolling server tarball asset
+
+The `Server Tarball Release` workflow (`.github/workflows/server-tarball-release.yml`) runs on every push to `main` and on manual dispatch. It updates the rolling `server-latest` prerelease with a server-only `paseo-server.tgz` without changing the versioned GitHub Release assets managed by `CLI Tarball Release`. The asset has a fixed download URL:
+
+```text
+https://github.com/getpaseo/paseo/releases/download/server-latest/paseo-server.tgz
+```
+
+`Server Tarball Release` does not run on `v*` tag pushes. This prevents the standalone server workflow and the CLI bundle workflow from racing to replace the same `paseo-server.tgz` asset on a versioned release.
 
 ## Website behavior
 

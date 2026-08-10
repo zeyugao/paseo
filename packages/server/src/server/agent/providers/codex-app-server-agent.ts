@@ -2160,6 +2160,25 @@ const ThreadStartedNotificationSchema = z
   })
   .passthrough();
 
+const CodexThreadRuntimeStatusSchema = z.enum(["notLoaded", "idle", "systemError", "active"]);
+
+const ThreadStatusChangedNotificationSchema = z
+  .object({
+    threadId: z.string(),
+    status: z
+      .object({
+        type: CodexThreadRuntimeStatusSchema,
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+const ThreadClosedNotificationSchema = z
+  .object({
+    threadId: z.string(),
+  })
+  .passthrough();
+
 const TurnStartedNotificationSchema = z
   .object({
     threadId: z.string().optional(),
@@ -2461,6 +2480,12 @@ const CodexEventThreadRolledBackNotificationSchema = z
 
 type ParsedCodexNotification =
   | { kind: "thread_started"; threadId: string }
+  | {
+      kind: "thread_status_changed";
+      threadId: string;
+      status: z.infer<typeof CodexThreadRuntimeStatusSchema>;
+    }
+  | { kind: "thread_closed"; threadId: string }
   | { kind: "turn_started"; turnId: string; threadId: string | null }
   | {
       kind: "turn_completed";
@@ -2591,6 +2616,40 @@ const CodexNotificationSchema = z.union([
       }),
     ),
   z.object({ method: z.literal("thread/started"), params: z.unknown() }).transform(
+    ({ method, params }): ParsedCodexNotification => ({
+      kind: "invalid_payload",
+      method,
+      params,
+    }),
+  ),
+  z
+    .object({
+      method: z.literal("thread/status/changed"),
+      params: ThreadStatusChangedNotificationSchema,
+    })
+    .transform(
+      ({ params }): ParsedCodexNotification => ({
+        kind: "thread_status_changed",
+        threadId: params.threadId,
+        status: params.status.type,
+      }),
+    ),
+  z.object({ method: z.literal("thread/status/changed"), params: z.unknown() }).transform(
+    ({ method, params }): ParsedCodexNotification => ({
+      kind: "invalid_payload",
+      method,
+      params,
+    }),
+  ),
+  z
+    .object({ method: z.literal("thread/closed"), params: ThreadClosedNotificationSchema })
+    .transform(
+      ({ params }): ParsedCodexNotification => ({
+        kind: "thread_closed",
+        threadId: params.threadId,
+      }),
+    ),
+  z.object({ method: z.literal("thread/closed"), params: z.unknown() }).transform(
     ({ method, params }): ParsedCodexNotification => ({
       kind: "invalid_payload",
       method,
@@ -5309,6 +5368,12 @@ export class CodexAppServerAgentSession implements AgentSession {
       case "thread_started":
         this.emitSubAgentActivityUpdate(callId, "running", { reopen: true });
         return;
+      case "thread_status_changed":
+        this.handleSubAgentThreadStatusChanged(callId, parsed.status);
+        return;
+      case "thread_closed":
+        this.handleSubAgentThreadStatusChanged(callId, "notLoaded");
+        return;
       case "turn_started":
       case "turn_completed":
       case "agent_message_delta":
@@ -5352,6 +5417,9 @@ export class CodexAppServerAgentSession implements AgentSession {
     switch (parsed.kind) {
       case "thread_started":
         this.handleThreadStartedNotification(parsed);
+        return;
+      case "thread_status_changed":
+      case "thread_closed":
         return;
       case "turn_started":
         this.handleTurnStartedNotification(parsed);
@@ -5974,6 +6042,29 @@ export class CodexAppServerAgentSession implements AgentSession {
       provider: CODEX_PROVIDER,
       sessionId: parsed.threadId,
     });
+  }
+
+  private handleSubAgentThreadStatusChanged(
+    callId: string,
+    status: z.infer<typeof CodexThreadRuntimeStatusSchema>,
+  ): void {
+    if (status === "active") {
+      this.emitSubAgentActivityUpdate(callId, "running");
+      return;
+    }
+    const state = this.subAgentCallsByCallId.get(callId);
+    if (!state || state.toolCall.status !== "running") {
+      return;
+    }
+    if (status === "systemError") {
+      this.emitSubAgentActivityUpdate(callId, "failed");
+      return;
+    }
+    if (status === "notLoaded") {
+      this.emitSubAgentActivityUpdate(callId, "canceled");
+      return;
+    }
+    this.emitSubAgentActivityUpdate(callId, "completed");
   }
 
   private handleTurnStartedNotification(

@@ -521,6 +521,16 @@ function emitCodexUserMessage(
   );
 }
 
+function providerSubagentStatuses(events: AgentStreamEvent[], subagentId: string) {
+  return events.flatMap((event) =>
+    event.type === "provider_subagent" &&
+    event.event.type === "upsert" &&
+    event.event.id === subagentId
+      ? [event.event.status]
+      : [],
+  );
+}
+
 type CapturedFakeCodexRecord = Record<string, unknown>;
 
 async function runCustomCodexProviderTurn(
@@ -2731,6 +2741,80 @@ describe("Codex app-server provider", () => {
     } finally {
       await session.close();
     }
+  });
+
+  test("settles a Codex subagent from its idle thread status", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("item/completed", {
+      threadId: "test-thread",
+      item: {
+        type: "subAgentActivity",
+        id: "spawn-idle-child",
+        kind: "started",
+        agentThreadId: "idle-child-thread",
+        agentPath: "/root/idle-child",
+      },
+    });
+    asInternals(session).handleNotification("thread/status/changed", {
+      threadId: "idle-child-thread",
+      status: { type: "idle" },
+    });
+
+    const statuses = providerSubagentStatuses(events, "idle-child-thread");
+    expect(statuses).toEqual(["running", "completed"]);
+  });
+
+  test("cancels a running Codex subagent when its thread closes", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("item/completed", {
+      threadId: "test-thread",
+      item: {
+        type: "subAgentActivity",
+        id: "spawn-closed-child",
+        kind: "started",
+        agentThreadId: "closed-child-thread",
+        agentPath: "/root/closed-child",
+      },
+    });
+    asInternals(session).handleNotification("thread/closed", {
+      threadId: "closed-child-thread",
+    });
+
+    const statuses = providerSubagentStatuses(events, "closed-child-thread");
+    expect(statuses).toEqual(["running", "canceled"]);
+  });
+
+  test("preserves a completed Codex subagent when its thread closes", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("item/completed", {
+      threadId: "test-thread",
+      item: {
+        type: "subAgentActivity",
+        id: "spawn-closed-completed-child",
+        kind: "started",
+        agentThreadId: "closed-completed-child-thread",
+        agentPath: "/root/closed-completed-child",
+      },
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      threadId: "closed-completed-child-thread",
+      turn: { status: "completed" },
+    });
+    asInternals(session).handleNotification("thread/closed", {
+      threadId: "closed-completed-child-thread",
+    });
+
+    const statuses = providerSubagentStatuses(events, "closed-completed-child-thread");
+    expect(statuses).toEqual(["running", "completed"]);
   });
 
   test("updates a registered child with its later native activity name", () => {

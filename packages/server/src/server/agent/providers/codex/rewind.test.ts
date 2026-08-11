@@ -95,6 +95,14 @@ describe("Codex Rewind", () => {
       cwd: "/workspace/project",
       model: "gpt-5.4-mini",
       serviceTier: null,
+      config: {
+        mcp_servers: {
+          paseo: {
+            url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1",
+            http_headers: { Authorization: "Bearer runtime-token" },
+          },
+        },
+      },
       userMessageTurns,
       setThreadId: (threadId) => {
         reboundThreadId = threadId;
@@ -107,6 +115,14 @@ describe("Codex Rewind", () => {
         cwd: "/workspace/project",
         model: "gpt-5.4-mini",
         serviceTier: null,
+        config: {
+          mcp_servers: {
+            paseo: {
+              url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1",
+              http_headers: { Authorization: "Bearer runtime-token" },
+            },
+          },
+        },
         excludeTurns: false,
         persistExtendedHistory: true,
       },

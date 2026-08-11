@@ -1667,7 +1667,16 @@ describe("Codex app-server provider", () => {
   test("rewinds the conversation to a freshly emitted Codex user message id", async () => {
     const appServer = createFakeCodexAppServer();
     const session = new CodexAppServerAgentSession(
-      createConfig({ cwd: "/workspace/project" }),
+      createConfig({
+        cwd: "/workspace/project",
+        mcpServers: {
+          paseo: {
+            type: "http",
+            url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1",
+            headers: { Authorization: "Bearer runtime-token" },
+          },
+        },
+      }),
       null,
       createTestLogger(),
       async () => appServer.child,
@@ -1682,6 +1691,24 @@ describe("Codex app-server provider", () => {
 
     await session.revertConversation({ messageId: "codex-first" });
 
+    expect(appServer.recordedForks).toEqual([
+      {
+        threadId: "thread-1",
+        cwd: "/workspace/project",
+        model: "gpt-5.4",
+        serviceTier: null,
+        config: {
+          mcp_servers: {
+            paseo: {
+              url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1",
+              http_headers: { Authorization: "Bearer runtime-token" },
+            },
+          },
+        },
+        excludeTurns: false,
+        persistExtendedHistory: true,
+      },
+    ]);
     expect(appServer.recordedRollbacks).toEqual([{ threadId: "forked-thread", numTurns: 2 }]);
     await expect(session.getRuntimeInfo()).resolves.toMatchObject({
       sessionId: "forked-thread",

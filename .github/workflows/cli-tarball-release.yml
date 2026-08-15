@@ -136,6 +136,9 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build server dependencies
+        run: npm run build:server-deps
+
       - name: Rewrite internal dependencies to release tarballs
         env:
           REPOSITORY: ${{ github.repository }}
@@ -223,9 +226,18 @@ jobs:
             local workspace="$1"
             local asset_name="$2"
             local pack_output
+            local pack_status
             local packed
 
-            pack_output="$(npm pack --workspace="$workspace" --pack-destination "$RUNNER_TEMP/paseo-tarballs" --silent)"
+            set +e
+            pack_output="$(npm pack --workspace="$workspace" --pack-destination "$RUNNER_TEMP/paseo-tarballs" 2>&1)"
+            pack_status=$?
+            set -e
+            if (( pack_status != 0 )); then
+              printf '%s\n' "$pack_output"
+              return "$pack_status"
+            fi
+
             packed="$(printf '%s\n' "$pack_output" | awk '/^[^[:space:]]+\.tgz$/ { name = $0 } END { print name }')"
             if [[ -z "$packed" ]]; then
               printf '%s\n' "$pack_output"

@@ -177,6 +177,11 @@ jobs:
               assetName: "paseo-client.tgz",
             },
             {
+              name: "@paseo/plugin",
+              path: "packages/plugin/package.json",
+              assetName: "paseo-plugin.tgz",
+            },
+            {
               name: "@getpaseo/server",
               path: "packages/server/package.json",
               assetName: "paseo-server.tgz",
@@ -251,6 +256,7 @@ jobs:
           pack_workspace "@getpaseo/relay" "paseo-relay.tgz"
           pack_workspace "@getpaseo/protocol" "paseo-protocol.tgz"
           pack_workspace "@getpaseo/client" "paseo-client.tgz"
+          pack_workspace "@paseo/plugin" "paseo-plugin.tgz"
           pack_workspace "@getpaseo/server" "paseo-server.tgz"
           pack_workspace "@getpaseo/cli" "paseo-cli.tgz"
 

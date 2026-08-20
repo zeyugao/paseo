@@ -9,11 +9,16 @@ import { runInNewContext } from "node:vm";
 
 const repoRoot = new URL("../", import.meta.url);
 const ciWorkflowPath = new URL(".github/workflows/ci.yml", repoRoot);
+const cliTarballReleaseWorkflowPath = new URL(
+  ".github/workflows/cli-tarball-release.yml",
+  repoRoot,
+);
 const dockerWorkflowPath = new URL(".github/workflows/docker.yml", repoRoot);
 const nixWorkflowPath = new URL(".github/workflows/nix.yml", repoRoot);
 const filtersPath = new URL(".github/ci-paths.yml", repoRoot);
 const serverTsconfigPath = new URL("packages/server/tsconfig.server.json", repoRoot);
 const desktopPackagePath = new URL("packages/desktop/package.json", repoRoot);
+const pluginPackagePath = new URL("packages/plugin/package.json", repoRoot);
 
 const gatedCiJobs = new Map([
   ["quality", { name: "quality", contracts: ["format", "quality", "relay", "sdk"] }],
@@ -155,6 +160,32 @@ test("focused contracts stay inside existing required checks", () => {
   assert.match(desktop, /npm run test --workspace=@getpaseo\/desktop/);
   assert.ok(!jobs.has("desktop-browser-bridge"));
   assert.ok(!jobs.has("playwright-desktop"));
+});
+
+test("CLI tarball release packs the plugin workspace before advancing cli-latest", () => {
+  const workflowSource = readFileSync(cliTarballReleaseWorkflowPath, "utf8");
+  const pluginPackage = JSON.parse(readFileSync(pluginPackagePath, "utf8"));
+
+  assert.match(
+    workflowSource,
+    new RegExp(
+      `name: "${pluginPackage.name}",\\s+path: "packages/plugin/package\\.json",\\s+assetName: "paseo-plugin\\.tgz",`,
+    ),
+  );
+  assert.match(
+    workflowSource,
+    new RegExp(`pack_workspace "${pluginPackage.name}" "paseo-plugin\\.tgz"`),
+  );
+
+  const packTarballs = workflowSource.indexOf("- name: Pack workspace tarballs");
+  const updateTag = workflowSource.indexOf("- name: Update rolling CLI tag");
+  const ensureRelease = workflowSource.indexOf("- name: Ensure GitHub release exists");
+  const uploadTarballs = workflowSource.indexOf("- name: Upload tarballs to GitHub Release");
+
+  assert.ok(packTarballs >= 0);
+  assert.ok(updateTag > packTarballs);
+  assert.ok(ensureRelease > updateTag);
+  assert.ok(uploadTarballs > ensureRelease);
 });
 
 test("server builds exclude test utilities at every domain depth", () => {

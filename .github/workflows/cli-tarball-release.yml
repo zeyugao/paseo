@@ -67,61 +67,6 @@ jobs:
             echo "IS_ROLLING_CLI_RELEASE=true"
           } >> "$GITHUB_ENV"
 
-      - name: Update rolling CLI tag
-        if: env.IS_ROLLING_CLI_RELEASE == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
-          git push origin "refs/tags/$RELEASE_TAG" --force
-
-      - name: Ensure GitHub release exists
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            if [[ "$IS_ROLLING_CLI_RELEASE" == "true" ]]; then
-              gh release edit "$RELEASE_TAG" \
-                --repo "${{ github.repository }}" \
-                --title "Paseo CLI latest" \
-                --notes "Rolling CLI tarball build from ${GITHUB_SHA}." \
-                --prerelease
-            fi
-            exit 0
-          fi
-
-          release_args=(
-            release create "$RELEASE_TAG"
-            --repo "${{ github.repository }}"
-          )
-
-          if [[ "$IS_ROLLING_CLI_RELEASE" == "true" ]]; then
-            release_args+=(
-              --target "$GITHUB_SHA"
-              --title "Paseo CLI latest"
-              --notes "Rolling CLI tarball build from ${GITHUB_SHA}."
-              --prerelease
-            )
-          else
-            release_args+=(
-              --title "Paseo $RELEASE_TAG"
-              --notes ""
-            )
-          fi
-
-          if [[ "$IS_PRERELEASE" == "true" && "$IS_ROLLING_CLI_RELEASE" != "true" ]]; then
-            release_args+=(--prerelease)
-          fi
-
-          if ! gh "${release_args[@]}"; then
-            echo "Release creation raced with another workflow; continuing."
-          fi
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -177,7 +122,7 @@ jobs:
               assetName: "paseo-client.tgz",
             },
             {
-              name: "@paseo/plugin",
+              name: "@getpaseo/plugin",
               path: "packages/plugin/package.json",
               assetName: "paseo-plugin.tgz",
             },
@@ -256,9 +201,64 @@ jobs:
           pack_workspace "@getpaseo/relay" "paseo-relay.tgz"
           pack_workspace "@getpaseo/protocol" "paseo-protocol.tgz"
           pack_workspace "@getpaseo/client" "paseo-client.tgz"
-          pack_workspace "@paseo/plugin" "paseo-plugin.tgz"
+          pack_workspace "@getpaseo/plugin" "paseo-plugin.tgz"
           pack_workspace "@getpaseo/server" "paseo-server.tgz"
           pack_workspace "@getpaseo/cli" "paseo-cli.tgz"
+
+      - name: Update rolling CLI tag
+        if: env.IS_ROLLING_CLI_RELEASE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$RELEASE_TAG" --force
+
+      - name: Ensure GitHub release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            if [[ "$IS_ROLLING_CLI_RELEASE" == "true" ]]; then
+              gh release edit "$RELEASE_TAG" \
+                --repo "${{ github.repository }}" \
+                --title "Paseo CLI latest" \
+                --notes "Rolling CLI tarball build from ${GITHUB_SHA}." \
+                --prerelease
+            fi
+            exit 0
+          fi
+
+          release_args=(
+            release create "$RELEASE_TAG"
+            --repo "${{ github.repository }}"
+          )
+
+          if [[ "$IS_ROLLING_CLI_RELEASE" == "true" ]]; then
+            release_args+=(
+              --target "$GITHUB_SHA"
+              --title "Paseo CLI latest"
+              --notes "Rolling CLI tarball build from ${GITHUB_SHA}."
+              --prerelease
+            )
+          else
+            release_args+=(
+              --title "Paseo $RELEASE_TAG"
+              --notes ""
+            )
+          fi
+
+          if [[ "$IS_PRERELEASE" == "true" && "$IS_ROLLING_CLI_RELEASE" != "true" ]]; then
+            release_args+=(--prerelease)
+          fi
+
+          if ! gh "${release_args[@]}"; then
+            echo "Release creation raced with another workflow; continuing."
+          fi
 
       - name: Upload tarballs to GitHub Release
         env:

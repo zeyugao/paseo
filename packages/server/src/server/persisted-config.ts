@@ -438,6 +438,7 @@ export function loadPersistedConfig(paseoHome: string, logger?: LoggerLike): Per
       writePrivateFileAtomicSync(
         configPath,
         JSON.stringify(DEFAULT_PERSISTED_CONFIG, null, 2) + "\n",
+        { preserveSymlink: true },
       );
       log?.info(`Initialized config file at ${configPath}`);
     } catch (err) {
@@ -584,7 +585,9 @@ export function savePersistedConfig(
   }
 
   try {
-    writePrivateFileAtomicSync(configPath, JSON.stringify(result.data, null, 2) + "\n");
+    writePrivateFileAtomicSync(configPath, JSON.stringify(result.data, null, 2) + "\n", {
+      preserveSymlink: true,
+    });
     log?.info(`Saved to ${configPath}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -1,6 +1,14 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 
 import { beforeEach, afterEach, describe, expect, test } from "vitest";
 
@@ -99,6 +107,58 @@ describe("workspace registries", () => {
     expect(await projectRegistry.get("remote:github.com/acme/repo")).toBeNull();
     expect(await projectRegistry.list()).toEqual([]);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "preserves symlinked project and workspace registry files",
+    async () => {
+      const projectsDirectory = path.join(tmpDir, "projects");
+      const targetDirectory = path.join(tmpDir, "registry-target");
+      mkdirSync(projectsDirectory, { recursive: true });
+      mkdirSync(targetDirectory, { recursive: true });
+
+      const projectPath = path.join(projectsDirectory, "projects.json");
+      const workspacePath = path.join(projectsDirectory, "workspaces.json");
+      const projectTargetPath = path.join(targetDirectory, "projects.json");
+      const workspaceTargetPath = path.join(targetDirectory, "workspaces.json");
+      writeFileSync(projectTargetPath, "[]\n");
+      writeFileSync(workspaceTargetPath, "[]\n");
+      symlinkSync(path.relative(projectsDirectory, projectTargetPath), projectPath);
+      symlinkSync(path.relative(projectsDirectory, workspaceTargetPath), workspacePath);
+
+      const project = createPersistedProjectRecord({
+        projectId: "project-symlink",
+        rootPath: "/tmp/project-symlink",
+        kind: "non_git",
+        displayName: "project-symlink",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      });
+      const workspace = createPersistedWorkspaceRecord({
+        workspaceId: "workspace-symlink",
+        projectId: project.projectId,
+        cwd: "/tmp/project-symlink",
+        kind: "directory",
+        displayName: "project-symlink",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      });
+
+      await projectRegistry.upsert(project);
+      await workspaceRegistry.upsert(workspace);
+
+      expect(lstatSync(projectPath).isSymbolicLink()).toBe(true);
+      expect(lstatSync(workspacePath).isSymbolicLink()).toBe(true);
+      expect(JSON.parse(readFileSync(projectTargetPath, "utf8"))).toEqual([project]);
+      expect(JSON.parse(readFileSync(workspaceTargetPath, "utf8"))).toEqual([workspace]);
+
+      const reloadedProjects = new FileBackedProjectRegistry(projectPath, logger);
+      const reloadedWorkspaces = new FileBackedWorkspaceRegistry(workspacePath, logger);
+      await reloadedProjects.initialize();
+      await reloadedWorkspaces.initialize();
+      expect(await reloadedProjects.get(project.projectId)).toEqual(project);
+      expect(await reloadedWorkspaces.get(workspace.workspaceId)).toEqual(workspace);
+    },
+  );
 
   test("preserves a concurrent project update when archiving", async () => {
     let pauseNextWrite = false;

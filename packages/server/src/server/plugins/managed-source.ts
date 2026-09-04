@@ -359,7 +359,9 @@ export class ManagedPluginSources {
     return stagingRoot;
   }
   private writeRecords(): void {
-    writePrivateFileAtomicSync(this.metadataPath, `${JSON.stringify(this.records, null, 2)}\n`);
+    writePrivateFileAtomicSync(this.metadataPath, `${JSON.stringify(this.records, null, 2)}\n`, {
+      preserveSymlink: true,
+    });
   }
 }
 

@@ -596,7 +596,9 @@ export class HubRelationshipController implements HubRelationshipManagement {
   }
 
   private persist(record: HubRelationshipRecord): void {
-    writePrivateFileAtomicSync(this.filePath, `${JSON.stringify(record, null, 2)}\n`);
+    writePrivateFileAtomicSync(this.filePath, `${JSON.stringify(record, null, 2)}\n`, {
+      preserveSymlink: true,
+    });
   }
 
   private remove(): void {

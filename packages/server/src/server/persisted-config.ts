@@ -1,5 +1,5 @@
 import { PluginRegistriesSchema } from "@getpaseo/protocol/plugin-registry";
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 
@@ -367,17 +367,6 @@ function getConfigPath(paseoHome: string): string {
   return path.join(paseoHome, CONFIG_FILENAME);
 }
 
-function getConfigWritePath(configPath: string): string {
-  try {
-    return lstatSync(configPath).isSymbolicLink() ? realpathSync(configPath) : configPath;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return configPath;
-    }
-    throw error;
-  }
-}
-
 function getLogger(logger: LoggerLike | undefined): LoggerLike | undefined {
   return logger?.child({ module: "config" });
 }
@@ -430,6 +419,7 @@ export function loadPersistedConfig(paseoHome: string, logger?: LoggerLike): Per
       writePrivateFileAtomicSync(
         configPath,
         JSON.stringify(DEFAULT_PERSISTED_CONFIG, null, 2) + "\n",
+        { preserveSymlink: true },
       );
       log?.info(`Initialized config file at ${configPath}`);
     } catch (err) {
@@ -576,9 +566,8 @@ export function savePersistedConfig(
   }
 
   try {
-    const configWritePath = getConfigWritePath(configPath);
-    writePrivateFileAtomicSync(configWritePath, JSON.stringify(result.data, null, 2) + "\n", {
-      ensurePrivateParent: configWritePath === configPath,
+    writePrivateFileAtomicSync(configPath, JSON.stringify(result.data, null, 2) + "\n", {
+      preserveSymlink: true,
     });
     log?.info(`Saved to ${configPath}`);
   } catch (err) {

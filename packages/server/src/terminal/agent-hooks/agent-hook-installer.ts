@@ -195,7 +195,7 @@ function updateAgentHookConfig<TConfig>(
   const nextRaw = install.format.stringify(nextConfig);
 
   if (currentRaw === null || nextRaw !== normalizeRawConfig(currentRaw)) {
-    writePrivateFileAtomicSync(configPath, nextRaw);
+    writePrivateFileAtomicSync(configPath, nextRaw, { preserveSymlink: true });
     return { configPath, changed: true };
   }
 

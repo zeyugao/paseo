@@ -62,7 +62,9 @@ export async function loadOrCreateDaemonKeyPair(
     secretKeyB64,
   };
 
-  writePrivateFileAtomicSync(filePath, JSON.stringify(payload, null, 2) + "\n");
+  writePrivateFileAtomicSync(filePath, JSON.stringify(payload, null, 2) + "\n", {
+    preserveSymlink: true,
+  });
   log?.info({ filePath }, "Saved daemon keypair");
 
   return { keyPair, publicKeyB64 };

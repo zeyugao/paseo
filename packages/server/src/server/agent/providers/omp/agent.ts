@@ -34,6 +34,8 @@ import {
   type ListImportableSessionsOptions,
   type ProviderCatalog,
   type ProviderRefreshContext,
+  type SteerActiveTurnOptions,
+  type SteerResult,
   type ToolCallDetail,
 } from "../../agent-sdk-types.js";
 import type { PaseoToolCatalog } from "../../tools/types.js";
@@ -114,6 +116,7 @@ const QUESTION_RESPONSE_HEADER = "Response";
 const QUESTION_COMMENT_HEADER = "Comment";
 const OMP_ASK_USER_FREEFORM_SENTINEL = "✏️ Type custom response...";
 const COMBINED_ASK_USER_METADATA = "ask_user_select_optional_comment";
+const OMP_STEER_DRAIN_TIMEOUT_MS = 2_000;
 
 const OMP_CORE_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
@@ -886,6 +889,14 @@ export class OmpAgentSession implements AgentSession {
   private activeTurnTerminalAssistantMessage: OmpAgentMessage | null = null;
   private activeTurnStarted = false;
   private activeTurnHasUserMessage = false;
+  private pendingSteerSubmissions: Array<{ text: string; clientMessageId: string | null }> = [];
+  private suppressingUnreadSteerRun = false;
+  private pendingSteerDrain: {
+    promise: Promise<boolean>;
+    resolve: (drained: boolean) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+  private steerDrainBlocked = false;
   private activeNoTurnPromptText: string | null = null;
   private readonly pendingNoTurnOutputs: Array<{ turnId: string; message: string }> = [];
   private activePromptRequestId: string | null = null;
@@ -985,6 +996,10 @@ export class OmpAgentSession implements AgentSession {
     if (this.activeTurnId) {
       throw new Error("An OMP turn is already active");
     }
+    await this.waitForPendingSteerDrain();
+    if (this.activeTurnId) {
+      throw new Error("An OMP turn became active while waiting for queued steers");
+    }
 
     const payload = convertPromptInput(prompt, { model: this.state.model });
     const turnId = randomUUID();
@@ -996,6 +1011,8 @@ export class OmpAgentSession implements AgentSession {
     this.activeTurnStarted = false;
     this.activeTurnHasUserMessage = false;
     this.activePromptRequestId = null;
+    this.pendingSteerSubmissions = [];
+    this.suppressingUnreadSteerRun = false;
     this.clearNoTurnBuffers();
     this.activeNoTurnPromptText = payload.text;
     this.usagePoller.startTurn();
@@ -1030,6 +1047,7 @@ export class OmpAgentSession implements AgentSession {
         this.activeTurnHasUserMessage = false;
         this.activeAssistantMessageId = null;
         this.activeTurnTerminalAssistantMessage = null;
+        this.pendingSteerSubmissions = [];
         this.clearNoTurnBuffers();
         if (isOmpRequestAbortError(error)) {
           this.emit({
@@ -1050,6 +1068,41 @@ export class OmpAgentSession implements AgentSession {
     })();
 
     return { turnId };
+  }
+
+  async steerActiveTurn(
+    prompt: AgentPromptInput,
+    options: SteerActiveTurnOptions,
+  ): Promise<SteerResult> {
+    // Slash commands own their dispatch path (compact, handoff, /steer, ...); never inject
+    // them into a running turn.
+    if (typeof prompt === "string" && this.parseSlashCommandInput(prompt)) {
+      return { status: "unavailable" };
+    }
+    if (this.activeTurnId !== options.expectedTurnId) {
+      return { status: "unavailable" };
+    }
+    const payload = convertPromptInput(prompt, { model: this.state.model });
+    this.runtimeSession.steer(payload.text, payload.images);
+    // OMP echoes the steered message back as a user message_end; the submission lets that
+    // echo reconcile against the optimistic row instead of the turn's original prompt.
+    this.pendingSteerSubmissions.push({
+      text: payload.text,
+      clientMessageId: options.clientMessageId ?? null,
+    });
+    if (options.clearPendingPermissions) {
+      this.denyPendingPermissionsSupersededBySteer();
+    }
+    return { status: "accepted" };
+  }
+
+  private denyPendingPermissionsSupersededBySteer(): void {
+    for (const requestId of this.pendingExtensionUiRequests.keys()) {
+      if (!this.pendingExtensionUiRequests.has(requestId)) {
+        continue;
+      }
+      void this.respondToPermission(requestId, { behavior: "deny" });
+    }
   }
 
   subscribe(callback: (event: AgentStreamEvent) => void): () => void {
@@ -1153,6 +1206,13 @@ export class OmpAgentSession implements AgentSession {
 
   async interrupt(): Promise<void> {
     const turnId = this.activeTurnId;
+    // OMP has no clear_queue RPC: a steer it has not read yet survives abort and starts a
+    // phantom run. Keep the submissions so that run can be re-aborted and swallowed instead
+    // of resuming the turn the user just stopped.
+    if (this.pendingSteerSubmissions.length > 0) {
+      this.beginPendingSteerDrain();
+      this.suppressingUnreadSteerRun = true;
+    }
     await this.runtimeSession.abort();
     if (turnId && this.activeTurnId === turnId) {
       this.terminalizeActiveWork();
@@ -1196,6 +1256,10 @@ export class OmpAgentSession implements AgentSession {
     try {
       await this.runtimeSession.close();
     } finally {
+      this.pendingSteerSubmissions = [];
+      this.suppressingUnreadSteerRun = false;
+      this.steerDrainBlocked = false;
+      this.finishPendingSteerDrain(false);
       this.clearOmpSessionState();
     }
   }
@@ -1812,6 +1876,10 @@ export class OmpAgentSession implements AgentSession {
     this.usagePoller.stopTurn();
     this.terminalizeActiveWork();
     this.subagentIndex.clear(this.runtimeSession);
+    this.pendingSteerSubmissions = [];
+    this.suppressingUnreadSteerRun = false;
+    this.finishPendingSteerDrain(false);
+    this.steerDrainBlocked = false;
     if (!this.activeTurnId) {
       return;
     }
@@ -1831,6 +1899,11 @@ export class OmpAgentSession implements AgentSession {
   }
 
   private handleSessionEvent(event: OmpAgentSessionEvent): void {
+    if (this.suppressingUnreadSteerRun && !this.activeTurnId) {
+      this.handleUnreadSteerPhantomEvent(event);
+      return;
+    }
+
     const turnId = this.currentTurnIdForEvent();
 
     switch (event.type) {
@@ -1905,25 +1978,9 @@ export class OmpAgentSession implements AgentSession {
           },
         });
         return;
-      case "agent_end": {
-        const messages = event.messages ?? [];
-        let terminalMessages: OmpAgentMessage[] | null = null;
-        if (messages.some((message) => message.role === "assistant")) {
-          terminalMessages = messages;
-        } else if (this.activeTurnTerminalAssistantMessage) {
-          terminalMessages = [this.activeTurnTerminalAssistantMessage];
-        }
-        // OMP can end an internal extension-notice cycle before it starts the
-        // model turn for the same prompt. Ignore only cycles where neither the
-        // terminal payload nor the live stream contained an assistant message.
-        if (!terminalMessages) {
-          return;
-        }
-        // A state request is processed after OMP's RPC loop becomes promptable,
-        // so do not advertise Paseo idle until it reports that transition.
-        void this.completeTurnAfterProviderIdle(turnId, terminalMessages);
+      case "agent_end":
+        this.handleAgentEnd(event, turnId);
         return;
-      }
       default:
         return;
     }
@@ -1957,6 +2014,98 @@ export class OmpAgentSession implements AgentSession {
         this.logger.debug({ event }, "Dropped malformed OMP todo tool result");
       }
     }
+  }
+
+  private handleUnreadSteerPhantomEvent(event: OmpAgentSessionEvent): void {
+    if (event.type === "agent_start") {
+      void this.runtimeSession.abort().catch((error: unknown) => {
+        this.logger.debug({ err: error }, "OMP unread-steer phantom abort failed");
+      });
+      return;
+    }
+    if (event.type === "message_end" && event.message.role === "user") {
+      // Consume the echoed steer so suppression ends once every queued steer surfaced.
+      const text = getUserMessageText(event.message.content);
+      this.takePendingSteerSubmission(text);
+      return;
+    }
+    if (event.type === "agent_end" && this.pendingSteerSubmissions.length === 0) {
+      this.suppressingUnreadSteerRun = false;
+      this.steerDrainBlocked = false;
+      this.finishPendingSteerDrain(true);
+    }
+  }
+
+  private beginPendingSteerDrain(): void {
+    if (this.pendingSteerDrain) {
+      return;
+    }
+    let resolve!: (drained: boolean) => void;
+    const promise = new Promise<boolean>((resolvePromise) => {
+      resolve = resolvePromise;
+    });
+    const timer = setTimeout(() => {
+      this.pendingSteerDrain = null;
+      this.steerDrainBlocked = true;
+      resolve(false);
+    }, OMP_STEER_DRAIN_TIMEOUT_MS);
+    this.pendingSteerDrain = { promise, resolve, timer };
+  }
+
+  private finishPendingSteerDrain(drained: boolean): void {
+    const pending = this.pendingSteerDrain;
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingSteerDrain = null;
+    pending.resolve(drained);
+  }
+
+  private async waitForPendingSteerDrain(): Promise<void> {
+    if (this.steerDrainBlocked) {
+      throw new Error("OMP queued steer did not drain; refusing to start a replacement turn");
+    }
+    const pending = this.pendingSteerDrain;
+    if (!pending) {
+      return;
+    }
+    const drained = await pending.promise;
+    if (!drained) {
+      throw new Error("OMP queued steer did not drain; refusing to start a replacement turn");
+    }
+  }
+
+  private takePendingSteerSubmission(
+    text: string,
+  ): { text: string; clientMessageId: string | null } | undefined {
+    const index = this.pendingSteerSubmissions.findIndex((submission) => submission.text === text);
+    if (index < 0) {
+      return undefined;
+    }
+    return this.pendingSteerSubmissions.splice(index, 1)[0];
+  }
+
+  private handleAgentEnd(
+    event: Extract<OmpAgentSessionEvent, { type: "agent_end" }>,
+    turnId: string | undefined,
+  ): void {
+    const messages = event.messages ?? [];
+    let terminalMessages: OmpAgentMessage[] | null = null;
+    if (messages.some((message) => message.role === "assistant")) {
+      terminalMessages = messages;
+    } else if (this.activeTurnTerminalAssistantMessage) {
+      terminalMessages = [this.activeTurnTerminalAssistantMessage];
+    }
+    // OMP can end an internal extension-notice cycle before it starts the
+    // model turn for the same prompt. Ignore only cycles where neither the
+    // terminal payload nor the live stream contained an assistant message.
+    if (!terminalMessages) {
+      return;
+    }
+    // A state request is processed after OMP's RPC loop becomes promptable,
+    // so do not advertise Paseo idle until it reports that transition.
+    void this.completeTurnAfterProviderIdle(turnId, terminalMessages);
   }
 
   private emitCompactionTimeline(input: {
@@ -2069,9 +2218,12 @@ export class OmpAgentSession implements AgentSession {
     if (!text) {
       return;
     }
-    const nativeMessage = event.message as OmpAgentMessage & { id?: unknown; entryId?: unknown };
+    const nativeMessage = event.message as OmpAgentMessage & {
+      id?: unknown;
+      entryId?: unknown;
+      steering?: unknown;
+    };
     const messageId = readNativeMessageId(nativeMessage);
-    const clientMessageId = this.activeClientMessageId;
     const emitUserMessage = (resolvedMessageId?: string): void => {
       if (resolvedMessageId) {
         // OMP re-emits user message_end frames for entries it has already
@@ -2082,6 +2234,11 @@ export class OmpAgentSession implements AgentSession {
         }
         this.emittedUserMessageIds.add(resolvedMessageId);
       }
+      const steerSubmission =
+        nativeMessage.steering === false ? undefined : this.takePendingSteerSubmission(text);
+      const clientMessageId = steerSubmission
+        ? steerSubmission.clientMessageId
+        : this.activeClientMessageId;
       this.emit({
         type: "timeline",
         provider: this.provider,
@@ -2160,6 +2317,7 @@ export class OmpAgentSession implements AgentSession {
     this.activeTurnTerminalAssistantMessage = null;
     this.activeTurnStarted = false;
     this.activeTurnHasUserMessage = false;
+    this.pendingSteerSubmissions = [];
     this.clearNoTurnBuffers();
     // OMP reports a stopped turn as a terminal response carrying its interrupt
     // text as an error. That is the user's own Stop, not a failed turn.

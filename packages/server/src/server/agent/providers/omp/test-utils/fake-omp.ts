@@ -240,11 +240,14 @@ export class FakeOmpSession implements OmpRuntimeSession {
     };
   }
 
+  abortCount = 0;
+
   async abort(): Promise<void> {
     if (this.abortError) {
       throw this.abortError;
     }
     this.abortRequested = true;
+    this.abortCount += 1;
     // OMP can stream a turn's teardown before it answers the abort request.
     this.onAbort?.();
   }
@@ -445,10 +448,15 @@ export class FakeOmpSession implements OmpRuntimeSession {
     this.emit({ type: "turn_start" });
   }
 
-  acceptPrompt(text: string, entryId = "omp-user-1"): void {
+  acceptPrompt(text: string, entryId = "omp-user-1", steering?: boolean): void {
     this.emit({
       type: "message_end",
-      message: { role: "user", content: text, entryId } as OmpAgentMessage,
+      message: {
+        role: "user",
+        content: text,
+        entryId,
+        ...(steering === undefined ? {} : { steering }),
+      } as OmpAgentMessage,
     });
   }
 

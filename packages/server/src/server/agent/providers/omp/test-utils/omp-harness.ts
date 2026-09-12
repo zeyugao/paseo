@@ -580,7 +580,6 @@ export class OmpHarness {
     },
   ) {
     return await this.requireSession().steerActiveTurn(prompt, options);
->>>>>>> a960a0645 (fix(omp): harden steer interruption)
   }
 
   async interrupt(): Promise<void> {

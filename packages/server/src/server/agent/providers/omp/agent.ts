@@ -1083,13 +1083,23 @@ export class OmpAgentSession implements AgentSession {
       return { status: "unavailable" };
     }
     const payload = convertPromptInput(prompt, { model: this.state.model });
-    this.runtimeSession.steer(payload.text, payload.images);
-    // OMP echoes the steered message back as a user message_end; the submission lets that
-    // echo reconcile against the optimistic row instead of the turn's original prompt.
-    this.pendingSteerSubmissions.push({
+    const pendingSubmission = {
       text: payload.text,
       clientMessageId: options.clientMessageId ?? null,
-    });
+    };
+    // Register before calling OMP: rpc-ui can echo message_end synchronously,
+    // and that echo must carry the client id so the daemon can reconcile it
+    // with the optimistic submitted row.
+    this.pendingSteerSubmissions.push(pendingSubmission);
+    try {
+      this.runtimeSession.steer(payload.text, payload.images);
+    } catch (error) {
+      const index = this.pendingSteerSubmissions.indexOf(pendingSubmission);
+      if (index >= 0) {
+        this.pendingSteerSubmissions.splice(index, 1);
+      }
+      throw error;
+    }
     if (options.clearPendingPermissions) {
       this.denyPendingPermissionsSupersededBySteer();
     }

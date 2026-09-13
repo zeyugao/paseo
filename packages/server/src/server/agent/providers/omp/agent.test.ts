@@ -903,6 +903,37 @@ describe("OMP agent client and session", () => {
       },
     ]);
   });
+  test("correlates a synchronous steer echo with its client message", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("first", "turn-client");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "user-1");
+    const originalSteer = runtime.steer.bind(runtime);
+    runtime.steer = (message, images) => {
+      originalSteer(message, images);
+      runtime.acceptPrompt(message, "steer-entry-sync", true);
+    };
+
+    await expect(
+      omp.steerActiveTurn("change course", {
+        expectedTurnId: turnId,
+        clientMessageId: "steer-client",
+      }),
+    ).resolves.toEqual({ status: "accepted" });
+
+    expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+      { type: "user_message", text: "first", messageId: "user-1", clientMessageId: "turn-client" },
+      {
+        type: "user_message",
+        text: "change course",
+        messageId: "steer-entry-sync",
+        clientMessageId: "steer-client",
+      },
+    ]);
+  });
 
   test("does not let a replayed duplicate user entry consume a steer", async () => {
     const omp = new OmpHarness();

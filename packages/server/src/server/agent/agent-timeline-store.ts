@@ -78,6 +78,23 @@ export class InMemoryAgentTimelineStore {
     return row ? cloneRow(row) : null;
   }
 
+  getSubmittedUserMessageForTurn(
+    agentId: string,
+    turnId: string,
+    text: string,
+  ): AgentTimelineRow | null {
+    const rows = this.requireState(agentId)
+      .projection.getRows()
+      .filter(
+        (candidate) =>
+          candidate.turnId === turnId &&
+          candidate.item.type === "user_message" &&
+          candidate.item.clientMessageId &&
+          candidate.item.text === text,
+      );
+    return rows.length === 1 ? cloneRow(rows[0]) : null;
+  }
+
   enrichSubmittedUserMessage(
     agentId: string,
     clientMessageId: string,

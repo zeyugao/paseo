@@ -45,6 +45,12 @@ function requireValue(value, name) {
   return value.trim();
 }
 
+function getRollingVersion(version, revision) {
+  const baseVersion = /^(\d+\.\d+\.\d+)/.exec(version)?.[1];
+  if (!baseVersion) throw new Error(`invalid package version ${version}`);
+  return `${baseVersion}-rolling.commit-${revision}`;
+}
+
 export function rewriteReleaseTarballDependencies({
   repository,
   releaseTag,
@@ -72,10 +78,26 @@ export function rewriteReleaseTarballDependencies({
     }),
   );
 
+  const manifests = new Map(
+    releasePackages.map((pkg) => {
+      const path = resolve(rootDir, pkg.path);
+      const packageJson = JSON.parse(readFileSync(path, "utf8"));
+      return [pkg.name, { packageJson, path }];
+    }),
+  );
+  const rollingVersions = new Map(
+    rolling
+      ? [...manifests].map(([name, { packageJson }]) => [
+          name,
+          getRollingVersion(packageJson.version, revision),
+        ])
+      : [],
+  );
+
   for (const pkg of releasePackages) {
-    const packageJsonPath = resolve(rootDir, pkg.path);
-    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+    const { packageJson, path } = manifests.get(pkg.name);
     packageJson.paseoBuildCommit = revision;
+    if (rolling) packageJson.version = rollingVersions.get(pkg.name);
 
     for (const field of ["dependencies", "optionalDependencies"]) {
       const dependencies = packageJson[field];
@@ -86,7 +108,14 @@ export function rewriteReleaseTarballDependencies({
       }
     }
 
-    writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
+    if (rolling) {
+      for (const dependencyName of Object.keys(packageJson.peerDependencies ?? {})) {
+        const version = rollingVersions.get(dependencyName);
+        if (version) packageJson.peerDependencies[dependencyName] = version;
+      }
+    }
+
+    writeFileSync(path, `${JSON.stringify(packageJson, null, 2)}\n`);
   }
 }
 

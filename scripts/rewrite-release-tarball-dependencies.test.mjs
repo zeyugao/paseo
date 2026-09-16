@@ -10,7 +10,7 @@ import {
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 
-test("pins release tarball dependencies to one cache-distinct build", () => {
+test("uses commit-specific rolling assets and fixed versioned assets", () => {
   const rootDir = mkdtempSync(join(tmpdir(), "paseo-release-dependencies-"));
   try {
     for (const [index, pkg] of releasePackages.entries()) {
@@ -35,6 +35,7 @@ test("pins release tarball dependencies to one cache-distinct build", () => {
       repository: "getpaseo/paseo",
       releaseTag: "cli-latest",
       revision,
+      rolling: true,
       rootDir,
     });
 
@@ -44,9 +45,25 @@ test("pins release tarball dependencies to one cache-distinct build", () => {
       assert.equal(packageJson.paseoBuildCommit, revision);
       assert.equal(
         packageJson.dependencies[nextPackage.name],
-        `https://github.com/getpaseo/paseo/releases/download/cli-latest/${nextPackage.assetName}?build=${revision}`,
+        `https://github.com/getpaseo/paseo/releases/download/cli-latest/${nextPackage.assetName.replace(/\.tgz$/, `-${revision}.tgz`)}?build=${revision}`,
       );
       assert.equal(packageJson.dependencies.zod, "^4.4.3");
+    }
+
+    rewriteReleaseTarballDependencies({
+      repository: "getpaseo/paseo",
+      releaseTag: "v0.8.0",
+      revision,
+      rootDir,
+    });
+
+    for (const [index, pkg] of releasePackages.entries()) {
+      const nextPackage = releasePackages[(index + 1) % releasePackages.length];
+      const packageJson = JSON.parse(readFileSync(join(rootDir, pkg.path), "utf8"));
+      assert.equal(
+        packageJson.dependencies[nextPackage.name],
+        `https://github.com/getpaseo/paseo/releases/download/v0.8.0/${nextPackage.assetName}?build=${revision}`,
+      );
     }
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

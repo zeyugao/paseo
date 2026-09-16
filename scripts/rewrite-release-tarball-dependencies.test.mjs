@@ -42,11 +42,11 @@ test("uses commit-specific rolling packages and fixed versioned assets", () => {
 
     for (const [index, pkg] of releasePackages.entries()) {
       const nextPackage = releasePackages[(index + 1) % releasePackages.length];
-      const rollingVersion = `0.8.0-rolling.commit-${revision}`;
+      const rollingVersion = `0.8.0+rolling.commit.${revision}`;
       const packageJson = JSON.parse(readFileSync(join(rootDir, pkg.path), "utf8"));
       assert.equal(packageJson.paseoBuildCommit, revision);
       assert.equal(packageJson.version, rollingVersion);
-      assert.equal(packageJson.peerDependencies[nextPackage.name], rollingVersion);
+      assert.equal(packageJson.peerDependencies[nextPackage.name], "0.8.0");
       assert.equal(packageJson.peerDependencies.react, "^19.1.0");
       assert.equal(
         packageJson.dependencies[nextPackage.name],

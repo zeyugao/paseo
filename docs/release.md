@@ -421,17 +421,18 @@ paseo-relay.tgz
 paseo-server.tgz
 ```
 
-Pushes to `main` update the rolling `cli-latest` prerelease and force-move the synthetic `cli-latest` tag to the pushed commit. The rolling release keeps `paseo-cli.tgz` as its install entry point. Every package gets a commit-specific prerelease version such as `0.8.0-rolling.commit-<commit>`, and internal packages use commit-addressed names such as `paseo-client-<commit>.tgz`. The workflow removes the preceding commit's assets only after the new CLI passes its upgrade smoke test. This supports installing the newest pushed CLI directly from GitHub Releases without manually cutting a version tag and without using the npm registry for Paseo's own workspace packages:
+Pushes to `main` update the rolling `cli-latest` prerelease and force-move the synthetic `cli-latest` tag to the pushed commit. The rolling release keeps `paseo-cli.tgz` as its install entry point. Every package gets commit-specific SemVer build metadata such as `0.8.0+rolling.commit.<commit>`, and internal packages use commit-addressed names such as `paseo-client-<commit>.tgz`. Build metadata preserves compatibility with the release's existing peer ranges. After uploading a build, the workflow deletes every superseded commit asset and every legacy fixed-name internal asset before running its upgrade smoke test. The release therefore contains only `paseo-cli.tgz` and the current commit's six internal assets, including when verification fails. This supports installing the newest pushed CLI directly from GitHub Releases without manually cutting a version tag and without using the npm registry for Paseo's own workspace packages:
 
 ```bash
 npm install -g https://github.com/getpaseo/paseo/releases/download/cli-latest/paseo-cli.tgz
 ```
 
-Bun caches URL dependencies across global installs. Force a fresh top-level download and give the
-fixed rolling URL a unique cache key when updating an existing Bun installation:
+Bun requires the package name when replacing an existing global URL dependency. Force a fresh
+top-level download, explicitly select `@getpaseo/cli`, and give the fixed rolling URL a unique cache
+key:
 
 ```bash
-bun install -g --force "https://github.com/getpaseo/paseo/releases/download/cli-latest/paseo-cli.tgz?refresh=$(date +%s)"
+bun install -g --force "@getpaseo/cli@https://github.com/getpaseo/paseo/releases/download/cli-latest/paseo-cli.tgz?refresh=$(date +%s)"
 ```
 
 Stable releases still upload the same assets to the matching `v*` release, so the latest stable CLI can be installed with:
@@ -440,7 +441,7 @@ Stable releases still upload the same assets to the matching `v*` release, so th
 npm install -g https://github.com/getpaseo/paseo/releases/latest/download/paseo-cli.tgz
 ```
 
-Before packing, the workflow stamps every package with the source commit, assigns commit-specific versions to rolling packages and their internal peer constraints, and rewrites internal `@getpaseo/*` dependencies in the temporary checkout to point at the current release's tarball URLs. The distinct version makes Bun replace an existing global package; distinct internal asset paths prevent it from applying an older lockfile integrity hash to new bytes. The query parameter remains a secondary cache key for the fixed CLI entry URL. The workflow first installs the preceding rolling CLI, then installs the published CLI into the same Bun home and verifies the matching CLI, server, protocol, and transitive runtime dependencies. Versioned releases keep their declared package versions and fixed internal asset names because their release tag and contents are immutable.
+Before packing, the workflow stamps every package with the source commit, adds commit-specific SemVer build metadata to rolling versions, and rewrites internal `@getpaseo/*` dependencies in the temporary checkout to point at the current release's tarball URLs. Explicitly naming `@getpaseo/cli` makes Bun replace the existing global dependency; distinct internal asset paths prevent it from applying an older lockfile integrity hash to new bytes. The query parameter remains a secondary cache key for the fixed CLI entry URL. The workflow first installs the preceding rolling CLI, then uploads the new asset set, removes every superseded asset, installs the published CLI into the same Bun home, and verifies the matching CLI, server, protocol, and transitive runtime dependencies. Versioned releases keep their declared package versions and fixed internal asset names because their release tag and contents are immutable.
 
 ## Rolling server tarball asset
 

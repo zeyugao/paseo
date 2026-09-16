@@ -219,13 +219,34 @@ jobs:
             echo "Release creation raced with another workflow; continuing."
           fi
 
-      - name: Upload tarballs to GitHub Release
+      - name: Upload dependency tarballs to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/paseo-tarballs/*.tgz --clobber --repo "${{ github.repository }}"
+          asset_suffix=""
+          if [[ "$IS_ROLLING_CLI_RELEASE" == "true" ]]; then
+            asset_suffix="-$BUILD_COMMIT"
+          fi
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/paseo-tarballs/paseo-highlight${asset_suffix}.tgz" \
+            "$RUNNER_TEMP/paseo-tarballs/paseo-relay${asset_suffix}.tgz" \
+            "$RUNNER_TEMP/paseo-tarballs/paseo-protocol${asset_suffix}.tgz" \
+            "$RUNNER_TEMP/paseo-tarballs/paseo-client${asset_suffix}.tgz" \
+            "$RUNNER_TEMP/paseo-tarballs/paseo-plugin${asset_suffix}.tgz" \
+            "$RUNNER_TEMP/paseo-tarballs/paseo-server${asset_suffix}.tgz" \
+            --clobber --repo "${{ github.repository }}"
+
+      - name: Upload CLI tarball to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/paseo-tarballs/paseo-cli.tgz" \
+            --clobber --repo "${{ github.repository }}"
       - name: Remove superseded rolling assets
         if: env.IS_ROLLING_CLI_RELEASE == 'true'
         env:

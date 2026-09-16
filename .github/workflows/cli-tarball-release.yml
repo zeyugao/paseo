@@ -139,12 +139,7 @@ jobs:
           pack_workspace "@getpaseo/client" "paseo-client${asset_suffix}.tgz"
           pack_workspace "@getpaseo/plugin" "paseo-plugin${asset_suffix}.tgz"
           pack_workspace "@getpaseo/server" "paseo-server${asset_suffix}.tgz"
-          pack_workspace "@getpaseo/cli" "paseo-cli${asset_suffix}.tgz"
-
-          if [[ "$IS_ROLLING_CLI_RELEASE" == "true" ]]; then
-            cp "$RUNNER_TEMP/paseo-tarballs/paseo-cli${asset_suffix}.tgz" \
-              "$RUNNER_TEMP/paseo-tarballs/paseo-cli.tgz"
-          fi
+          pack_workspace "@getpaseo/cli" "paseo-cli.tgz"
 
       - name: Setup Bun for install smoke test
         uses: oven-sh/setup-bun@v2
@@ -164,7 +159,7 @@ jobs:
             gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
             previous_url="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG/paseo-cli.tgz?build=$previous_commit"
             BUN_INSTALL="$RUNNER_TEMP/paseo-cli-install" \
-              bun install -g --force "$previous_url"
+              bun install -g --force "@getpaseo/cli@$previous_url"
           else
             echo "No previous rolling CLI asset; testing a fresh install."
           fi
@@ -231,6 +226,25 @@ jobs:
         run: |
           set -euo pipefail
           gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/paseo-tarballs/*.tgz --clobber --repo "${{ github.repository }}"
+      - name: Remove superseded rolling assets
+        if: env.IS_ROLLING_CLI_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_suffix="-$BUILD_COMMIT.tgz"
+          gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' |
+            while IFS= read -r asset; do
+              if
+                [[ "$asset" =~ ^paseo-cli-[0-9a-f]{40}\.tgz$ ]] ||
+                  [[ "$asset" =~ ^paseo-(client|highlight|protocol|relay|plugin|server)\.tgz$ ]] ||
+                  [[ "$asset" =~ ^paseo-(client|highlight|protocol|relay|plugin|server)-[0-9a-f]{40}\.tgz$ && "$asset" != *"$current_suffix" ]]
+              then
+                gh release delete-asset "$RELEASE_TAG" "$asset" --yes --repo "${{ github.repository }}"
+              fi
+            done
 
       - name: Verify published CLI installation
         env:
@@ -241,7 +255,7 @@ jobs:
 
           install_root="$RUNNER_TEMP/paseo-cli-install"
           cli_url="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG/paseo-cli.tgz?build=$BUILD_COMMIT"
-          BUN_INSTALL="$install_root" bun install -g --force "$cli_url"
+          BUN_INSTALL="$install_root" bun install -g --force "@getpaseo/cli@$cli_url"
           "$install_root/bin/paseo" --version
 
           node - "$install_root" "$BUILD_COMMIT" <<'NODE'
@@ -256,19 +270,3 @@ jobs:
             paths: [`${root}/install/global/node_modules/@getpaseo/protocol`],
           });
           NODE
-
-      - name: Remove superseded rolling assets
-        if: env.IS_ROLLING_CLI_RELEASE == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          current_suffix="-$BUILD_COMMIT.tgz"
-          gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' |
-            while IFS= read -r asset; do
-              if [[ "$asset" =~ ^paseo-(cli|client|highlight|protocol|relay|plugin|server)-[0-9a-f]{40}\.tgz$ && "$asset" != *"$current_suffix" ]]; then
-                gh release delete-asset "$RELEASE_TAG" "$asset" --yes --repo "${{ github.repository }}"
-              fi
-            done

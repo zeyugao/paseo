@@ -10467,6 +10467,92 @@ test("deduplicates a provider user echo missing client identity within its submi
   }
 });
 
+test("deduplicates a nearby provider user echo received after its turn ends", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-late-user-echo-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  class LateEchoSession extends TestAgentSession {
+    override async startTurn(prompt: AgentPromptInput): Promise<{ turnId: string }> {
+      const turnId = "turn-late-echo";
+      const text = typeof prompt === "string" ? prompt : "";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+        this.pushEvent({
+          type: "timeline",
+          provider: this.provider,
+          turnId,
+          item: { type: "assistant_message", text: "planned" },
+        });
+        this.pushEvent({ type: "turn_completed", provider: this.provider, turnId });
+        this.pushEvent({
+          type: "timeline",
+          provider: this.provider,
+          timestamp: new Date(Date.now() - 60_000).toISOString(),
+          item: { type: "user_message", text, messageId: "provider-old" },
+        });
+        this.pushEvent({
+          type: "timeline",
+          provider: this.provider,
+          item: { type: "user_message", text, messageId: "provider-late" },
+        });
+      }, 0);
+      return { turnId };
+    }
+  }
+
+  class LateEchoClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new LateEchoSession(config);
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: { codex: new LateEchoClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000406",
+  });
+  let agentId: string | null = null;
+
+  try {
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = snapshot.id;
+    await manager.runAgent(snapshot.id, "same text", { clientMessageId: "client-current" });
+    await vi.waitFor(() =>
+      expect(manager.fetchTimeline(snapshot.id, { limit: 0 }).rows[0]).toMatchObject({
+        providerMessageId: "provider-late",
+      }),
+    );
+
+    const userRows = manager
+      .fetchTimeline(snapshot.id, { limit: 0 })
+      .rows.filter((row) => row.item.type === "user_message");
+    expect(userRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          providerMessageId: "provider-late",
+          item: {
+            type: "user_message",
+            text: "same text",
+            clientMessageId: "client-current",
+            messageId: "client-current",
+          },
+        }),
+        expect.objectContaining({
+          item: { type: "user_message", text: "same text", messageId: "provider-old" },
+        }),
+      ]),
+    );
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("canonical submitted prompt keeps wire identity while rewind resolves provider identity", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-submitted-prompt-"));
   const storagePath = join(workdir, "agents");

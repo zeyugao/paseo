@@ -139,20 +139,31 @@ test("CLI tarball release publishes and smoke-tests one cache-distinct package s
   const workflowSource = readFileSync(cliTarballReleaseWorkflowPath, "utf8");
   assert.match(workflowSource, /node scripts\/rewrite-release-tarball-dependencies\.mjs/);
   for (const pkg of releasePackages) {
-    assert.match(workflowSource, new RegExp(`pack_workspace "${pkg.name}" "${pkg.assetName}"`));
+    const assetName =
+      pkg.name === "@getpaseo/cli"
+        ? pkg.assetName
+        : pkg.assetName.replace(/\.tgz$/, "${asset_suffix}.tgz");
+    assert.ok(
+      workflowSource.includes(`pack_workspace "${pkg.name}" "${assetName}"`),
+      `missing pack step for ${pkg.name}`,
+    );
   }
 
   const packTarballs = workflowSource.indexOf("- name: Pack workspace tarballs");
   const updateTag = workflowSource.indexOf("- name: Update rolling CLI tag");
   const ensureRelease = workflowSource.indexOf("- name: Ensure GitHub release exists");
-  const uploadTarballs = workflowSource.indexOf("- name: Upload tarballs to GitHub Release");
+  const uploadDependencies = workflowSource.indexOf(
+    "- name: Upload dependency tarballs to GitHub Release",
+  );
+  const uploadCli = workflowSource.indexOf("- name: Upload CLI tarball to GitHub Release");
   const verifyInstall = workflowSource.indexOf("- name: Verify published CLI installation");
 
   assert.ok(packTarballs >= 0);
   assert.ok(updateTag > packTarballs);
   assert.ok(ensureRelease > updateTag);
-  assert.ok(uploadTarballs > ensureRelease);
-  assert.ok(verifyInstall > uploadTarballs);
+  assert.ok(uploadDependencies > ensureRelease);
+  assert.ok(uploadCli > uploadDependencies);
+  assert.ok(verifyInstall > uploadCli);
 });
 
 test("server builds exclude test utilities at every domain depth", () => {

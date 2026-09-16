@@ -10,7 +10,7 @@ import {
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 
-test("uses commit-specific rolling assets and fixed versioned assets", () => {
+test("uses commit-specific rolling packages and fixed versioned assets", () => {
   const rootDir = mkdtempSync(join(tmpdir(), "paseo-release-dependencies-"));
   try {
     for (const [index, pkg] of releasePackages.entries()) {
@@ -24,6 +24,7 @@ test("uses commit-specific rolling assets and fixed versioned assets", () => {
             name: pkg.name,
             version: "0.8.0",
             dependencies: { [nextPackage.name]: "0.8.0", zod: "^4.4.3" },
+            peerDependencies: { [nextPackage.name]: "0.8.0", react: "^19.1.0" },
           },
           null,
           2,
@@ -41,8 +42,12 @@ test("uses commit-specific rolling assets and fixed versioned assets", () => {
 
     for (const [index, pkg] of releasePackages.entries()) {
       const nextPackage = releasePackages[(index + 1) % releasePackages.length];
+      const rollingVersion = `0.8.0-rolling.commit-${revision}`;
       const packageJson = JSON.parse(readFileSync(join(rootDir, pkg.path), "utf8"));
       assert.equal(packageJson.paseoBuildCommit, revision);
+      assert.equal(packageJson.version, rollingVersion);
+      assert.equal(packageJson.peerDependencies[nextPackage.name], rollingVersion);
+      assert.equal(packageJson.peerDependencies.react, "^19.1.0");
       assert.equal(
         packageJson.dependencies[nextPackage.name],
         `https://github.com/getpaseo/paseo/releases/download/cli-latest/${nextPackage.assetName.replace(/\.tgz$/, `-${revision}.tgz`)}?build=${revision}`,

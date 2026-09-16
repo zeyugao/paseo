@@ -155,19 +155,16 @@ jobs:
         if: env.IS_ROLLING_CLI_RELEASE == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
 
-          previous_dir="$RUNNER_TEMP/previous-paseo-cli"
-          mkdir -p "$previous_dir"
-          if gh release download "$RELEASE_TAG" \
-            --pattern "paseo-cli.tgz" \
-            --dir "$previous_dir" \
-            --clobber \
-            --repo "${{ github.repository }}"; then
+          if previous_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}" 2>/dev/null)" &&
+            gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            previous_url="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG/paseo-cli.tgz?build=$previous_commit"
             BUN_INSTALL="$RUNNER_TEMP/paseo-cli-install" \
-              bun install -g --force "$previous_dir/paseo-cli.tgz"
+              bun install -g --force "$previous_url"
           else
             echo "No previous rolling CLI asset; testing a fresh install."
           fi

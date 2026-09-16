@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { relative as relativePath } from "node:path";
 import test from "node:test";
+import { releasePackages } from "./rewrite-release-tarball-dependencies.mjs";
 
 const repoRoot = new URL("../", import.meta.url);
 const ciWorkflowPath = new URL(".github/workflows/ci.yml", repoRoot);
@@ -14,7 +15,6 @@ const nixWorkflowPath = new URL(".github/workflows/nix.yml", repoRoot);
 const filtersPath = new URL(".github/ci-paths.yml", repoRoot);
 const serverTsconfigPath = new URL("packages/server/tsconfig.server.json", repoRoot);
 const desktopPackagePath = new URL("packages/desktop/package.json", repoRoot);
-const pluginPackagePath = new URL("packages/plugin/package.json", repoRoot);
 
 const gatedCiJobs = new Map([
   ["format", { name: "format", contract: "format" }],
@@ -134,30 +134,24 @@ test("focused contracts stay inside existing required checks", () => {
   assert.ok(!jobs.has("playwright-desktop"));
 });
 
-test("CLI tarball release packs the plugin workspace before advancing cli-latest", () => {
+test("CLI tarball release publishes and smoke-tests one cache-distinct package set", () => {
   const workflowSource = readFileSync(cliTarballReleaseWorkflowPath, "utf8");
-  const pluginPackage = JSON.parse(readFileSync(pluginPackagePath, "utf8"));
-
-  assert.match(
-    workflowSource,
-    new RegExp(
-      `name: "${pluginPackage.name}",\\s+path: "packages/plugin/package\\.json",\\s+assetName: "paseo-plugin\\.tgz",`,
-    ),
-  );
-  assert.match(
-    workflowSource,
-    new RegExp(`pack_workspace "${pluginPackage.name}" "paseo-plugin\\.tgz"`),
-  );
+  assert.match(workflowSource, /node scripts\/rewrite-release-tarball-dependencies\.mjs/);
+  for (const pkg of releasePackages) {
+    assert.match(workflowSource, new RegExp(`pack_workspace "${pkg.name}" "${pkg.assetName}"`));
+  }
 
   const packTarballs = workflowSource.indexOf("- name: Pack workspace tarballs");
   const updateTag = workflowSource.indexOf("- name: Update rolling CLI tag");
   const ensureRelease = workflowSource.indexOf("- name: Ensure GitHub release exists");
   const uploadTarballs = workflowSource.indexOf("- name: Upload tarballs to GitHub Release");
+  const verifyInstall = workflowSource.indexOf("- name: Verify published CLI installation");
 
   assert.ok(packTarballs >= 0);
   assert.ok(updateTag > packTarballs);
   assert.ok(ensureRelease > updateTag);
   assert.ok(uploadTarballs > ensureRelease);
+  assert.ok(verifyInstall > uploadTarballs);
 });
 
 test("server builds exclude test utilities at every domain depth", () => {

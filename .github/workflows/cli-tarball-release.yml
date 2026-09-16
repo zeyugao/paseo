@@ -76,6 +76,10 @@ jobs:
           registry-url: "https://npm.pkg.github.com"
           scope: "@boudra"
 
+      - name: Record build commit
+        shell: bash
+        run: echo "BUILD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Install JS dependencies
         run: npm ci
         env:
@@ -90,80 +94,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          node <<'NODE'
-          const fs = require("node:fs");
-          const path = require("node:path");
-
-          const repository = process.env.REPOSITORY;
-          const releaseTag = process.env.RELEASE_TAG;
-          if (!repository) throw new Error("REPOSITORY is missing");
-          if (!releaseTag) throw new Error("RELEASE_TAG is missing");
-
-          const packages = [
-            {
-              name: "@getpaseo/highlight",
-              path: "packages/highlight/package.json",
-              assetName: "paseo-highlight.tgz",
-            },
-            {
-              name: "@getpaseo/relay",
-              path: "packages/relay/package.json",
-              assetName: "paseo-relay.tgz",
-            },
-            {
-              name: "@getpaseo/protocol",
-              path: "packages/protocol/package.json",
-              assetName: "paseo-protocol.tgz",
-            },
-            {
-              name: "@getpaseo/client",
-              path: "packages/client/package.json",
-              assetName: "paseo-client.tgz",
-            },
-            {
-              name: "@getpaseo/plugin",
-              path: "packages/plugin/package.json",
-              assetName: "paseo-plugin.tgz",
-            },
-            {
-              name: "@getpaseo/server",
-              path: "packages/server/package.json",
-              assetName: "paseo-server.tgz",
-            },
-            {
-              name: "@getpaseo/cli",
-              path: "packages/cli/package.json",
-              assetName: "paseo-cli.tgz",
-            },
-          ];
-
-          const assetUrls = new Map(
-            packages.map((pkg) => [
-              pkg.name,
-              `https://github.com/${repository}/releases/download/${releaseTag}/${pkg.assetName}`,
-            ]),
-          );
-
-          for (const pkg of packages) {
-            const packageJsonPath = path.resolve(pkg.path);
-            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-
-            for (const field of ["dependencies", "optionalDependencies"]) {
-              const dependencies = packageJson[field];
-              if (!dependencies) continue;
-
-              for (const dependencyName of Object.keys(dependencies)) {
-                const assetUrl = assetUrls.get(dependencyName);
-                if (assetUrl) {
-                  dependencies[dependencyName] = assetUrl;
-                }
-              }
-            }
-
-            fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
-          }
-          NODE
+          node scripts/rewrite-release-tarball-dependencies.mjs
 
       - name: Pack workspace tarballs
         shell: bash
@@ -212,7 +143,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+          git tag -f "$RELEASE_TAG" "$BUILD_COMMIT"
           git push origin "refs/tags/$RELEASE_TAG" --force
 
       - name: Ensure GitHub release exists
@@ -227,7 +158,7 @@ jobs:
               gh release edit "$RELEASE_TAG" \
                 --repo "${{ github.repository }}" \
                 --title "Paseo CLI latest" \
-                --notes "Rolling CLI tarball build from ${GITHUB_SHA}." \
+                --notes "Rolling CLI tarball build from ${BUILD_COMMIT}." \
                 --prerelease
             fi
             exit 0
@@ -240,9 +171,9 @@ jobs:
 
           if [[ "$IS_ROLLING_CLI_RELEASE" == "true" ]]; then
             release_args+=(
-              --target "$GITHUB_SHA"
+              --target "$BUILD_COMMIT"
               --title "Paseo CLI latest"
-              --notes "Rolling CLI tarball build from ${GITHUB_SHA}."
+              --notes "Rolling CLI tarball build from ${BUILD_COMMIT}."
               --prerelease
             )
           else
@@ -267,3 +198,33 @@ jobs:
         run: |
           set -euo pipefail
           gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/paseo-tarballs/*.tgz --clobber --repo "${{ github.repository }}"
+
+      - name: Setup Bun for install smoke test
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Verify published CLI installation
+        env:
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          install_root="$RUNNER_TEMP/paseo-cli-install"
+          cli_url="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG/paseo-cli.tgz?build=$BUILD_COMMIT"
+          BUN_INSTALL="$install_root" bun install -g --force "$cli_url"
+          "$install_root/bin/paseo" --version
+
+          node - "$install_root" "$BUILD_COMMIT" <<'NODE'
+          const [root, expectedCommit] = process.argv.slice(2);
+          for (const name of ["cli", "server", "protocol"]) {
+            const packageJson = require(`${root}/install/global/node_modules/@getpaseo/${name}/package.json`);
+            if (packageJson.paseoBuildCommit !== expectedCommit) {
+              throw new Error(`${packageJson.name} came from ${packageJson.paseoBuildCommit ?? "an unstamped build"}`);
+            }
+          }
+          require.resolve("semver", {
+            paths: [`${root}/install/global/node_modules/@getpaseo/protocol`],
+          });
+          NODE

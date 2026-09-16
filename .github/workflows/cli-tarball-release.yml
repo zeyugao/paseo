@@ -128,13 +128,49 @@ jobs:
             mv "$RUNNER_TEMP/paseo-tarballs/$packed" "$RUNNER_TEMP/paseo-tarballs/$asset_name"
           }
 
-          pack_workspace "@getpaseo/highlight" "paseo-highlight.tgz"
-          pack_workspace "@getpaseo/relay" "paseo-relay.tgz"
-          pack_workspace "@getpaseo/protocol" "paseo-protocol.tgz"
-          pack_workspace "@getpaseo/client" "paseo-client.tgz"
-          pack_workspace "@getpaseo/plugin" "paseo-plugin.tgz"
-          pack_workspace "@getpaseo/server" "paseo-server.tgz"
-          pack_workspace "@getpaseo/cli" "paseo-cli.tgz"
+          asset_suffix=""
+          if [[ "$IS_ROLLING_CLI_RELEASE" == "true" ]]; then
+            asset_suffix="-$BUILD_COMMIT"
+          fi
+
+          pack_workspace "@getpaseo/highlight" "paseo-highlight${asset_suffix}.tgz"
+          pack_workspace "@getpaseo/relay" "paseo-relay${asset_suffix}.tgz"
+          pack_workspace "@getpaseo/protocol" "paseo-protocol${asset_suffix}.tgz"
+          pack_workspace "@getpaseo/client" "paseo-client${asset_suffix}.tgz"
+          pack_workspace "@getpaseo/plugin" "paseo-plugin${asset_suffix}.tgz"
+          pack_workspace "@getpaseo/server" "paseo-server${asset_suffix}.tgz"
+          pack_workspace "@getpaseo/cli" "paseo-cli${asset_suffix}.tgz"
+
+          if [[ "$IS_ROLLING_CLI_RELEASE" == "true" ]]; then
+            cp "$RUNNER_TEMP/paseo-tarballs/paseo-cli${asset_suffix}.tgz" \
+              "$RUNNER_TEMP/paseo-tarballs/paseo-cli.tgz"
+          fi
+
+      - name: Setup Bun for install smoke test
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Seed Bun install from previous rolling build
+        if: env.IS_ROLLING_CLI_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          previous_dir="$RUNNER_TEMP/previous-paseo-cli"
+          mkdir -p "$previous_dir"
+          if gh release download "$RELEASE_TAG" \
+            --pattern "paseo-cli.tgz" \
+            --dir "$previous_dir" \
+            --clobber \
+            --repo "${{ github.repository }}"; then
+            BUN_INSTALL="$RUNNER_TEMP/paseo-cli-install" \
+              bun install -g --force "$previous_dir/paseo-cli.tgz"
+          else
+            echo "No previous rolling CLI asset; testing a fresh install."
+          fi
 
       - name: Update rolling CLI tag
         if: env.IS_ROLLING_CLI_RELEASE == 'true'
@@ -199,11 +235,6 @@ jobs:
           set -euo pipefail
           gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/paseo-tarballs/*.tgz --clobber --repo "${{ github.repository }}"
 
-      - name: Setup Bun for install smoke test
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.2"
-
       - name: Verify published CLI installation
         env:
           REPOSITORY: ${{ github.repository }}
@@ -228,3 +259,19 @@ jobs:
             paths: [`${root}/install/global/node_modules/@getpaseo/protocol`],
           });
           NODE
+
+      - name: Remove superseded rolling assets
+        if: env.IS_ROLLING_CLI_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_suffix="-$BUILD_COMMIT.tgz"
+          gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' |
+            while IFS= read -r asset; do
+              if [[ "$asset" =~ ^paseo-(cli|client|highlight|protocol|relay|plugin|server)-[0-9a-f]{40}\.tgz$ && "$asset" != *"$current_suffix" ]]; then
+                gh release delete-asset "$RELEASE_TAG" "$asset" --yes --repo "${{ github.repository }}"
+              fi
+            done

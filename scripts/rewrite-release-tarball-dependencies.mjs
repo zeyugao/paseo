@@ -45,7 +45,13 @@ function requireValue(value, name) {
   return value.trim();
 }
 
-export function rewriteReleaseTarballDependencies({ repository, releaseTag, revision, rootDir }) {
+export function rewriteReleaseTarballDependencies({
+  repository,
+  releaseTag,
+  revision,
+  rolling = false,
+  rootDir,
+}) {
   repository = requireValue(repository, "repository");
   releaseTag = requireValue(releaseTag, "releaseTag");
   revision = requireValue(revision, "revision");
@@ -55,8 +61,11 @@ export function rewriteReleaseTarballDependencies({ repository, releaseTag, revi
 
   const assetUrls = new Map(
     releasePackages.map((pkg) => {
+      const assetName = rolling
+        ? pkg.assetName.replace(/\.tgz$/, `-${revision}.tgz`)
+        : pkg.assetName;
       const url = new URL(
-        `https://github.com/${repository}/releases/download/${encodeURIComponent(releaseTag)}/${pkg.assetName}`,
+        `https://github.com/${repository}/releases/download/${encodeURIComponent(releaseTag)}/${assetName}`,
       );
       url.searchParams.set("build", revision);
       return [pkg.name, url.toString()];
@@ -86,6 +95,7 @@ if (isMainModule(import.meta.url)) {
     repository: process.env.REPOSITORY,
     releaseTag: process.env.RELEASE_TAG,
     revision: process.env.BUILD_COMMIT,
+    rolling: process.env.IS_ROLLING_CLI_RELEASE === "true",
     rootDir: process.cwd(),
   });
 }

@@ -48,7 +48,7 @@ function requireValue(value, name) {
 function getRollingVersion(version, revision) {
   const baseVersion = /^(\d+\.\d+\.\d+)/.exec(version)?.[1];
   if (!baseVersion) throw new Error(`invalid package version ${version}`);
-  return `${baseVersion}-rolling.commit-${revision}`;
+  return `${baseVersion}+rolling.commit.${revision}`;
 }
 
 export function rewriteReleaseTarballDependencies({
@@ -105,13 +105,6 @@ export function rewriteReleaseTarballDependencies({
       for (const dependencyName of Object.keys(dependencies)) {
         const assetUrl = assetUrls.get(dependencyName);
         if (assetUrl) dependencies[dependencyName] = assetUrl;
-      }
-    }
-
-    if (rolling) {
-      for (const dependencyName of Object.keys(packageJson.peerDependencies ?? {})) {
-        const version = rollingVersions.get(dependencyName);
-        if (version) packageJson.peerDependencies[dependencyName] = version;
       }
     }
 

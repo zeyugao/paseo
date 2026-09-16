@@ -95,6 +95,34 @@ export class InMemoryAgentTimelineStore {
     return rows.length === 1 ? cloneRow(rows[0]) : null;
   }
 
+  getUnconfirmedSubmittedUserMessageNearTimestamp(
+    agentId: string,
+    text: string,
+    timestamp: string,
+    maxDifferenceMs: number,
+  ): AgentTimelineRow | null {
+    const targetTimestamp = Date.parse(timestamp);
+    if (!Number.isFinite(targetTimestamp)) return null;
+    const rows = this.requireState(agentId)
+      .projection.getRows()
+      .filter((candidate) => {
+        if (
+          candidate.providerMessageId ||
+          candidate.item.type !== "user_message" ||
+          !candidate.item.clientMessageId ||
+          candidate.item.text !== text
+        ) {
+          return false;
+        }
+        const candidateTimestamp = Date.parse(candidate.timestamp);
+        return (
+          Number.isFinite(candidateTimestamp) &&
+          Math.abs(candidateTimestamp - targetTimestamp) <= maxDifferenceMs
+        );
+      });
+    return rows.length === 1 ? cloneRow(rows[0]) : null;
+  }
+
   enrichSubmittedUserMessage(
     agentId: string,
     clientMessageId: string,

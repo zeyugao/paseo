@@ -326,7 +326,11 @@ export const OmpAgentSessionEventSchema = z.discriminatedUnion("type", [
     })
     .passthrough(),
   z
-    .object({ type: z.literal("agent_end"), messages: z.array(OmpAgentMessageSchema).optional() })
+    .object({
+      type: z.literal("agent_end"),
+      messages: z.array(OmpAgentMessageSchema).optional(),
+      isTerminal: z.boolean().optional(),
+    })
     .passthrough(),
 ]);
 
@@ -498,6 +502,12 @@ export const OmpRuntimeEventSchema = z.discriminatedUnion("type", [
 
 const OmpCommandBase = { id: z.string().optional() };
 export const OmpRpcCommandSchema = z.discriminatedUnion("type", [
+  z.object({
+    ...OmpCommandBase,
+    type: z.literal("steer"),
+    message: z.string(),
+    images: z.array(OmpImageContentSchema).optional(),
+  }),
   z.object({
     ...OmpCommandBase,
     type: z.literal("prompt"),

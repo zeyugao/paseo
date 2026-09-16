@@ -1061,7 +1061,7 @@ export class OmpAgentSession implements AgentSession {
     // with the optimistic submitted row.
     this.pendingSteerSubmissions.push(pendingSubmission);
     try {
-      this.runtimeSession.steer(payload.text, payload.images);
+      await this.runtimeSession.steer(payload.text, payload.images);
     } catch (error) {
       const index = this.pendingSteerSubmissions.indexOf(pendingSubmission);
       if (index >= 0) {
@@ -1306,7 +1306,7 @@ export class OmpAgentSession implements AgentSession {
       return {
         run: async () => {
           if (commandName === "steer") {
-            this.runtimeSession.steer(message);
+            await this.runtimeSession.steer(message);
           } else {
             this.runtimeSession.followUp(message);
           }
@@ -1878,6 +1878,11 @@ export class OmpAgentSession implements AgentSession {
   }
 
   private handleSessionEvent(event: OmpAgentSessionEvent): void {
+    // OMP can be briefly idle between cycles while queued work is still scheduled.
+    // Only its terminal agent_end may settle the turn or finish an interrupted drain.
+    if (event.type === "agent_end" && event.isTerminal === false) {
+      return;
+    }
     if (this.suppressingUnreadSteerRun && !this.activeTurnId) {
       this.handleUnreadSteerPhantomEvent(event);
       return;

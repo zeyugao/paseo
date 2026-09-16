@@ -426,13 +426,20 @@ Pushes to `main` update the rolling `cli-latest` prerelease and force-move the s
 npm install -g https://github.com/getpaseo/paseo/releases/download/cli-latest/paseo-cli.tgz
 ```
 
+Bun caches URL dependencies across global installs. Force a fresh top-level download and give the
+fixed rolling URL a unique cache key when updating an existing Bun installation:
+
+```bash
+bun install -g --force "https://github.com/getpaseo/paseo/releases/download/cli-latest/paseo-cli.tgz?refresh=$(date +%s)"
+```
+
 Stable releases still upload the same assets to the matching `v*` release, so the latest stable CLI can be installed with:
 
 ```bash
 npm install -g https://github.com/getpaseo/paseo/releases/latest/download/paseo-cli.tgz
 ```
 
-Before packing, the workflow rewrites internal `@getpaseo/*` dependencies in the temporary checkout to point at the current release's tarball URLs, for example `https://github.com/getpaseo/paseo/releases/download/cli-latest/paseo-server.tgz` on rolling builds or `https://github.com/getpaseo/paseo/releases/download/v0.1.97/paseo-server.tgz` on stable builds. The top-level stable install URL can use GitHub's `latest` redirect, but internal dependencies must stay pinned to the same release target so a new CLI install cannot mix one build's CLI with another build's server/client/protocol packages.
+Before packing, the workflow stamps every package with the source commit and rewrites internal `@getpaseo/*` dependencies in the temporary checkout to point at the current release's tarball URLs. Each internal URL includes the source commit as a cache key, so a rolling Bun update cannot reuse an older server, client, or protocol tarball. The workflow installs the published CLI into an empty Bun home and verifies the matching CLI, server, protocol, and transitive runtime dependencies before succeeding. The top-level stable install URL can use GitHub's `latest` redirect, but internal dependencies stay pinned to the same release target and build.
 
 ## Rolling server tarball asset
 

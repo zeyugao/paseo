@@ -10395,6 +10395,78 @@ test("provider user_message is recorded from the live stream", async () => {
   expect(userMessages[0].text).toBe("continuation prompt");
 });
 
+test("deduplicates a provider user echo missing client identity within its submitted turn", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-unidentified-user-echo-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  class UnidentifiedEchoSession extends TestAgentSession {
+    override async startTurn(
+      prompt: AgentPromptInput,
+      _options?: AgentRunOptions,
+    ): Promise<{ turnId: string }> {
+      const turnId = "turn-unidentified-echo";
+      const text = typeof prompt === "string" ? prompt : "";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+        this.pushEvent({
+          type: "timeline",
+          provider: this.provider,
+          turnId,
+          item: { type: "user_message", text, messageId: "provider-user-1" },
+        });
+        this.pushEvent({
+          type: "timeline",
+          provider: this.provider,
+          turnId,
+          item: { type: "assistant_message", text: "hello" },
+        });
+        this.pushEvent({ type: "turn_completed", provider: this.provider, turnId });
+      }, 0);
+      return { turnId };
+    }
+  }
+
+  class UnidentifiedEchoClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new UnidentifiedEchoSession(config);
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: { codex: new UnidentifiedEchoClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000405",
+  });
+  let agentId: string | null = null;
+
+  try {
+    const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = snapshot.id;
+    await manager.runAgent(snapshot.id, "hello", { clientMessageId: "client-hello" });
+
+    expect(manager.getTimeline(snapshot.id)).toEqual([
+      {
+        type: "user_message",
+        text: "hello",
+        clientMessageId: "client-hello",
+        messageId: "client-hello",
+      },
+      { type: "assistant_message", text: "hello" },
+    ]);
+    expect(manager.fetchTimeline(snapshot.id, { limit: 0 }).rows[0]).toMatchObject({
+      providerMessageId: "provider-user-1",
+    });
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("canonical submitted prompt keeps wire identity while rewind resolves provider identity", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-submitted-prompt-"));
   const storagePath = join(workdir, "agents");

@@ -4341,6 +4341,17 @@ export class AgentManager {
       return;
     }
 
+    if (
+      event.item.type === "user_message" &&
+      !event.item.clientMessageId &&
+      event.turnId &&
+      this.reconcileUnidentifiedSubmittedPromptEcho(agent, event.item, event.turnId)
+    ) {
+      flags.shouldDispatchEvent = false;
+      flags.shouldNotifyWaiters = false;
+      return;
+    }
+
     if (options?.fromHistory) {
       this.recordTimeline(
         agent.id,
@@ -4639,6 +4650,26 @@ export class AgentManager {
         agent.id,
         clientMessageId,
         messageId,
+      );
+      if (enriched) this.enqueueDurableTimelineUpdate(agent.id, enriched);
+    }
+    return existing;
+  }
+
+  private reconcileUnidentifiedSubmittedPromptEcho(
+    agent: ActiveManagedAgent,
+    item: Extract<AgentTimelineItem, { type: "user_message" }>,
+    turnId: string,
+  ): AgentTimelineRow | null {
+    const existing = this.timelineStore.getSubmittedUserMessageForTurn(agent.id, turnId, item.text);
+    if (!existing || existing.item.type !== "user_message" || !existing.item.clientMessageId) {
+      return null;
+    }
+    if (item.messageId) {
+      const enriched = this.timelineStore.enrichSubmittedUserMessage(
+        agent.id,
+        existing.item.clientMessageId,
+        item.messageId,
       );
       if (enriched) this.enqueueDurableTimelineUpdate(agent.id, enriched);
     }

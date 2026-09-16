@@ -104,6 +104,7 @@ import { extractAttention } from "../persistence-hooks.js";
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
 const IMPORTABLE_SESSION_LIST_TIMEOUT_MS = 90_000;
+const PROVIDER_USER_ECHO_TIMESTAMP_TOLERANCE_MS = 5_000;
 const STORED_AGENT_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: false,
   supportsSessionPersistence: true,
@@ -4753,8 +4754,14 @@ export class AgentManager {
       if (
         item.type === "user_message" &&
         !item.clientMessageId &&
-        event.turnId &&
-        this.reconcileUnidentifiedSubmittedPromptEcho(agent, item, event.turnId)
+        ((event.turnId &&
+          this.reconcileUnidentifiedSubmittedPromptEcho(agent, item, event.turnId)) ||
+          (!event.turnId &&
+            this.reconcileLateSubmittedPromptEcho(
+              agent,
+              item,
+              event.timestamp ?? new Date().toISOString(),
+            )))
       )
         continue;
 
@@ -5085,6 +5092,31 @@ export class AgentManager {
     turnId: string,
   ): AgentTimelineRow | null {
     const existing = this.timelineStore.getSubmittedUserMessageForTurn(agent.id, turnId, item.text);
+    if (!existing || existing.item.type !== "user_message" || !existing.item.clientMessageId) {
+      return null;
+    }
+    if (item.messageId) {
+      const enriched = this.timelineStore.enrichSubmittedUserMessage(
+        agent.id,
+        existing.item.clientMessageId,
+        item.messageId,
+      );
+      if (enriched) this.enqueueDurableTimelineUpdate(agent.id, enriched);
+    }
+    return existing;
+  }
+
+  private reconcileLateSubmittedPromptEcho(
+    agent: ActiveManagedAgent,
+    item: Extract<AgentTimelineItem, { type: "user_message" }>,
+    timestamp: string,
+  ): AgentTimelineRow | null {
+    const existing = this.timelineStore.getUnconfirmedSubmittedUserMessageNearTimestamp(
+      agent.id,
+      item.text,
+      timestamp,
+      PROVIDER_USER_ECHO_TIMESTAMP_TOLERANCE_MS,
+    );
     if (!existing || existing.item.type !== "user_message" || !existing.item.clientMessageId) {
       return null;
     }

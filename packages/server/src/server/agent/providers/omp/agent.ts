@@ -1892,8 +1892,7 @@ export class OmpAgentSession implements AgentSession {
 
     switch (event.type) {
       case "agent_start":
-        this.activeTurnStarted = true;
-        this.clearNoTurnBuffers();
+        this.emitTurnStarted(turnId);
         this.emit({
           type: "thread_started",
           provider: this.provider,
@@ -1901,13 +1900,9 @@ export class OmpAgentSession implements AgentSession {
         });
         return;
       case "turn_start":
-        this.activeTurnStarted = true;
-        this.clearNoTurnBuffers();
-        this.emit({
-          type: "turn_started",
-          provider: this.provider,
-          turnId,
-        });
+        // OMP emits turn_start for each model cycle inside one agent run. Older compatible
+        // runtimes may omit agent_start, so retain the first turn_start as a fallback.
+        this.emitTurnStartedIfNeeded(turnId);
         return;
       case "message_start":
         this.handleMessageStart(event);
@@ -1968,6 +1963,22 @@ export class OmpAgentSession implements AgentSession {
       default:
         return;
     }
+  }
+
+  private emitTurnStarted(turnId: string | undefined): void {
+    this.activeTurnStarted = true;
+    this.clearNoTurnBuffers();
+    this.emit({
+      type: "turn_started",
+      provider: this.provider,
+      turnId,
+    });
+  }
+  private emitTurnStartedIfNeeded(turnId: string | undefined): void {
+    if (this.activeTurnStarted) {
+      return;
+    }
+    this.emitTurnStarted(turnId);
   }
 
   private handleToolExecutionEnd(

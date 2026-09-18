@@ -359,6 +359,34 @@ describe("PluginService", () => {
     await service.stopAllPlugins();
   });
 
+  it("resolves a home-relative plugin directory from config", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-home-"));
+    roots.push(home);
+    const directory = path.join(home, "plugin-sources", "relative");
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "paseo-plugin.json"), JSON.stringify({ id: "relative" }));
+    await writeFile(
+      path.join(directory, "index.client.ts"),
+      "export default function contribute() { return () => undefined; }",
+    );
+    const service = createService(home, {
+      relative: { source: "directory", path: "plugin-sources/relative" },
+    });
+
+    await service.start();
+
+    expect(await service.listPlugins()).toMatchObject([
+      {
+        id: "relative",
+        path: "plugin-sources/relative",
+        status: "running",
+        installation: { identity: { kind: "directory", path: directory } },
+      },
+    ]);
+    await expect(service.reloadPlugin("relative")).resolves.toMatchObject({ status: "running" });
+    await service.stopAllPlugins();
+  });
+
   it("prefers an existing directory and installs its selected plugin subdirectory", async () => {
     const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-home-"));
     roots.push(home);

@@ -36,6 +36,10 @@ The daemon stores directory sources under the root `plugins` object:
 }
 ```
 
+`path` may be relative, which resolves against `$PASEO_HOME`. Point one hand-written `config.json` at
+a home-relative path when the plugin lives inside the home — symlinked to a checkout elsewhere, for
+instance — and the same config works on every machine.
+
 Installed plugins are disabled unless `pluginsEnabled` is `true`. Built-in plugins remain active.
 Changing that root field is
 runtime-safe: run `paseo reload` after editing `config.json`. Enabling starts every configured,

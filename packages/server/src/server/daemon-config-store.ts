@@ -345,8 +345,8 @@ export function applyMutableProviderConfigToOverrides(
 
 export class DaemonConfigStore {
   private mutations: Promise<unknown> = Promise.resolve();
+  readonly paseoHome: string;
   private current: MutableDaemonConfig;
-  private readonly paseoHome: string;
   private readonly logger: LoggerLike | undefined;
   private readonly changeListeners = new Set<ConfigListener>();
   private readonly applyListeners = new Set<ConfigApplyListener>();

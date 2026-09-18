@@ -212,6 +212,27 @@ describe("OMP agent client and session", () => {
     expect(omp.completedTurnCount()).toBe(1);
   });
 
+  test("starts Paseo lifecycle on agent_start and ignores later model-cycle starts", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    await omp.startActiveTurn("inspect the project");
+    const runtime = omp.runtime();
+    runtime.emit({ type: "agent_start" });
+    runtime.emit({
+      type: "message_update",
+      message: { role: "assistant", content: [], responseId: "reasoning-1" },
+      assistantMessageEvent: { type: "thinking_delta", delta: "Checking files" },
+    });
+    runtime.beginTurn();
+
+    expect(omp.eventTypes().slice(0, 3)).toEqual(["turn_started", "thread_started", "timeline"]);
+    expect(omp.eventTypes().filter((type) => type === "turn_started")).toHaveLength(1);
+    expect(omp.timeline()).toEqual([{ type: "reasoning", text: "Checking files" }]);
+
+    runtime.finishTurn();
+  });
+
   test("streams OMP advisor messages as distinct tool-call blocks", async () => {
     const omp = new OmpHarness();
     await omp.start();

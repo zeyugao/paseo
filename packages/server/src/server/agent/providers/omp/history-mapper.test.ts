@@ -368,6 +368,87 @@ describe("OMP history mapper", () => {
     });
   });
 
+  test("replays custom_message entries through the live custom-message path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omp-history-"));
+    const sessionFile = join(dir, "session.jsonl");
+    const notice = [
+      "<system-notice>",
+      "Background job bg_6 has completed. Resume your work using the result below.",
+      '<task-result id="bg_6" status="completed">',
+      "<output>58 passed</output>",
+      "</task-result>",
+      "</system-notice>",
+    ].join("\n");
+    writeFileSync(
+      sessionFile,
+      [
+        { type: "session", id: "root", parentId: null },
+        {
+          type: "message",
+          id: "user-1",
+          parentId: "root",
+          message: { role: "user", content: "run the tests" },
+        },
+        {
+          type: "custom_message",
+          customType: "async-result",
+          content: notice,
+          display: true,
+          id: "notice-1",
+          parentId: "user-1",
+        },
+        {
+          type: "custom_message",
+          customType: "mid-run-todo-nudge",
+          content: "<system-reminder>7 todo items still open.</system-reminder>",
+          display: false,
+          id: "nudge-1",
+          parentId: "notice-1",
+        },
+        {
+          type: "custom_message",
+          customType: "launch-completion",
+          content: "Supervised process dev-daemon exited with code 0.",
+          display: true,
+          id: "launch-1",
+          parentId: "nudge-1",
+        },
+        {
+          type: "ttsr_injection",
+          injectedRules: ["ts-no-tiny-functions"],
+          id: "rules-1",
+          parentId: "launch-1",
+        },
+        {
+          type: "branch_summary",
+          fromId: "rules-1",
+          summary: "abandoned branch context",
+          id: "branch-1",
+          parentId: "rules-1",
+        },
+        {
+          type: "message",
+          id: "assistant-1",
+          parentId: "branch-1",
+          message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+        },
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n"),
+    );
+
+    const events: AgentStreamEvent[] = [];
+    for await (const event of streamOmpHistory({ sessionFile, provider: "omp" })) {
+      events.push(event);
+    }
+    expect(events.map((event) => event.item)).toEqual([
+      { type: "user_message", text: "run the tests", messageId: "user-1" },
+      { type: "notification", level: "info", message: "Background job bg_6 completed" },
+      { type: "assistant_message", text: "Supervised process dev-daemon exited with code 0." },
+      { type: "assistant_message", text: "done", messageId: "omp-history-assistant-1" },
+    ]);
+  });
+
   test("maps only the active JSONL chain with native user ids and visible unknown roles", async () => {
     const dir = mkdtempSync(join(tmpdir(), "omp-history-"));
     const sessionFile = join(dir, "session.jsonl");

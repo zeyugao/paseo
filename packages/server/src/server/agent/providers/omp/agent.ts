@@ -578,8 +578,6 @@ function isOmpAgentSessionEvent(event: OmpRuntimeEvent): event is OmpAgentSessio
     case "tool_execution_start":
     case "tool_execution_update":
     case "tool_execution_end":
-    case "compaction_start":
-    case "compaction_end":
     case "agent_end":
       return true;
     default:
@@ -715,9 +713,8 @@ export class OmpAgentSession implements AgentSession {
   private readonly pendingPromptResults = new Map<string, boolean>();
   private pendingNoTurnCompletionAbort: AbortController | null = null;
   private lastKnownThinkingOptionId: string | null;
-  private outOfBandCompactionEmit: ((event: AgentStreamEvent) => void) | null = null;
-  private outOfBandCompactionStarted = false;
-  private outOfBandCompactionCompleted = false;
+  /** Guards against a second out-of-band `/compact` while one is in flight. */
+  private outOfBandCompactionRunning = false;
   private commandCache: AgentSlashCommand[] | null = null;
   private readonly subagentIndex = new OmpSubagentIndex();
   private readonly subagentCardTracker: OmpSubagentCardTracker;
@@ -1490,44 +1487,51 @@ export class OmpAgentSession implements AgentSession {
     customInstructions: string | undefined,
     emit: (event: AgentStreamEvent) => void,
   ): Promise<void> {
-    if (this.outOfBandCompactionEmit) {
+    if (this.outOfBandCompactionRunning) {
       throw new Error("An OMP compact command is already running");
     }
-    this.outOfBandCompactionEmit = emit;
-    this.outOfBandCompactionStarted = false;
-    this.outOfBandCompactionCompleted = false;
-    try {
-      await this.runtimeSession.compact(customInstructions);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (
-        this.outOfBandCompactionEmit === emit &&
-        this.outOfBandCompactionStarted &&
-        !this.outOfBandCompactionCompleted
-      ) {
-        this.emitCompactionTimeline({
-          turnId: undefined,
-          item: {
-            type: "compaction",
-            status: "completed",
-            trigger: "manual",
-          },
-        });
-      }
+    // OMP reports no wire event for manual compaction — `auto_compaction_*` is
+    // maintenance-only — so the RPC call itself drives the loading/completed rows.
+    this.outOfBandCompactionRunning = true;
+    const emitCompaction = (status: "loading" | "completed"): void => {
       emit({
         type: "timeline",
         provider: this.provider,
-        item: {
-          type: "assistant_message",
-          text: `[Error] Failed to compact context: ${message}`,
-        },
+        item: { type: "compaction", status, trigger: "manual" },
       });
-    } finally {
-      if (this.outOfBandCompactionEmit === emit && !this.outOfBandCompactionStarted) {
-        this.outOfBandCompactionEmit = null;
-        this.outOfBandCompactionStarted = false;
-        this.outOfBandCompactionCompleted = false;
+    };
+    // Timeline delivery is best-effort. The manager persists each row before
+    // broadcasting it, so a throwing emitter can still have recorded the row:
+    // the completed marker is attempted on every exit path, and a delivery
+    // failure never turns a successful compaction into a reported failure.
+    const tryEmitCompaction = (status: "loading" | "completed"): void => {
+      try {
+        emitCompaction(status);
+      } catch {
+        // Infrastructure fault: nothing actionable from this command.
       }
+    };
+    try {
+      tryEmitCompaction("loading");
+      try {
+        await this.runtimeSession.compact(customInstructions);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Close the loading row before surfacing the failure.
+        tryEmitCompaction("completed");
+        emit({
+          type: "timeline",
+          provider: this.provider,
+          item: {
+            type: "assistant_message",
+            text: `[Error] Failed to compact context: ${message}`,
+          },
+        });
+        return;
+      }
+      tryEmitCompaction("completed");
+    } finally {
+      this.outOfBandCompactionRunning = false;
     }
   }
 
@@ -1938,26 +1942,6 @@ export class OmpAgentSession implements AgentSession {
         this.handleToolExecutionEnd(event, turnId);
         return;
       }
-      case "compaction_start":
-        this.emitCompactionTimeline({
-          turnId,
-          item: {
-            type: "compaction",
-            status: "loading",
-            trigger: event.reason === "manual" ? "manual" : "auto",
-          },
-        });
-        return;
-      case "compaction_end":
-        this.emitCompactionTimeline({
-          turnId,
-          item: {
-            type: "compaction",
-            status: "completed",
-            trigger: event.reason === "manual" ? "manual" : "auto",
-          },
-        });
-        return;
       case "agent_end": {
         const messages = event.messages ?? [];
         let terminalMessages: OmpAgentMessage[] | null = null;
@@ -2026,36 +2010,6 @@ export class OmpAgentSession implements AgentSession {
     }
   }
 
-  private emitCompactionTimeline(input: {
-    turnId: string | undefined;
-    item: Extract<AgentStreamEvent, { type: "timeline" }>["item"];
-  }): void {
-    const emitOutOfBand = this.outOfBandCompactionEmit;
-    if (emitOutOfBand && input.item.type === "compaction") {
-      if (input.item.status === "loading") {
-        this.outOfBandCompactionStarted = true;
-      }
-      if (input.item.status === "completed") {
-        this.outOfBandCompactionCompleted = true;
-      }
-    }
-    const event: AgentStreamEvent = {
-      type: "timeline",
-      provider: this.provider,
-      ...(emitOutOfBand ? {} : { turnId: input.turnId }),
-      item: input.item,
-    };
-    if (emitOutOfBand) {
-      emitOutOfBand(event);
-      if (input.item.type === "compaction" && input.item.status === "completed") {
-        this.outOfBandCompactionEmit = null;
-        this.outOfBandCompactionStarted = false;
-        this.outOfBandCompactionCompleted = false;
-      }
-      return;
-    }
-    this.emit(event);
-  }
 
   private handleMessageUpdate(
     event: Extract<OmpAgentSessionEvent, { type: "message_update" }>,

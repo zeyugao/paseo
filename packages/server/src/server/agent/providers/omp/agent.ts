@@ -589,8 +589,6 @@ function isOmpAgentSessionEvent(event: OmpRuntimeEvent): event is OmpAgentSessio
     case "tool_execution_start":
     case "tool_execution_update":
     case "tool_execution_end":
-    case "compaction_start":
-    case "compaction_end":
     case "agent_end":
       return true;
     default:
@@ -728,7 +726,8 @@ export class OmpAgentSession implements AgentSession {
   private readonly pendingPromptResults = new Map<string, OmpPromptResult>();
   private pendingNoTurnCompletionAbort: AbortController | null = null;
   private lastKnownThinkingOptionId: string | null;
-  private manualCompactionRunning = false;
+  /** Guards against a second out-of-band `/compact` while one is in flight. */
+  private outOfBandCompactionRunning = false;
   private commandCache: AgentSlashCommand[] | null = null;
   private readonly subagentIndex = new OmpSubagentIndex();
   private readonly subagentCardTracker: OmpSubagentCardTracker;
@@ -1575,37 +1574,52 @@ export class OmpAgentSession implements AgentSession {
     customInstructions: string | undefined,
     emit: (event: AgentStreamEvent) => void,
   ): Promise<void> {
-    if (this.manualCompactionRunning) {
+    if (this.outOfBandCompactionRunning) {
       throw new Error("An OMP compact command is already running");
     }
-    // OMP answers a manual compact with its RPC response alone, without
-    // compaction_start or compaction_end, so the request owns both rows.
-    this.manualCompactionRunning = true;
-    const emitCompaction = (status: "loading" | "completed") =>
+    // OMP reports no wire event for manual compaction — `auto_compaction_*` is
+    // maintenance-only — so the RPC call itself drives the loading/completed rows.
+    this.outOfBandCompactionRunning = true;
+    const emitCompaction = (status: "loading" | "completed"): void => {
       emit({
         type: "timeline",
         provider: this.provider,
         item: { type: "compaction", status, trigger: "manual" },
       });
-    emitCompaction("loading");
+    };
+    // Timeline delivery is best-effort. The manager persists each row before
+    // broadcasting it, so a throwing emitter can still have recorded the row:
+    // the completed marker is attempted on every exit path, and a delivery
+    // failure never turns a successful compaction into a reported failure.
+    const tryEmitCompaction = (status: "loading" | "completed"): void => {
+      try {
+        emitCompaction(status);
+      } catch {
+        // Infrastructure fault: nothing actionable from this command.
+      }
+    };
     try {
-      await this.runtimeSession.compact(customInstructions);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      emitCompaction("completed");
-      emit({
-        type: "timeline",
-        provider: this.provider,
-        item: {
-          type: "assistant_message",
-          text: `[Error] Failed to compact context: ${message}`,
-        },
-      });
-      return;
+      tryEmitCompaction("loading");
+      try {
+        await this.runtimeSession.compact(customInstructions);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Close the loading row before surfacing the failure.
+        tryEmitCompaction("completed");
+        emit({
+          type: "timeline",
+          provider: this.provider,
+          item: {
+            type: "assistant_message",
+            text: `[Error] Failed to compact context: ${message}`,
+          },
+        });
+        return;
+      }
+      tryEmitCompaction("completed");
     } finally {
-      this.manualCompactionRunning = false;
+      this.outOfBandCompactionRunning = false;
     }
-    emitCompaction("completed");
     await this.usagePoller.refresh();
   }
 
@@ -2018,10 +2032,7 @@ export class OmpAgentSession implements AgentSession {
         this.handleToolExecutionEnd(event, turnId);
         return;
       }
-      case "compaction_start":
-      case "compaction_end":
-        this.handleCompactionEvent(event, turnId);
-        return;
+
       case "agent_end": {
         const messages = event.messages ?? [];
         let terminalMessages: OmpAgentMessage[] | null = null;
@@ -2095,25 +2106,7 @@ export class OmpAgentSession implements AgentSession {
     }
   }
 
-  private handleCompactionEvent(
-    event: Extract<OmpAgentSessionEvent, { type: "compaction_start" | "compaction_end" }>,
-    turnId: string | undefined,
-  ): void {
-    // A manual compact emits its own rows around the request.
-    if (this.manualCompactionRunning) {
-      return;
-    }
-    this.emit({
-      type: "timeline",
-      provider: this.provider,
-      turnId,
-      item: {
-        type: "compaction",
-        status: event.type === "compaction_start" ? "loading" : "completed",
-        trigger: event.reason === "manual" ? "manual" : "auto",
-      },
-    });
-  }
+
 
   private handleMessageUpdate(
     event: Extract<OmpAgentSessionEvent, { type: "message_update" }>,

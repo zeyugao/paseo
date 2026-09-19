@@ -1463,7 +1463,18 @@ function reduceTimelineCompaction(
   timelineCursor?: TimelinePosition,
 ): StreamItem[] {
   if (item.status === "completed") {
-    const loadingIdx = state.findIndex((s) => s.kind === "compaction" && s.status === "loading");
+    // Manual compaction can overlap an automatic one, and completing the first
+    // loading row blindly swaps their labels. Prefer the row opened with the
+    // same trigger; items without one keep the first-loading fallback.
+    let loadingIdx =
+      item.trigger === undefined
+        ? -1
+        : state.findIndex(
+            (s) => s.kind === "compaction" && s.status === "loading" && s.trigger === item.trigger,
+          );
+    if (loadingIdx < 0) {
+      loadingIdx = state.findIndex((s) => s.kind === "compaction" && s.status === "loading");
+    }
     const existing = loadingIdx >= 0 ? state[loadingIdx] : undefined;
     if (loadingIdx >= 0 && existing && existing.kind === "compaction") {
       const updated: CompactionItem = {

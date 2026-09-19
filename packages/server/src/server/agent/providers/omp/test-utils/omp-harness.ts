@@ -281,6 +281,15 @@ export class OmpHarness {
     return await session.run(input);
   }
 
+  async runOutOfBandCommand(
+    prompt: string,
+    emit: (event: AgentStreamEvent) => void,
+  ): Promise<void> {
+    const handler = this.requireSession().tryHandleOutOfBand(prompt);
+    if (!handler) throw new Error(`OMP session did not handle prompt out of band: ${prompt}`);
+    await handler.run({ emit });
+  }
+
   async startPromptWithFalseLocalOnlyResult(
     input: string,
   ): Promise<{ completed: () => boolean; completion: Promise<unknown> }> {

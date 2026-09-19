@@ -313,20 +313,6 @@ export const OmpAgentSessionEventSchema = z.discriminatedUnion("type", [
     .passthrough(),
   z
     .object({
-      type: z.literal("compaction_start"),
-      reason: z.string().optional(),
-    })
-    .passthrough(),
-  z
-    .object({
-      type: z.literal("compaction_end"),
-      reason: z.string().optional(),
-      errorMessage: z.string().optional(),
-      aborted: z.boolean().optional(),
-    })
-    .passthrough(),
-  z
-    .object({
       type: z.literal("agent_end"),
       messages: z.array(OmpAgentMessageSchema).optional(),
       isTerminal: z.boolean().optional(),

@@ -10909,6 +10909,71 @@ test("authoritative timeline records a daemon-handled submitted prompt before it
   }
 });
 
+test("OMP /compact keeps ordered durable markers when a subscriber throws mid-broadcast", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-omp-compact-"));
+  const runtime = new FakeOmp();
+  const manager = new AgentManager({
+    clients: { omp: new OmpAgentClient({ logger, runtime }) },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "omp", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    const compactionCompleted = deferred<void>();
+    manager.subscribe(
+      (event) => {
+        if (
+          event.type === "agent_stream" &&
+          event.event.type === "timeline" &&
+          event.event.item.type === "compaction" &&
+          event.event.item.status === "completed"
+        ) {
+          compactionCompleted.resolve();
+        }
+      },
+      { agentId, replayState: false },
+    );
+    // Timeline persistence precedes the broadcast, and subscriber exceptions
+    // must neither strip the durable rows nor fail the compaction.
+    manager.subscribe(
+      (event) => {
+        if (
+          event.type === "agent_stream" &&
+          event.event.type === "timeline" &&
+          event.event.item.type === "compaction"
+        ) {
+          throw new Error("subscriber failed");
+        }
+      },
+      { agentId, replayState: false },
+    );
+
+    const dispatch = await startAgentRun(manager, agent.id, "/compact focus on tests", logger, {
+      runOptions: { clientMessageId: "compact-client" },
+    });
+    await compactionCompleted.promise;
+
+    expect(dispatch.disposition).toBe("out_of_band");
+    expect(manager.getTimeline(agent.id)).toEqual([
+      {
+        type: "user_message",
+        text: "/compact focus on tests",
+        clientMessageId: "compact-client",
+      },
+      { type: "compaction", status: "loading", trigger: "manual" },
+      { type: "compaction", status: "completed", trigger: "manual" },
+    ]);
+  } finally {
+    if (agentId) {
+      await manager.closeAgent(agentId).catch(() => undefined);
+    }
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("replaceAgentRun succeeds when foreground turn terminal event is never delivered", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-stale-fg-"));
   const storagePath = join(workdir, "agents");

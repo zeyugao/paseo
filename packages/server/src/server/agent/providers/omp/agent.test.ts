@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
 
 import type { PaseoToolCatalog } from "../../tools/types.js";
+import type { AgentStreamEvent } from "../../agent-sdk-types.js";
 import type { OmpNoTurnScheduler, OmpProviderIdleScheduler } from "./agent.js";
 import type { OmpUsagePollScheduler } from "./usage-poller.js";
 import { resolveOmpProviderParams } from "./provider-config.js";
@@ -117,6 +118,19 @@ function createToolCatalog(): PaseoToolCatalog {
     executeTool: async () => ({ content: [] }),
   };
 }
+
+const MANUAL_COMPACTION_EVENTS = [
+  {
+    type: "timeline",
+    provider: "omp",
+    item: { type: "compaction", status: "loading", trigger: "manual" },
+  },
+  {
+    type: "timeline",
+    provider: "omp",
+    item: { type: "compaction", status: "completed", trigger: "manual" },
+  },
+] as const satisfies readonly AgentStreamEvent[];
 
 describe("OMP agent client and session", () => {
   test("owns launch configuration and registers native host tools", async () => {
@@ -877,6 +891,101 @@ describe("OMP agent client and session", () => {
       status: "unavailable",
     });
     expect(omp.runtime().steerRequests).toEqual([]);
+  });
+
+  test("drives manual compaction markers from the /compact RPC call", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const events: AgentStreamEvent[] = [];
+
+    await omp.runOutOfBandCommand("/compact focus on tests", (event) => events.push(event));
+
+    expect(omp.runtime().compactRequests).toEqual([{ customInstructions: "focus on tests" }]);
+    expect(events).toEqual([...MANUAL_COMPACTION_EVENTS]);
+  });
+
+  test("closes the manual compaction marker when /compact rejects", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    omp.runtime().compactError = new Error("summarizer failed");
+    const events: AgentStreamEvent[] = [];
+
+    await omp.runOutOfBandCommand("/compact", (event) => events.push(event));
+
+    expect(events).toEqual([
+      ...MANUAL_COMPACTION_EVENTS,
+      {
+        type: "timeline",
+        provider: "omp",
+        item: {
+          type: "assistant_message",
+          text: "[Error] Failed to compact context: summarizer failed",
+        },
+      },
+    ]);
+  });
+
+  test("closes the loading row when the emitter fails after recording it", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const recorded: AgentStreamEvent[] = [];
+    const emitterThatFailsAfterRecording = (event: AgentStreamEvent): void => {
+      recorded.push(event);
+      throw new Error("subscriber failed");
+    };
+
+    await omp.runOutOfBandCommand("/compact", emitterThatFailsAfterRecording);
+
+    // The row is durable even though its broadcast failed, so the completed
+    // marker must still be attempted and the guard released for the next call.
+    expect(recorded).toEqual([...MANUAL_COMPACTION_EVENTS]);
+    const events: AgentStreamEvent[] = [];
+    await omp.runOutOfBandCommand("/compact focus", (event) => events.push(event));
+    expect(events).toEqual([...MANUAL_COMPACTION_EVENTS]);
+    expect(omp.runtime().compactRequests).toEqual([{}, { customInstructions: "focus" }]);
+  });
+
+  test("does not report compaction failure when the completed marker cannot be delivered", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const recorded: AgentStreamEvent[] = [];
+    let emissions = 0;
+    const emit = (event: AgentStreamEvent): void => {
+      emissions += 1;
+      if (emissions > 1) {
+        throw new Error("subscriber failed");
+      }
+      recorded.push(event);
+    };
+
+    await omp.runOutOfBandCommand("/compact", emit);
+
+    expect(recorded).toEqual([MANUAL_COMPACTION_EVENTS[0]]);
+    expect(
+      recorded.some(
+        (event) => event.type === "timeline" && event.item.type === "assistant_message",
+      ),
+    ).toBe(false);
+  });
+
+  test("rejects a second /compact while the first RPC is still in flight", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    omp.runtime().holdNextCompaction();
+    const firstEvents: AgentStreamEvent[] = [];
+    const first = omp.runOutOfBandCommand("/compact", (event) => firstEvents.push(event));
+    const secondEvents: AgentStreamEvent[] = [];
+
+    await expect(
+      omp.runOutOfBandCommand("/compact again", (event) => secondEvents.push(event)),
+    ).rejects.toThrow("An OMP compact command is already running");
+
+    await omp.runtime().releaseHeldCompaction();
+    await first;
+
+    expect(firstEvents).toEqual([...MANUAL_COMPACTION_EVENTS]);
+    expect(secondEvents).toEqual([]);
+    expect(omp.runtime().compactRequests).toEqual([{}]);
   });
 
   test("waits for a steer acknowledgement before releasing permissions", async () => {

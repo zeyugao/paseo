@@ -62,6 +62,7 @@ interface FinishNotificationScenario {
   resolveChildPermissionWhileIdle(requestId?: string): void;
   finishChild(): void;
   finishChildAndReadParentPrompt(): Promise<string>;
+  errorChildAndReadParentPrompt(lastError: string): Promise<string>;
   closeChildAndReadParentPrompt(): Promise<string>;
   parentPrompts(): string[];
   steerAttemptCount(): number;
@@ -228,6 +229,26 @@ function createFinishNotificationScenario(
 
       return parentPrompt;
     },
+    async errorChildAndReadParentPrompt(lastError: string) {
+      const parentPrompt = new Promise<string>((resolve) => {
+        resolveParentPrompt = resolve;
+      });
+
+      childAgent.lifecycle = "running";
+      subscriber?.({
+        type: "agent_state",
+        agent: childAgent,
+      });
+
+      childAgent.lifecycle = "error";
+      Reflect.set(childAgent, "lastError", lastError);
+      subscriber?.({
+        type: "agent_state",
+        agent: childAgent,
+      });
+
+      return parentPrompt;
+    },
     async closeChildAndReadParentPrompt() {
       const parentPrompt = new Promise<string>((resolve) => {
         resolveParentPrompt = resolve;
@@ -278,6 +299,21 @@ test("finish notifications tell the parent the child's last assistant message", 
     ),
   );
   expect(scenario.steerAttemptCount()).toBe(1);
+});
+
+test("errored child notifications carry the failure, not the stale response", async () => {
+  const scenario = createFinishNotificationScenario({
+    childLastAssistantMessage: "Implemented the cleanup and all checks pass.",
+  });
+
+  scenario.startWatchingChild();
+  const parentPrompt = await scenario.errorChildAndReadParentPrompt("Provider execution failed");
+
+  expect(parentPrompt).toEqual(
+    formatSystemNotificationPrompt(
+      "Agent child-agent (Child Agent) errored.\n\n<agent-response>\nProvider execution failed\n</agent-response>",
+    ),
+  );
 });
 
 test("finish notifications truncate oversized child responses", async () => {

@@ -72,7 +72,7 @@ export { formatOmpVersionSupport, resolveOmpDiagnosticPaths } from "./provider-c
 import { OmpSubagentCardTracker } from "./subagent-card-tracker.js";
 import { ompSkillPromptUserText, shouldDisplayOmpCustomMessage } from "./custom-message.js";
 import { getUserMessageText } from "./message-history.js";
-import { mapOmpSystemNoticeToNotification } from "./system-notice.js";
+import { mapOmpSystemNoticeToToolCalls } from "./system-notice.js";
 import { materializeProviderImage } from "../provider-image-output.js";
 import { OmpCliRuntime } from "./cli-runtime.js";
 import { listOmpImportableSessions, readOmpImportSessionConfig } from "./session-descriptor.js";
@@ -2096,7 +2096,6 @@ export class OmpAgentSession implements AgentSession {
   }
 
 
-
   private handleMessageUpdate(
     event: Extract<OmpAgentSessionEvent, { type: "message_update" }>,
     turnId: string | undefined,
@@ -2161,17 +2160,25 @@ export class OmpAgentSession implements AgentSession {
             this.emitSkillPromptEcho(turnId);
             return;
           }
-          const item =
+          const customItem =
             mapOmpAdvisorMessageToToolCall(event.message, text) ??
-            mapOmpIrcMessageToToolCall(event.message, text) ??
-            mapOmpSystemNoticeToNotification(text);
-          this.emit({
-            type: "timeline",
-            provider: this.provider,
-            turnId,
-            item:
-              item ?? mapCustomMessageToToolCall(event.message, text, `omp-custom-${randomUUID()}`),
-          });
+            mapOmpIrcMessageToToolCall(event.message, text);
+          const items: AgentTimelineItem[] = customItem
+            ? [customItem]
+            : mapOmpSystemNoticeToToolCalls(event.message, text);
+          if (items.length === 0) {
+            items.push(
+              mapCustomMessageToToolCall(event.message, text, `omp-custom-${randomUUID()}`),
+            );
+          }
+          for (const item of items) {
+            this.emit({
+              type: "timeline",
+              provider: this.provider,
+              turnId,
+              item,
+            });
+          }
         }
       }
       return;

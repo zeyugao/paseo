@@ -474,7 +474,14 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       return;
     }
     const title = record?.title ?? childAgentId;
-    const lastAssistantMessage = await agentManager.getLastAssistantMessage(childAgentId);
+    // A failed turn no longer ends on an assistant message: the daemon writes a
+    // timeline error notice instead, so the snapshot's lastError is the only
+    // place the failure text reaches the caller.
+    const childSnapshot = reason === "errored" ? agentManager.getAgent(childAgentId) : undefined;
+    const lastAssistantMessage =
+      childSnapshot?.lifecycle === "error"
+        ? childSnapshot.lastError
+        : await agentManager.getLastAssistantMessage(childAgentId);
     const body = formatFinishNotificationBody({
       childAgentId,
       title,

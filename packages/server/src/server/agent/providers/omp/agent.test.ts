@@ -332,6 +332,53 @@ describe("OMP agent client and session", () => {
     ]);
   });
 
+  test("streams every job in a parallel notice payload as its own row", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    await omp.runPromptWithCustomMessage(
+      "keep working",
+      {
+        role: "custom",
+        content: [
+          "<system-notice>",
+          "2 background jobs have completed. Resume your work using the results below.",
+          "",
+          "── Job FixBuild (FixBuild) ──",
+          '<task-result id="FixBuild" status="completed">',
+          "<output>build ok</output>",
+          "</task-result>",
+          "── Job Sweep2161 (Sweep2161) ──",
+          '<task-result id="Sweep2161" status="failed">',
+          "<output>sweep blew up</output>",
+          "</task-result>",
+          "</system-notice>",
+        ].join("\n"),
+        customType: "async-result",
+        entryId: "notice-live-2",
+        display: true,
+      },
+      "continuing",
+    );
+
+    expect(omp.timeline()).toMatchObject([
+      { type: "user_message", text: "keep working", messageId: "user-1" },
+      {
+        type: "tool_call",
+        callId: "omp-notice:notice-live-2#0",
+        status: "completed",
+        error: null,
+      },
+      {
+        type: "tool_call",
+        callId: "omp-notice:notice-live-2#1",
+        status: "failed",
+        error: "sweep blew up",
+      },
+      { type: "assistant_message", text: "continuing", messageId: "omp-assistant-1" },
+    ]);
+  });
+
   test("completes a streamed assistant turn when agent_end omits messages", async () => {
     const omp = new OmpHarness();
     await omp.start();
@@ -488,36 +535,54 @@ describe("OMP agent client and session", () => {
     ]);
   });
 
-  test("renders a live system-notice custom message as a notification", async () => {
+  test("streams a live system-notice custom message as a tool-call row", async () => {
     const omp = new OmpHarness();
     await omp.start();
 
-    await omp.runPrompt("hello OMP", "done");
-    omp
-      .runtime()
-      .acceptCustomMessage(
-        [
+    await omp.runPromptWithCustomMessage(
+      "hello OMP",
+      {
+        role: "custom",
+        content: [
           "<system-notice>",
-          "Background job DocsSmokeTwo has completed.",
+          "Background job DocsSmokeTwo has completed. Resume your work using the result below.",
           '<task-result id="DocsSmokeTwo" agent="explore" status="completed" duration="21.6s">',
           "<output>done</output>",
           "</task-result>",
           "</system-notice>",
         ].join("\n"),
-      );
+        customType: "async-result",
+        entryId: "notice-live-1",
+        display: true,
+      },
+      "continuing",
+    );
     omp.runtime().acceptCustomMessage("plain custom status text");
 
-    expect(omp.timeline().filter((item) => item.type === "notification")).toEqual([
+    expect(omp.timeline()).toEqual([
+      { type: "user_message", text: "hello OMP", messageId: "user-1" },
       {
-        type: "notification",
-        level: "info",
-        message: "Background job DocsSmokeTwo completed",
+        type: "tool_call",
+        callId: "omp-notice:notice-live-1",
+        name: "system_notice",
+        status: "completed",
+        detail: {
+          type: "plain_text",
+          label: "Background job DocsSmokeTwo completed",
+          text: [
+            "Background job DocsSmokeTwo has completed. Resume your work using the result below.",
+            '<task-result id="DocsSmokeTwo" agent="explore" status="completed" duration="21.6s">',
+            "<output>done</output>",
+            "</task-result>",
+          ].join("\n"),
+          icon: "bot",
+        },
+        metadata: { synthetic: true, source: "omp_system_notice" },
+        error: null,
       },
-    ]);
-    // Non-notice custom messages still fall through as assistant messages.
-    expect(omp.timeline().filter((item) => item.type === "assistant_message")).toMatchObject([
-      { text: "done" },
-      { text: "plain custom status text" },
+      { type: "assistant_message", text: "continuing", messageId: "omp-assistant-1" },
+      // Non-notice custom messages still fall through as assistant messages.
+      { type: "assistant_message", text: "plain custom status text" },
     ]);
   });
 

@@ -21,7 +21,7 @@ export interface OmpHistoryMapperHooks {
     message: Extract<OmpAgentMessage, { role: "custom" }>,
     text: string,
     provider: string,
-  ) => Extract<AgentStreamEvent, { type: "timeline" }> | null;
+  ) => Extract<AgentStreamEvent, { type: "timeline" }>[];
   resolveToolCallId?: (toolCallId: string, toolCall: OmpTrackedToolCall) => string;
   mapToolDetail?: (
     toolCall: OmpTrackedToolCall,
@@ -122,9 +122,11 @@ export class OmpHistoryMapper {
       return [];
     }
     const text = getUserMessageText(message.content);
-    const mappedEvent = text ? this.hooks.mapCustomMessage?.(message, text, this.provider) : null;
-    if (mappedEvent) {
-      return [mappedEvent];
+    const mappedEvents = text
+      ? (this.hooks.mapCustomMessage?.(message, text, this.provider) ?? [])
+      : [];
+    if (mappedEvents.length > 0) {
+      return mappedEvents;
     }
     return text
       ? [

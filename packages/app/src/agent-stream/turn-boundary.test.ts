@@ -29,10 +29,25 @@ function assistantMessage(
   };
 }
 
+function notificationItem(
+  id: string,
+  seed: number,
+  sourceType: "error" | "notification",
+): Extract<StreamItem, { kind: "notification" }> {
+  return {
+    kind: "notification",
+    sourceType,
+    id,
+    timestamp: timestamp(seed),
+    level: sourceType === "error" ? "error" : "info",
+    message: id,
+  };
+}
+
 describe("resolveAssistantTurnForkBoundary", () => {
-  it("forks a failed assistant turn from its Paseo timeline cursor without a provider message id", () => {
+  it("forks a failed turn from the error notice's Paseo timeline cursor", () => {
     const failedTurn = {
-      ...assistantMessage("assistant-error", 2),
+      ...notificationItem("turn-error", 2, "error"),
       timelineCursor: { epoch: "timeline-1", seq: 42 },
     };
 
@@ -45,6 +60,21 @@ describe("resolveAssistantTurnForkBoundary", () => {
     ).toEqual({
       boundaryCursor: { epoch: "timeline-1", seq: 42 },
     });
+  });
+
+  it("does not fork a failed turn without timeline cursor support", () => {
+    const failedTurn = {
+      ...notificationItem("turn-error", 2, "error"),
+      timelineCursor: { epoch: "timeline-1", seq: 42 },
+    };
+
+    expect(
+      resolveAssistantTurnForkBoundary({
+        items: [userMessage("user-1", 1), failedTurn],
+        startIndex: 1,
+        supportsTimelineCursor: false,
+      }),
+    ).toBeUndefined();
   });
 
   it("includes the provider message id with a supported timeline cursor", () => {
@@ -93,12 +123,12 @@ describe("resolveAssistantTurnForkBoundary", () => {
     ).toBeUndefined();
   });
 
-  it("requires the selected item to be an assistant message", () => {
+  it("does not fork from a notice that is not a turn failure", () => {
     expect(
       resolveAssistantTurnForkBoundary({
-        items: [userMessage("user-1", 1), assistantMessage("assistant-1", 2, "msg-assistant-1")],
-        startIndex: 0,
-        supportsTimelineCursor: false,
+        items: [userMessage("user-1", 1), notificationItem("notice-1", 2, "notification")],
+        startIndex: 1,
+        supportsTimelineCursor: true,
       }),
     ).toBeUndefined();
   });

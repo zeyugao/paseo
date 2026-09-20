@@ -15,6 +15,7 @@ import {
 import { createMessageCollector } from "../test-utils/message-collector.js";
 import type { AgentTimelineItem } from "../agent/agent-sdk-types.js";
 import type { SessionOutboundMessage } from "../messages.js";
+import type { FetchAgentTimelinePayload } from "@getpaseo/client";
 
 function tmpCwd(): string {
   return mkdtempSync(path.join(tmpdir(), "daemon-real-tool-interrupt-"));
@@ -129,6 +130,23 @@ function getAssistantTexts(messages: SessionOutboundMessage[], agentId: string):
         message.payload.event.item.type === "assistant_message",
     )
     .map((message) => message.payload.event.item.text);
+}
+
+function getStreamErrorTexts(messages: SessionOutboundMessage[], agentId: string): string[] {
+  return messages.flatMap((message) =>
+    message.type === "agent_stream" &&
+    message.payload.agentId === agentId &&
+    message.payload.event.type === "timeline" &&
+    message.payload.event.item.type === "error"
+      ? [message.payload.event.item.message]
+      : [],
+  );
+}
+
+function getTimelineErrorTexts(timeline: FetchAgentTimelinePayload): string[] {
+  return timeline.entries.flatMap((entry) =>
+    entry.item.type === "error" ? [entry.item.message] : [],
+  );
 }
 
 function hasProviderLimitText(text: string): boolean {
@@ -661,10 +679,9 @@ describe("daemon E2E (real claude) - send message during tool call", () => {
           return item.text;
         });
 
-      // No system error messages should leak into the timeline
-      const hasSystemError = assistantTexts.some((text) => text.includes("[System Error]"));
-      expect(hasSystemError).toBe(false);
-      expect(postSendAssistantTexts.some((text) => text.includes("[System Error]"))).toBe(false);
+      // No system errors should leak into the timeline
+      expect(getTimelineErrorTexts(timeline)).toEqual([]);
+      expect(getStreamErrorTexts(postSendMessages, agent.id)).toEqual([]);
 
       const responded = assistantTexts.some((text) =>
         text.toUpperCase().includes("INTERRUPT_RECEIVED"),

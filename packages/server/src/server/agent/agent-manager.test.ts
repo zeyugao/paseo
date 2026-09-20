@@ -7154,8 +7154,8 @@ test("preserves terminal fallback when no active turn identity was observed", as
   });
   expect(manager.getTimeline(snapshot.id)).toContainEqual(
     expect.objectContaining({
-      type: "assistant_message",
-      text: expect.stringContaining("untracked failure"),
+      type: "error",
+      message: expect.stringContaining("untracked failure"),
     }),
   );
 });
@@ -9066,7 +9066,7 @@ test("archiveAgent cascade surfaces partial child archive failures", async () =>
   );
 });
 
-test("turn_failed emits a system error assistant timeline message and keeps error lifecycle", async () => {
+test("turn_failed emits a system error timeline item and keeps error lifecycle", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-failed-"));
   const storagePath = join(workdir, "agents");
   const storage = new AgentStorage(storagePath, logger);
@@ -9134,12 +9134,13 @@ test("turn_failed emits a system error assistant timeline message and keeps erro
 
   const systemErrors = manager
     .getTimeline(agent.id)
-    .filter(
-      (item): item is Extract<AgentTimelineItem, { type: "assistant_message" }> =>
-        item.type === "assistant_message" && item.text.includes("[System Error]"),
-    );
+    .filter((item): item is Extract<AgentTimelineItem, { type: "error" }> => item.type === "error");
   expect(systemErrors).toHaveLength(1);
-  expect(systemErrors[0]?.text).toContain("invalid model id");
+  expect(systemErrors[0]?.message).toContain("invalid model id");
+  // The failure stays a system notice; it must never be faked as model output.
+  expect(manager.getTimeline(agent.id).filter((item) => item.type === "assistant_message")).toEqual(
+    [],
+  );
 });
 
 test("turn_failed surfaces provider code and diagnostic in system error message", async () => {
@@ -9208,15 +9209,14 @@ test("turn_failed surfaces provider code and diagnostic in system error message"
 
   expect(manager.getAgent(agent.id)?.lastError).toBe("Provider execution failed");
 
-  const systemError = manager
-    .getTimeline(agent.id)
-    .find(
-      (item): item is Extract<AgentTimelineItem, { type: "assistant_message" }> =>
-        item.type === "assistant_message" && item.text.includes("[System Error]"),
-    );
-  expect(systemError?.text).toContain("Provider execution failed");
-  expect(systemError?.text).toContain("code: 126");
-  expect(systemError?.text).toContain("No preset version installed for command claude");
+  const timeline = manager.getTimeline(agent.id);
+  const systemError = timeline.find(
+    (item): item is Extract<AgentTimelineItem, { type: "error" }> => item.type === "error",
+  );
+  expect(systemError?.message).toContain("Provider execution failed");
+  expect(systemError?.message).toContain("code: 126");
+  expect(systemError?.message).toContain("No preset version installed for command claude");
+  expect(timeline.filter((item) => item.type === "assistant_message")).toEqual([]);
 });
 
 test("permission request notifies once without forcing unread attention state", async () => {

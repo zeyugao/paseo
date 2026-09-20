@@ -3,6 +3,7 @@ import type { StreamItem } from "@/types/stream";
 import { getAssistantBlockSpacing, getGapBetweenStreamItems } from "./spacing";
 import type { StreamFrameChildOrder, StreamStrategy } from "./strategy";
 import { continuesResponse, continuesTurn, isResponseBoundary } from "./turn-membership";
+import { isForkableTurnEnd } from "./turn-boundary";
 
 export type StreamToolSequence = "single" | "first" | "middle" | "last" | "none";
 
@@ -57,8 +58,8 @@ interface LayoutSegmentInput {
   phase: "streaming" | "complete";
 }
 
-interface AssistantFooterSource {
-  item: Extract<StreamItem, { kind: "assistant_message" }>;
+interface TurnFooterSource {
+  item: StreamItem;
   items: StreamItem[];
   index: number;
 }
@@ -77,13 +78,13 @@ function createTurnFooterHost(input: {
   };
 }
 
-function findLatestAssistantInResponse(input: {
+function findLatestTurnEndInResponse(input: {
   strategy: StreamStrategy;
   items: StreamItem[];
   startIndex: number;
   boundaryAboveItems?: StreamItem[] | null;
   boundaryAboveIndex?: number | null;
-}): AssistantFooterSource | null {
+}): TurnFooterSource | null {
   let items = input.items;
   let index = input.startIndex;
   let canCrossBoundary = true;
@@ -99,7 +100,7 @@ function findLatestAssistantInResponse(input: {
       if (!item || (laterItem && !continuesResponse(item, laterItem))) {
         return null;
       }
-      if (item.kind === "assistant_message") {
+      if (isForkableTurnEnd(item)) {
         return { item, items, index };
       }
       laterItem = item;
@@ -131,19 +132,19 @@ function resolveAuxiliaryTurnFooter(input: StreamLayoutInput): TurnFooterHost | 
     return null;
   }
 
-  const assistant = findLatestAssistantInResponse({
+  const turnEnd = findLatestTurnEndInResponse({
     strategy: input.strategy,
     items: footerItems,
     startIndex: latestIndex,
   });
-  if (!assistant) {
+  if (!turnEnd) {
     return null;
   }
 
   return createTurnFooterHost({
-    item: assistant.item,
-    items: assistant.items,
-    index: assistant.index,
+    item: turnEnd.item,
+    items: turnEnd.items,
+    index: turnEnd.index,
     timingByAssistantId: input.timingByAssistantId,
   });
 }
@@ -163,20 +164,20 @@ function resolveCompletedFooter(input: {
     return null;
   }
 
-  const assistant = findLatestAssistantInResponse({
+  const turnEnd = findLatestTurnEndInResponse({
     strategy: input.strategy,
     items: input.items,
     startIndex: input.index,
     boundaryAboveItems: input.boundaryAboveItems,
     boundaryAboveIndex: input.boundaryAboveIndex,
   });
-  if (!assistant || input.auxiliaryTurnFooter?.itemId === assistant.item.id) {
+  if (!turnEnd || input.auxiliaryTurnFooter?.itemId === turnEnd.item.id) {
     return null;
   }
   return createTurnFooterHost({
-    item: assistant.item,
-    items: assistant.items,
-    index: assistant.index,
+    item: turnEnd.item,
+    items: turnEnd.items,
+    index: turnEnd.index,
     timingByAssistantId: input.timingByAssistantId,
   });
 }

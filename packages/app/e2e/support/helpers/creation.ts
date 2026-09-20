@@ -185,10 +185,9 @@ export async function createCreationScenario(page: Page) {
     async expectCreatedAgentError() {
       await requests.settled();
       await expect(
-        page
-          .getByTestId("assistant-message")
-          .filter({ hasText: "[System Error] Requested mock prompt rejection", visible: true }),
+        page.getByText("Requested mock prompt rejection", { exact: false }).first(),
       ).toBeVisible();
+      await expect(page.getByText("[System Error]", { exact: false })).toHaveCount(0);
       await expect(
         page
           .locator('[data-testid^="workspace-tab-agent_"][aria-selected="true"]')
@@ -201,14 +200,12 @@ export async function createCreationScenario(page: Page) {
       await expect(page.getByTestId("turn-working-indicator")).toHaveCount(0);
     },
     async expectPromptBeforeError(prompt: string) {
-      const messages = page
-        .getByTestId("user-message")
-        .or(page.getByTestId("assistant-message"))
-        .filter({ visible: true });
-      await expect(messages).toHaveCount(2);
-      await expect(messages.nth(0)).toContainText(prompt);
-      await expect(messages.nth(1)).toContainText("[System Error]");
-      await expect(messages.nth(1)).toBeInViewport();
+      const messages = page.getByTestId("user-message").filter({ visible: true });
+      await expect(messages.last()).toContainText(prompt);
+      const error = page.getByText("Requested mock prompt rejection", { exact: false }).first();
+      await expect(error).toBeVisible();
+      await expect(error).toBeInViewport();
+      await expect(page.getByText("[System Error]", { exact: false })).toHaveCount(0);
     },
     async reloadAgent() {
       await page.reload();

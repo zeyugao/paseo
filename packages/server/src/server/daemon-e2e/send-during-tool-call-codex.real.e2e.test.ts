@@ -5,6 +5,7 @@ import path from "node:path";
 import pino from "pino";
 
 import type { AgentTimelineItem } from "../agent/agent-sdk-types.js";
+import type { FetchAgentTimelinePayload } from "@getpaseo/client";
 import { CodexAppServerAgentClient } from "../agent/providers/codex-app-server-agent.js";
 import { DaemonClient } from "../test-utils/daemon-client.js";
 import { createMessageCollector } from "../test-utils/message-collector.js";
@@ -78,6 +79,12 @@ function getAssistantTexts(messages: SessionOutboundMessage[], agentId: string):
         message.payload.event.item.type === "assistant_message",
     )
     .map((message) => message.payload.event.item.text);
+}
+
+function getTimelineErrorTexts(timeline: FetchAgentTimelinePayload): string[] {
+  return timeline.entries.flatMap((entry) =>
+    entry.item.type === "error" ? [entry.item.message] : [],
+  );
 }
 
 function hasProviderLimitText(text: string): boolean {
@@ -450,7 +457,7 @@ describe("daemon E2E (real codex) - send message during tool call", () => {
           const item = entry.item as Extract<AgentTimelineItem, { type: "assistant_message" }>;
           return item.text;
         });
-      expect(assistantTexts.some((text) => text.includes("[System Error]"))).toBe(false);
+      expect(getTimelineErrorTexts(timeline)).toEqual([]);
       expect(assistantTexts.some((text) => text.toUpperCase().includes("INTERRUPT_RECEIVED"))).toBe(
         true,
       );
@@ -527,7 +534,7 @@ describe("daemon E2E (real codex) - send message during tool call", () => {
           const item = entry.item as Extract<AgentTimelineItem, { type: "assistant_message" }>;
           return item.text;
         });
-      expect(assistantTexts.some((text) => text.includes("[System Error]"))).toBe(false);
+      expect(getTimelineErrorTexts(timeline)).toEqual([]);
       expect(
         assistantTexts.some((text) => text.toUpperCase().includes("QUICK_FOLLOW_UP_RECEIVED")),
       ).toBe(true);

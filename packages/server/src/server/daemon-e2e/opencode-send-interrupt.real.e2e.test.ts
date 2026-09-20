@@ -10,6 +10,7 @@ import { createMessageCollector } from "../test-utils/message-collector.js";
 import { canRunRealProvider, createRealProviderClients } from "./real-provider-test-config.js";
 import type { AgentPermissionRequest } from "../agent/agent-sdk-types.js";
 import type { SessionOutboundMessage } from "../messages.js";
+import type { FetchAgentTimelinePayload } from "@getpaseo/client";
 
 const SYSTEM_ERROR_SNIPPET = "A foreground turn is already active";
 
@@ -33,20 +34,25 @@ function hasRunningBashToolCall(messages: SessionOutboundMessage[], agentId: str
   );
 }
 
-function getAssistantTexts(messages: SessionOutboundMessage[], agentId: string): string[] {
-  return messages
-    .filter(
-      (message) =>
-        message.type === "agent_stream" &&
-        message.payload.agentId === agentId &&
-        message.payload.event.type === "timeline" &&
-        message.payload.event.item.type === "assistant_message",
-    )
-    .map((message) => message.payload.event.item.text);
+function getStreamErrorTexts(messages: SessionOutboundMessage[], agentId: string): string[] {
+  return messages.flatMap((message) =>
+    message.type === "agent_stream" &&
+    message.payload.agentId === agentId &&
+    message.payload.event.type === "timeline" &&
+    message.payload.event.item.type === "error"
+      ? [message.payload.event.item.message]
+      : [],
+  );
+}
+
+function getTimelineErrorTexts(timeline: FetchAgentTimelinePayload): string[] {
+  return timeline.entries.flatMap((entry) =>
+    entry.item.type === "error" ? [entry.item.message] : [],
+  );
 }
 
 function findSystemErrorText(texts: string[]): string | null {
-  return texts.find((text) => text.includes("[System Error]")) ?? null;
+  return texts.find((text) => text.includes(SYSTEM_ERROR_SNIPPET)) ?? null;
 }
 
 function getTimelineAssistantTexts(
@@ -121,7 +127,7 @@ async function waitForRunningBashToolCall(
   while (Date.now() < deadline) {
     await approvePendingPermissions(client, agentId, handledPermissionIds);
 
-    const streamSystemError = findSystemErrorText(getAssistantTexts(collector.messages, agentId));
+    const streamSystemError = findSystemErrorText(getStreamErrorTexts(collector.messages, agentId));
     if (streamSystemError) {
       throw new Error(`OpenCode failed before tool call started: ${streamSystemError}`);
     }
@@ -132,7 +138,7 @@ async function waitForRunningBashToolCall(
 
     const timeline = await client.fetchAgentTimeline(agentId, { limit: 120 }).catch(() => null);
     const timelineSystemError = timeline
-      ? findSystemErrorText(getTimelineAssistantTexts(timeline).slice(-8))
+      ? findSystemErrorText(getTimelineErrorTexts(timeline))
       : null;
     if (timelineSystemError) {
       throw new Error(`OpenCode failed before tool call started: ${timelineSystemError}`);
@@ -162,8 +168,9 @@ async function waitForRunningBashToolCall(
         callId: entry.item.callId,
       })) ?? [];
   const recentAssistantTexts = timeline ? getTimelineAssistantTexts(timeline).slice(-6) : [];
+  const recentErrorTexts = timeline ? getTimelineErrorTexts(timeline).slice(-6) : [];
   throw new Error(
-    `Timed out waiting for running bash/shell tool call. recentToolCalls=${JSON.stringify(recentToolCalls)} recentAssistantTexts=${JSON.stringify(recentAssistantTexts)}`,
+    `Timed out waiting for running bash/shell tool call. recentToolCalls=${JSON.stringify(recentToolCalls)} recentAssistantTexts=${JSON.stringify(recentAssistantTexts)} recentErrorTexts=${JSON.stringify(recentErrorTexts)}`,
   );
 }
 
@@ -314,17 +321,12 @@ describe("daemon E2E (real opencode) - send while working and interrupt", () => 
       const finish = await waitForIdleResolvingPermissions(client, agent.id, 240_000);
       expect(finish.status).toBe("idle");
 
-      const postSendAssistantTexts = getAssistantTexts(collector.messages, agent.id);
-      expect(postSendAssistantTexts.some((text) => text.includes("[System Error]"))).toBe(false);
-      expect(postSendAssistantTexts.some((text) => text.includes(SYSTEM_ERROR_SNIPPET))).toBe(
-        false,
-      );
+      expect(findSystemErrorText(getStreamErrorTexts(collector.messages, agent.id))).toBeNull();
 
       const timeline = await client.fetchAgentTimeline(agent.id, { limit: 160 });
       const assistantTexts = getTimelineAssistantTexts(timeline);
       expect(assistantTexts.some((text) => text.includes(followUpToken))).toBe(true);
-      expect(assistantTexts.some((text) => text.includes("[System Error]"))).toBe(false);
-      expect(assistantTexts.some((text) => text.includes(SYSTEM_ERROR_SNIPPET))).toBe(false);
+      expect(findSystemErrorText(getTimelineErrorTexts(timeline))).toBeNull();
     } finally {
       collector.unsubscribe();
       await client.close().catch(() => undefined);
@@ -383,19 +385,12 @@ describe("daemon E2E (real opencode) - send while working and interrupt", () => 
       const finish = await waitForIdleResolvingPermissions(client, agent.id, 240_000);
       expect(finish.status).toBe("idle");
 
-      const postInterruptAssistantTexts = getAssistantTexts(collector.messages, agent.id);
-      expect(postInterruptAssistantTexts.some((text) => text.includes("[System Error]"))).toBe(
-        false,
-      );
-      expect(postInterruptAssistantTexts.some((text) => text.includes(SYSTEM_ERROR_SNIPPET))).toBe(
-        false,
-      );
+      expect(findSystemErrorText(getStreamErrorTexts(collector.messages, agent.id))).toBeNull();
 
       const timeline = await client.fetchAgentTimeline(agent.id, { limit: 200 });
       const assistantTexts = getTimelineAssistantTexts(timeline);
       expect(assistantTexts.some((text) => text.includes(followUpToken))).toBe(true);
-      expect(assistantTexts.some((text) => text.includes("[System Error]"))).toBe(false);
-      expect(assistantTexts.some((text) => text.includes(SYSTEM_ERROR_SNIPPET))).toBe(false);
+      expect(findSystemErrorText(getTimelineErrorTexts(timeline))).toBeNull();
     } finally {
       collector.unsubscribe();
       await client.close().catch(() => undefined);

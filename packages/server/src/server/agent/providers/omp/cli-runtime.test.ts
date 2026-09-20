@@ -181,7 +181,7 @@ describe("OMP CLI runtime", () => {
   });
   test("waits for the matching steer acknowledgement", async () => {
     const child = createOmpChild();
-    const pendingCommand = captureCommand(child, "steer");
+    const pendingCommand = capturePendingCommand(child, "steer");
     const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
     try {
       let settled = false;
@@ -210,7 +210,7 @@ describe("OMP CLI runtime", () => {
 
   test("surfaces a rejected steer acknowledgement", async () => {
     const child = createOmpChild();
-    const pendingCommand = captureCommand(child, "steer");
+    const pendingCommand = capturePendingCommand(child, "steer");
     const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
     try {
       const steer = session.steer("change course");

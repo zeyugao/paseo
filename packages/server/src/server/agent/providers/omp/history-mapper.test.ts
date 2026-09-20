@@ -273,7 +273,7 @@ describe("OMP history mapper", () => {
     ]);
   });
 
-  test("maps replayed OMP system-notice custom messages to notifications", async () => {
+  test("maps replayed OMP system-notice custom messages to tool-call rows", async () => {
     const notice = [
       "<system-notice>",
       "Background job DocsSmokeTwo has completed. Resume your work using the result below.",
@@ -287,7 +287,7 @@ describe("OMP history mapper", () => {
       collectHistory(
         [
           { role: "user", content: "first prompt" },
-          { role: "custom", content: notice },
+          { role: "custom", content: notice, id: "notice-entry-1" },
           { role: "user", content: "second prompt" },
         ],
         [
@@ -309,9 +309,23 @@ describe("OMP history mapper", () => {
         type: "timeline",
         provider: "omp",
         item: {
-          type: "notification",
-          level: "info",
-          message: "Background job DocsSmokeTwo completed",
+          type: "tool_call",
+          callId: "omp-notice:notice-entry-1",
+          name: "system_notice",
+          status: "completed",
+          detail: {
+            type: "plain_text",
+            label: "Background job DocsSmokeTwo completed",
+            text: [
+              "Background job DocsSmokeTwo has completed. Resume your work using the result below.",
+              '<task-result id="DocsSmokeTwo" agent="explore" status="completed" duration="21.6s">',
+              "<output>done</output>",
+              "</task-result>",
+            ].join("\n"),
+            icon: "bot",
+          },
+          metadata: { synthetic: true, source: "omp_system_notice" },
+          error: null,
         },
       },
       {
@@ -322,6 +336,44 @@ describe("OMP history mapper", () => {
           text: "second prompt",
           messageId: "entry-user-2",
         },
+      },
+    ]);
+  });
+
+  test("replays every job in a parallel notice payload as its own row", async () => {
+    const notice = [
+      "<system-notice>",
+      "2 background jobs have completed. Resume your work using the results below.",
+      "",
+      "── Job FixBuild (FixBuild) ──",
+      '<task-result id="FixBuild" status="completed">',
+      "<output>build ok</output>",
+      "</task-result>",
+      "── Job Sweep2161 (Sweep2161) ──",
+      '<task-result id="Sweep2161" status="failed">',
+      "<output>sweep blew up</output>",
+      "</task-result>",
+      "</system-notice>",
+    ].join("\n");
+
+    const events = await collectHistory([
+      { role: "custom", content: notice, id: "notice-parallel-1" },
+    ]);
+
+    expect(events.map((event) => event.item)).toMatchObject([
+      {
+        type: "tool_call",
+        callId: "omp-notice:notice-parallel-1#0",
+        status: "completed",
+        detail: { type: "plain_text", label: "Background job FixBuild completed" },
+        error: null,
+      },
+      {
+        type: "tool_call",
+        callId: "omp-notice:notice-parallel-1#1",
+        status: "failed",
+        detail: { type: "plain_text", label: "Background job Sweep2161 failed" },
+        error: "sweep blew up",
       },
     ]);
   });
@@ -840,8 +892,30 @@ describe("OMP history mapper", () => {
     }
     expect(events.map((event) => event.item)).toEqual([
       { type: "user_message", text: "run the tests", messageId: "user-1" },
-      { type: "notification", level: "info", message: "Background job bg_6 completed" },
-      { type: "assistant_message", text: "Supervised process dev-daemon exited with code 0." },
+      {
+        type: "tool_call",
+        callId: "omp-notice:notice-1",
+        name: "system_notice",
+        status: "completed",
+        detail: {
+          type: "plain_text",
+          label: "Background job bg_6 completed",
+          text: [
+            "Background job bg_6 has completed. Resume your work using the result below.",
+            '<task-result id="bg_6" status="completed">',
+            "<output>58 passed</output>",
+            "</task-result>",
+          ].join("\n"),
+          icon: "bot",
+        },
+        metadata: { synthetic: true, source: "omp_system_notice" },
+        error: null,
+      },
+      {
+        type: "assistant_message",
+        text: "Supervised process dev-daemon exited with code 0.",
+        messageId: "omp-custom-launch-1",
+      },
       {
         type: "tool_call",
         callId: "omp-irc:irc-1",
@@ -1055,7 +1129,20 @@ describe("OMP history mapper", () => {
     expect(events.map((event) => event.item)).toEqual([
       { type: "assistant_message", text: "Done.", messageId: "resp-1" },
       { type: "user_message", text: "/skill:commit", messageId: "omp-custom-skill-1-user" },
-      { type: "assistant_message", text: ircMessage, messageId: "omp-custom-irc-1" },
+      {
+        type: "tool_call",
+        callId: "omp-irc:irc-1",
+        name: "irc",
+        status: "completed",
+        detail: {
+          type: "plain_text",
+          label: "Incoming message",
+          text: "<from>worker-1</from>\n<message>ready for review</message>",
+          icon: "bot",
+        },
+        metadata: { synthetic: true, source: "omp_irc", messageCount: 1 },
+        error: null,
+      },
       {
         type: "assistant_message",
         text: "visible without display flag",
@@ -1127,9 +1214,18 @@ describe("OMP history mapper", () => {
         type: "timeline",
         provider: "omp",
         item: {
-          type: "assistant_message",
-          text: "<irc>\n<from>worker-1</from>\n<message>hi</message>\n</irc>",
-          messageId: "omp-custom-irc-user",
+          type: "tool_call",
+          callId: "omp-irc:irc-user",
+          name: "irc",
+          status: "completed",
+          detail: {
+            type: "plain_text",
+            label: "Incoming message",
+            text: "<from>worker-1</from>\n<message>hi</message>",
+            icon: "bot",
+          },
+          metadata: { synthetic: true, source: "omp_irc", messageCount: 1 },
+          error: null,
         },
       },
     ]);

@@ -865,7 +865,7 @@ export class ScheduleService {
         throw new Error(`Scheduled agent ${agent.id} is waiting for permission`);
       }
       if (waitResult.status === "error") {
-        throw new Error(waitResult.lastMessage ?? `Scheduled agent ${agent.id} failed`);
+        throw new Error(resolveScheduledRunFailure(this.agentManager, agent.id));
       }
       return {
         agentId: agent.id,
@@ -933,7 +933,7 @@ export class ScheduleService {
         throw new Error(`Scheduled agent ${agent.id} is waiting for permission`);
       }
       if (waitResult.status === "error") {
-        throw new Error(waitResult.lastMessage ?? `Scheduled agent ${agent.id} failed`);
+        throw new Error(resolveScheduledRunFailure(this.agentManager, agent.id));
       }
       const timelineText = curateAgentActivity(result.timeline);
       return {
@@ -994,6 +994,17 @@ export class ScheduleService {
       throw error;
     }
   }
+}
+
+/**
+ * A failed turn no longer ends on an assistant message, so the last assistant
+ * text in the timeline is stale by definition. The snapshot's lastError is the
+ * only place a scheduled run's failure text still reaches the caller.
+ */
+function resolveScheduledRunFailure(agentManager: ScheduleAgentManager, agentId: string): string {
+  const snapshot = agentManager.getAgent(agentId);
+  const lastError = snapshot?.lifecycle === "error" ? snapshot.lastError.trim() : "";
+  return lastError || `Scheduled agent ${agentId} failed`;
 }
 
 function buildScheduleAgentConfig(

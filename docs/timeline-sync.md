@@ -65,9 +65,9 @@ is exhausted.
 
 ## Durable item anchors
 
-Provider message IDs are not guaranteed for every displayed item. Paseo-generated system errors are one example. Rendered item indices are not durable either because pagination and projection can merge source rows.
+Provider message IDs are not guaranteed for every displayed item. A failed turn ends on a Paseo-generated error notice, which has none. Rendered item indices are not durable either because pagination and projection can merge source rows.
 
-Actions that address a point in chat history, such as Fork, use the daemon timeline `epoch` plus the projected item's `seqEnd`. The app carries that position on the rendered assistant item for both live and fetched history. When adjacent projected chunks merge, the merged item retains the newer chunk's position.
+Actions that address a point in chat history, such as Fork, use the daemon timeline `epoch` plus the projected item's `seqEnd`. The app carries that position on the rendered turn-ending item — an assistant message, or the error notice of a failed turn — for both live and fetched history. When adjacent projected chunks merge, the merged item retains the newer chunk's position.
 
 The daemon validates the epoch and locates the projected item at the selected position. A fork
 includes projected items through that checkpoint. If an item spans the checkpoint and changed

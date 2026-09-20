@@ -47,6 +47,12 @@ import {
 
 const DEFAULT_OMP_COMMAND: [string, ...string[]] = [process.env.OMP_COMMAND ?? "omp"];
 const DEFAULT_COMMANDS_RPC_NAME = "get_available_commands";
+/**
+ * OMP can run auto-compaction before acknowledging a prompt, so the ack lags
+ * behind LLM summarization by minutes. Wait on the process/session lifecycle
+ * instead of the control-plane timeout.
+ */
+const OMP_PROMPT_REQUEST_TIMEOUT_MS = JSONL_RPC_NO_TIMEOUT;
 
 export interface OmpCliRuntimeOptions {
   logger: Logger;

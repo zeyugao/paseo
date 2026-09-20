@@ -3,6 +3,7 @@ import type { StreamItem } from "@/types/stream";
 import { getAssistantMessageSpacing, getGapBetweenStreamItems } from "./spacing";
 import type { StreamFrameChildOrder, StreamStrategy } from "./strategy";
 import { continuesResponse, continuesTurn, isResponseBoundary } from "./turn-membership";
+import { isForkableTurnEnd } from "./turn-boundary";
 
 export type StreamToolSequence = "single" | "first" | "middle" | "last" | "none";
 
@@ -102,7 +103,7 @@ function findTurnFooterSource(input: {
       if (!item || (laterItem && !continuesResponse(item, laterItem))) {
         return toolFallback;
       }
-      if (item.kind === "assistant_message") {
+      if (isForkableTurnEnd(item)) {
         return { item, items, index };
       }
       laterItem = item;

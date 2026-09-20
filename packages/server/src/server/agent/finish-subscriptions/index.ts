@@ -189,7 +189,11 @@ export function createFinishSubscriptions(deps: Dependencies): FinishSubscriptio
           serverId: record.serverId ?? deps.serverId,
           title,
           reason,
-          lastAssistantMessage: result.lastMessage,
+          // A failed turn no longer ends on an assistant message: the daemon
+          // writes a timeline error notice instead, so the observation's error
+          // text is the only place the failure reaches the caller.
+          lastAssistantMessage:
+            reason === "errored" && result.error?.trim() ? result.error : result.lastMessage,
           permissionRequest: request,
         }),
         source: {

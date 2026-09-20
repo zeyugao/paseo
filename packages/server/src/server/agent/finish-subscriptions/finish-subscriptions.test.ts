@@ -313,6 +313,19 @@ test("error and missing-child notifications never claim successful completion", 
   expect(state.delivery.prompts[1]).not.toContain("finished");
 });
 
+test("errored child notifications carry the failure, not the stale response", async () => {
+  const state = await scenario();
+  await state.service.register(intent);
+  await until(() => state.observation.waits.length === 1);
+  const result = outcome("error");
+  result.error = "Provider execution failed";
+  state.observation.waits[0]!.result.resolve(result);
+  await until(() => state.delivery.prompts.length === 1);
+  expect(state.delivery.prompts[0]).toContain("errored");
+  expect(state.delivery.prompts[0]).toContain("Provider execution failed");
+  expect(state.delivery.prompts[0]).not.toContain("Partial work saved");
+});
+
 test("finish notification limits a long last response and points to activity for the remainder", async () => {
   const state = await scenario();
   await state.service.register(intent);

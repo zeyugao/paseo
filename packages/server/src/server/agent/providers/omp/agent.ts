@@ -97,6 +97,8 @@ import { streamOmpHistory } from "./history.js";
 import { mapOmpTodoReminderEvent, mapOmpTodoState, mapOmpTodoToolResult } from "./todo-mapper.js";
 import { mapOmpRuntimeEventToTimelineItem } from "./event-mapper.js";
 import { mapOmpAdvisorMessageToToolCall } from "./advisor-message.js";
+import { mapOmpIrcMessageToToolCall } from "./irc-message.js";
+import { readOmpNativeMessageId } from "./native-message-id.js";
 import {
   clearOmpHostToolState,
   handleOmpHostToolRuntimeEvent,
@@ -451,15 +453,6 @@ function buildResumeStartInput(input: {
       input.resumeConfig.config.daemonAppendSystemPrompt,
     ),
   };
-}
-
-function readNativeMessageId(
-  message: OmpAgentMessage & { id?: unknown; entryId?: unknown },
-): string | undefined {
-  if (typeof message.id === "string") {
-    return message.id;
-  }
-  return typeof message.entryId === "string" ? message.entryId : undefined;
 }
 
 function withOmpCapabilities(): AgentCapabilityFlags {
@@ -2178,6 +2171,7 @@ export class OmpAgentSession implements AgentSession {
         if (text) {
           const item =
             mapOmpAdvisorMessageToToolCall(event.message, text) ??
+            mapOmpIrcMessageToToolCall(event.message, text) ??
             mapOmpSystemNoticeToNotification(text);
           this.emit({
             type: "timeline",
@@ -2202,7 +2196,7 @@ export class OmpAgentSession implements AgentSession {
       entryId?: unknown;
       steering?: unknown;
     };
-    const messageId = readNativeMessageId(nativeMessage);
+    const messageId = readOmpNativeMessageId(nativeMessage);
     const emitUserMessage = (resolvedMessageId?: string): void => {
       if (resolvedMessageId) {
         // OMP re-emits user message_end frames for entries it has already

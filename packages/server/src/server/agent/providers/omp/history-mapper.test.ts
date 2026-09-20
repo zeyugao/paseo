@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
 import type { AgentStreamEvent } from "../../agent-sdk-types.js";
+import { mapOmpIrcMessageToToolCall } from "./irc-message.js";
 import { streamOmpCoreHistory, type OmpCapturedUserMessageEntry } from "./message-history.js";
 import type { OmpAgentMessage } from "./rpc-types.js";
 import { FakeOmp } from "./test-utils/fake-omp.js";
@@ -188,6 +189,180 @@ describe("OMP history mapper", () => {
             noteCount: 2,
             blockerCount: 1,
           },
+          error: null,
+        },
+      },
+    ]);
+  });
+
+  test("renders replayed OMP IRC messages as synthetic tool-call blocks", async () => {
+    await expect(
+      collectHistory([
+        {
+          role: "custom",
+          content: [
+            "<irc>",
+            "Incoming IRC message from agent `FortunaModeMigration`:",
+            "",
+            "Buy-prefix economics land in game 2218.",
+            "",
+            "If response expected, reply via `hub`.",
+            "</irc>",
+          ].join("\n"),
+          customType: "irc:incoming",
+          id: "irc-message-1",
+          display: true,
+        },
+      ]),
+    ).resolves.toEqual([
+      {
+        type: "timeline",
+        provider: "omp",
+        item: {
+          type: "tool_call",
+          callId: "omp-irc:irc-message-1",
+          name: "irc",
+          status: "completed",
+          detail: {
+            type: "plain_text",
+            label: "From `FortunaModeMigration`",
+            text: "Buy-prefix economics land in game 2218.\n\nIf response expected, reply via `hub`.",
+            icon: "bot",
+          },
+          metadata: { synthetic: true, source: "omp_irc", messageCount: 1 },
+          error: null,
+        },
+      },
+    ]);
+  });
+
+  test("keeps unclosed IRC payloads in one block and hashes the missing entry id", async () => {
+    await expect(
+      collectHistory([
+        {
+          role: "custom",
+          content: "<irc>\nIncoming IRC message from agent `IrisModeMigration`:\n\nhook exists.",
+          customType: "irc:incoming",
+          display: true,
+        },
+      ]),
+    ).resolves.toEqual([
+      {
+        type: "timeline",
+        provider: "omp",
+        item: {
+          type: "tool_call",
+          callId: "omp-irc:7ffbe94da149",
+          name: "irc",
+          status: "completed",
+          detail: {
+            type: "plain_text",
+            label: "From `IrisModeMigration`",
+            text: "hook exists.",
+            icon: "bot",
+          },
+          metadata: { synthetic: true, source: "omp_irc", messageCount: 1 },
+          error: null,
+        },
+      },
+    ]);
+  });
+
+  test("keeps IRC content that follows a complete block", async () => {
+    await expect(
+      collectHistory([
+        {
+          role: "custom",
+          content: [
+            "<irc>",
+            "Incoming IRC message from agent `FortunaModeMigration`:",
+            "",
+            "First message.",
+            "</irc>",
+            "<irc>",
+            "Incoming IRC message from agent `IrisModeMigration`:",
+            "",
+            "Second message, cut off mid-block",
+          ].join("\n"),
+          customType: "irc:incoming",
+          id: "irc-truncated-1",
+          display: true,
+        },
+      ]),
+    ).resolves.toEqual([
+      {
+        type: "timeline",
+        provider: "omp",
+        item: {
+          type: "tool_call",
+          callId: "omp-irc:irc-truncated-1",
+          name: "irc",
+          status: "completed",
+          detail: {
+            type: "plain_text",
+            label: "2 messages",
+            text: [
+              "From `FortunaModeMigration`",
+              "",
+              "First message.",
+              "",
+              "From `IrisModeMigration`",
+              "",
+              "Second message, cut off mid-block",
+            ].join("\n"),
+            icon: "bot",
+          },
+          metadata: { synthetic: true, source: "omp_irc", messageCount: 2 },
+          error: null,
+        },
+      },
+    ]);
+  });
+
+  test("derives the same IRC callId from a live entryId and a replayed entry id", () => {
+    const content = "<irc>\nIncoming IRC message from agent `IrisModeMigration`:\n\nhook exists.";
+
+    expect(
+      mapOmpIrcMessageToToolCall(
+        {
+          role: "custom",
+          content,
+          customType: "irc:incoming",
+          entryId: "entry-1",
+        } as OmpAgentMessage,
+        content,
+      )?.callId,
+    ).toBe("omp-irc:entry-1");
+    expect(
+      mapOmpIrcMessageToToolCall(
+        { role: "custom", content, customType: "irc:incoming", id: "entry-1" } as OmpAgentMessage,
+        content,
+      )?.callId,
+    ).toBe("omp-irc:entry-1");
+  });
+
+  test("maps an empty IRC payload to a labeled row instead of assistant text", async () => {
+    await expect(
+      collectHistory([
+        {
+          role: "custom",
+          content: "<irc></irc>",
+          customType: "irc:incoming",
+          id: "irc-empty-1",
+          display: true,
+        },
+      ]),
+    ).resolves.toEqual([
+      {
+        type: "timeline",
+        provider: "omp",
+        item: {
+          type: "tool_call",
+          callId: "omp-irc:irc-empty-1",
+          name: "irc",
+          status: "completed",
+          detail: { type: "plain_text", label: "Incoming message", icon: "bot" },
+          metadata: { synthetic: true, source: "omp_irc", messageCount: 0 },
           error: null,
         },
       },
@@ -414,10 +589,29 @@ describe("OMP history mapper", () => {
           parentId: "nudge-1",
         },
         {
+          type: "custom_message",
+          customType: "irc:incoming",
+          content: [
+            "<irc>",
+            "Incoming IRC message from agent `FortunaModeMigration`:",
+            "",
+            "Buy-prefix economics land in game 2218.",
+            "</irc>",
+            "<irc>",
+            "Incoming IRC message from agent `IrisModeMigration`:",
+            "",
+            "refineResolvedSpinMode hook exists.",
+            "</irc>",
+          ].join("\n"),
+          display: true,
+          id: "irc-1",
+          parentId: "launch-1",
+        },
+        {
           type: "ttsr_injection",
           injectedRules: ["ts-no-tiny-functions"],
           id: "rules-1",
-          parentId: "launch-1",
+          parentId: "irc-1",
         },
         {
           type: "branch_summary",
@@ -445,6 +639,28 @@ describe("OMP history mapper", () => {
       { type: "user_message", text: "run the tests", messageId: "user-1" },
       { type: "notification", level: "info", message: "Background job bg_6 completed" },
       { type: "assistant_message", text: "Supervised process dev-daemon exited with code 0." },
+      {
+        type: "tool_call",
+        callId: "omp-irc:irc-1",
+        name: "irc",
+        status: "completed",
+        detail: {
+          type: "plain_text",
+          label: "2 messages",
+          text: [
+            "From `FortunaModeMigration`",
+            "",
+            "Buy-prefix economics land in game 2218.",
+            "",
+            "From `IrisModeMigration`",
+            "",
+            "refineResolvedSpinMode hook exists.",
+          ].join("\n"),
+          icon: "bot",
+        },
+        metadata: { synthetic: true, source: "omp_irc", messageCount: 2 },
+        error: null,
+      },
       { type: "assistant_message", text: "done", messageId: "omp-history-assistant-1" },
     ]);
   });

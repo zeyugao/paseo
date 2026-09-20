@@ -290,6 +290,48 @@ describe("OMP agent client and session", () => {
     ]);
   });
 
+  test("streams OMP IRC messages as tool-call blocks instead of assistant text", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    await omp.runPromptWithCustomMessage(
+      "keep working",
+      {
+        role: "custom",
+        content: [
+          "<irc>",
+          "Incoming IRC message from agent `IrisModeMigration`:",
+          "",
+          "refineResolvedSpinMode hook exists.",
+          "</irc>",
+        ].join("\n"),
+        customType: "irc:incoming",
+        entryId: "irc-live-1",
+        display: true,
+      },
+      "continuing",
+    );
+
+    expect(omp.timeline()).toEqual([
+      { type: "user_message", text: "keep working", messageId: "user-1" },
+      {
+        type: "tool_call",
+        callId: "omp-irc:irc-live-1",
+        name: "irc",
+        status: "completed",
+        detail: {
+          type: "plain_text",
+          label: "From `IrisModeMigration`",
+          text: "refineResolvedSpinMode hook exists.",
+          icon: "bot",
+        },
+        metadata: { synthetic: true, source: "omp_irc", messageCount: 1 },
+        error: null,
+      },
+      { type: "assistant_message", text: "continuing", messageId: "omp-assistant-1" },
+    ]);
+  });
+
   test("completes a streamed assistant turn when agent_end omits messages", async () => {
     const omp = new OmpHarness();
     await omp.start();

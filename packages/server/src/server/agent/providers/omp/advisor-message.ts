@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { AgentTimelineItem } from "../../agent-sdk-types.js";
+import { readOmpNativeMessageId } from "./native-message-id.js";
 import type { OmpAgentMessage } from "./rpc-types.js";
 
 type OmpCustomMessage = Extract<OmpAgentMessage, { role: "custom" }>;
@@ -62,7 +63,7 @@ function buildAdvisorLabel(noteCount: number, blockerCount: number): string {
 }
 
 function buildAdvisorCallId(message: OmpCustomMessage, text: string): string {
-  const id = readOptionalString(Reflect.get(message, "id"));
+  const id = readOmpNativeMessageId(message);
   if (id) return `omp-advisor:${id}`;
   const digest = createHash("sha1").update(text.trim()).digest("hex").slice(0, 12);
   return `omp-advisor:${digest}`;

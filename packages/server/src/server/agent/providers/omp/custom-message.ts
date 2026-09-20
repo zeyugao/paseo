@@ -20,5 +20,6 @@ export function mapOmpCustomMessageEntry(entry: Record<string, unknown>): OmpCus
     content: entry.content,
     ...(typeof entry.customType === "string" ? { customType: entry.customType } : {}),
     ...(typeof entry.display === "boolean" ? { display: entry.display } : {}),
+    ...(typeof entry.id === "string" ? { id: entry.id } : {}),
   } as OmpCustomMessage;
 }

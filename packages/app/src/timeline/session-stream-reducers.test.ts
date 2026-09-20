@@ -503,14 +503,14 @@ describe("processTimelineResponse", () => {
       payload: {
         ...baseTimelineInput.payload,
         epoch: "timeline-1",
-        entries: [makeTimelineEntry(40, "[System Error] failed", "assistant_message", 42)],
+        entries: [makeTimelineEntry(40, "streamed answer", "assistant_message", 42)],
       },
     });
 
     expect(result.tail).toEqual([
       expect.objectContaining({
         kind: "assistant_message",
-        text: "[System Error] failed",
+        text: "streamed answer",
         timelineCursor: { epoch: "timeline-1", seq: 42 },
       }),
     ]);
@@ -3611,10 +3611,10 @@ describe("processTimelineResponse", () => {
 // ---------------------------------------------------------------------------
 
 describe("processAgentStreamEvent", () => {
-  it("preserves the live timeline cursor on an assistant error", () => {
+  it("preserves the live timeline cursor on an assistant message", () => {
     const result = processAgentStreamEvent({
       ...baseStreamInput,
-      event: makeAssistantTimelineEvent("[System Error] failed"),
+      event: makeAssistantTimelineEvent("streamed answer"),
       epoch: "timeline-1",
       seq: 42,
     });
@@ -3622,7 +3622,7 @@ describe("processAgentStreamEvent", () => {
     expect(result.head).toEqual([
       expect.objectContaining({
         kind: "assistant_message",
-        text: "[System Error] failed",
+        text: "streamed answer",
         timelineCursor: { epoch: "timeline-1", seq: 42 },
       }),
     ]);

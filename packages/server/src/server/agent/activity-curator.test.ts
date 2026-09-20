@@ -394,7 +394,7 @@ second line'`,
     ).toThrow("Fork from a later completed response");
   });
 
-  it("selects a synthetic assistant error by its timeline cursor", () => {
+  it("selects a synthetic system error by its timeline cursor", () => {
     const result = buildAgentForkContextAttachment({
       cursorBoundary: {
         timelineEpoch: "timeline-1",
@@ -402,7 +402,7 @@ second line'`,
       },
       rows: [
         row(1, { type: "user_message", text: "Try the task", messageId: "user-1" }),
-        row(2, { type: "assistant_message", text: "[System Error] provider failed" }),
+        row(2, { type: "error", message: "provider failed" }),
         row(3, {
           type: "assistant_message",
           text: "This belongs to a later turn.",
@@ -413,7 +413,7 @@ second line'`,
 
     expect(result.boundaryCursor).toEqual({ epoch: "timeline-1", seq: 2 });
     expect(result.boundaryMessageId).toBeNull();
-    expect(result.attachment.text).toContain("[System Error] provider failed");
+    expect(result.attachment.text).toContain("[User] Try the task");
     expect(result.attachment.text).not.toContain("This belongs to a later turn.");
   });
 

@@ -71,6 +71,21 @@ function thought(id: string, seed: number): Extract<StreamItem, { kind: "thought
   };
 }
 
+function notificationItem(
+  id: string,
+  seed: number,
+  sourceType: "error" | "notification",
+): Extract<StreamItem, { kind: "notification" }> {
+  return {
+    kind: "notification",
+    sourceType,
+    id,
+    timestamp: timestamp(seed),
+    level: sourceType === "error" ? "error" : "info",
+    message: id,
+  };
+}
+
 function timingFor(...ids: string[]): Map<string, TurnTiming> {
   const timing = {
     completedAt: timestamp(9),
@@ -392,6 +407,29 @@ describe("layoutStream", () => {
 
     expect(findLayoutItem(layout, shell.id).toolSequence).toBe("first");
     expect(findLayoutItem(layout, thinking.id).toolSequence).toBe("last");
+  });
+
+  it("anchors the footer on the error notice that ends a failed turn", () => {
+    const notice = notificationItem("turn-error", 2, "error");
+    const layout = layoutFor({
+      platform: "web",
+      tail: [userMessage("u1", 1), notice],
+    });
+
+    expect(layout.auxiliaryTurnFooter?.itemId).toBe(notice.id);
+    expect(findLayoutItem(layout, notice.id).completedFooter).toBeNull();
+    expect(footerOwners(layout)).toEqual([notice.id]);
+  });
+
+  it("keeps the assistant anchor when a turn ends on a non-error notice", () => {
+    const assistant = assistantMessage("a1", 2);
+    const layout = layoutFor({
+      platform: "web",
+      tail: [userMessage("u1", 1), assistant, notificationItem("notice-1", 3, "notification")],
+      timingIds: [assistant.id],
+    });
+
+    expect(layout.auxiliaryTurnFooter?.itemId).toBe(assistant.id);
   });
 
   it("keeps bottom and inline footer ownership mutually exclusive", () => {

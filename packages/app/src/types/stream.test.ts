@@ -2294,6 +2294,32 @@ describe("notification timeline items", () => {
     ]);
   });
 
+  it("maps error items to error-level activity log entries", () => {
+    const timestamp = new Date("2026-07-26T10:00:00.000Z");
+    const state = hydrateStreamState(
+      [
+        {
+          event: {
+            type: "timeline",
+            provider: "omp",
+            item: { type: "error", message: "Provider run failed" },
+          },
+          timestamp,
+        },
+      ],
+      { source: "canonical" },
+    );
+
+    expect(state).toEqual([
+      expect.objectContaining({
+        kind: "notification",
+        sourceType: "error",
+        level: "error",
+        message: "Provider run failed",
+      }),
+    ]);
+  });
+
   it("keeps repeated notifications with the same text in the same millisecond", () => {
     const timestamp = new Date("2026-07-26T10:00:00.000Z");
     const state = hydrateStreamState(

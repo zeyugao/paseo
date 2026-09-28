@@ -152,11 +152,14 @@ class OmpCliRuntimeSession implements OmpRuntimeSession {
     message: string,
     images?: Array<{ type: "image"; data: string; mimeType: string }>,
   ): Promise<OmpPromptAck> {
-    const { id: requestId, promise } = this.process.startRequest({
-      type: "prompt",
-      message,
-      ...(images?.length ? { images } : {}),
-    });
+    const { id: requestId, promise } = this.process.startRequest(
+      {
+        type: "prompt",
+        message,
+        ...(images?.length ? { images } : {}),
+      },
+      OMP_PROMPT_REQUEST_TIMEOUT_MS,
+    );
     const ack = OmpPromptAckSchema.parse(await promise) ?? {};
     return { requestId, ...ack };
   }

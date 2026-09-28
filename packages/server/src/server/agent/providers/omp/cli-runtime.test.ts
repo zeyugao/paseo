@@ -446,6 +446,47 @@ describe("OMP CLI runtime", () => {
     await expect(session.prompt("hello")).resolves.toEqual({ requestId: "req_1" });
   });
 
+  test("prompt waits beyond the default control-plane timeout for a late response", async () => {
+    vi.useFakeTimers();
+    const child = createOmpChild();
+    const pendingPrompt = captureCommand(child, "prompt");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+
+    try {
+      const promptPromise = session.prompt("continue");
+      const promptCommand = await pendingPrompt;
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(promptCommand).toMatchObject({
+        type: "prompt",
+        message: "continue",
+        id: expect.any(String),
+      });
+
+      writeResponse(child, promptCommand, {});
+
+      await expect(promptPromise).resolves.toEqual({ requestId: "req_1" });
+    } finally {
+      vi.useRealTimers();
+      await session.close();
+    }
+  });
+
+  test("prompt without a wall-clock timeout rejects when the session closes", async () => {
+    const child = createOmpChild();
+    const pendingPrompt = captureCommand(child, "prompt");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+
+    const promptPromise = session.prompt("hello");
+    const promptCommand = await pendingPrompt;
+    expect(promptCommand).toMatchObject({ type: "prompt", id: expect.any(String) });
+
+    const rejection = expect(promptPromise).rejects.toThrow("OMP RPC session is closed");
+    await session.close();
+
+    await rejection;
+  });
+
   test("compact waits beyond the default control-plane timeout for a late response", async () => {
     vi.useFakeTimers();
     const child = createOmpChild();

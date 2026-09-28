@@ -150,12 +150,15 @@ class OmpCliRuntimeSession implements OmpRuntimeSession {
   }
 
   async prompt({ message, images, streamingBehavior }: OmpPromptInput): Promise<OmpPromptAck> {
-    const { id: requestId, promise } = this.process.startRequest({
-      type: "prompt",
-      message,
-      ...(images?.length ? { images } : {}),
-      ...(streamingBehavior ? { streamingBehavior: streamingBehavior } : {}),
-    });
+    const { id: requestId, promise } = this.process.startRequest(
+      {
+        type: "prompt",
+        message,
+        ...(images?.length ? { images } : {}),
+        ...(streamingBehavior ? { streamingBehavior: streamingBehavior } : {}),
+      },
+      OMP_PROMPT_REQUEST_TIMEOUT_MS,
+    );
     const ack = OmpPromptAckSchema.parse(await promise) ?? {};
     return { requestId, ...ack };
   }

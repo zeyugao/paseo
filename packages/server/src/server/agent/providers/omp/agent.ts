@@ -733,6 +733,7 @@ export class OmpAgentSession implements AgentSession {
   private readonly providerIdleDeadlineMs: number;
   private readonly noTurnScheduler: OmpNoTurnScheduler;
   private readonly usagePoller: OmpUsagePoller;
+  private initialUsageReadStarted = false;
   private closed = false;
   private live: boolean;
   private readonly emittedUserMessageIds = new Set<string>();
@@ -1069,6 +1070,13 @@ export class OmpAgentSession implements AgentSession {
 
   subscribe(callback: (event: AgentStreamEvent) => void): () => void {
     this.subscribers.add(callback);
+    // The manager subscribes right after replaying history on load/resume;
+    // this one-shot read populates the context window meter without waiting
+    // for the first turn.
+    if (!this.initialUsageReadStarted) {
+      this.initialUsageReadStarted = true;
+      void this.usagePoller.readInitial();
+    }
     return () => {
       this.subscribers.delete(callback);
     };

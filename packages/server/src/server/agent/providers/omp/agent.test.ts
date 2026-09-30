@@ -1,8 +1,9 @@
 import { describe, expect, onTestFinished, test } from "vitest";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
+import { rmSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import path from "node:path";
+import path, { join } from "node:path";
 
 import type { AgentStreamEvent } from "../../agent-sdk-types.js";
 import type { PaseoToolCatalog } from "../../tools/types.js";
@@ -12,7 +13,7 @@ import type { OmpUsagePollScheduler } from "./usage-poller.js";
 import { resolveOmpProviderOptions } from "./provider-config.js";
 import { OmpRuntimeEventSchema } from "./rpc-types.js";
 import { OmpHarness } from "./test-utils/omp-harness.js";
-import { OmpAgentClient } from "./agent.js";
+import { OmpAgentClient, OmpAgentSession } from "./agent.js";
 import { FakeOmp } from "./test-utils/fake-omp.js";
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 
@@ -521,6 +522,60 @@ describe("OMP agent client and session", () => {
     expect(scheduler.activePollCount()).toBe(1);
     await omp.close();
     expect(scheduler.activePollCount()).toBe(0);
+  });
+
+  test("reads context usage on first subscribe after resume without a turn", async () => {
+    const runtime = new FakeOmp();
+    const client = new OmpAgentClient({ logger: createTestLogger(), runtime });
+    const directory = await mkdtemp(join(tmpdir(), "paseo-omp-initial-usage-"));
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      [
+        { type: "session", id: "root", parentId: null },
+        {
+          type: "message",
+          id: "user-1",
+          parentId: "root",
+          message: { role: "user", content: "resume me" },
+        },
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n"),
+    );
+    let session: OmpAgentSession | null = null;
+    try {
+      session = await client.resumeSession({
+        provider: "omp",
+        sessionId: "initial-usage-1",
+        nativeHandle: sessionFile,
+        metadata: { cwd: directory },
+      });
+      runtime.latestSession().stats = {
+        tokens: { input: 900, cacheRead: 10, output: 90, cacheWrite: 0, total: 1000 },
+        cost: 0.5,
+        contextUsage: { tokens: 130, contextWindow: 200_000 },
+      };
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+      await waitForImmediate();
+
+      expect(events).toContainEqual({
+        type: "usage_updated",
+        provider: "omp",
+        usage: {
+          inputTokens: 900,
+          cachedInputTokens: 10,
+          outputTokens: 90,
+          totalCostUsd: 0.5,
+          contextWindowMaxTokens: 200_000,
+          contextWindowUsedTokens: 130,
+        },
+      });
+    } finally {
+      await session?.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("does not accept a follow-up until OMP reports stable idle", async () => {

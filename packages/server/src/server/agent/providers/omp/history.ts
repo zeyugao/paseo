@@ -90,10 +90,50 @@ export async function* streamOmpHistory(input: {
     }
     throw error;
   }
+  const { messages, messageEntries, userEntries, compactions } = collectOmpHistoryEntries(entries);
+  const mapper = new OmpHistoryMapper(
+    input.provider,
+    userEntries,
+    OMP_HISTORY_MAPPER_HOOKS,
+    input.bridgedTools,
+  );
+  let nextCompaction = 0;
+  for (let index = 0; index < messages.length; index += 1) {
+    while (compactions[nextCompaction]?.beforeMessageIndex === index) {
+      yield compactionMarkerEvent(compactions[nextCompaction]!.entry, input.provider);
+      nextCompaction += 1;
+    }
+    const timestamp = normalizeProviderReplayTimestamp(messageEntries[index]?.timestamp);
+    for (const event of mapper.mapMessages([messages[index]!])) {
+      yield timestamp && event.type === "timeline" ? { ...event, timestamp } : event;
+    }
+  }
+  for (; nextCompaction < compactions.length; nextCompaction += 1) {
+    yield compactionMarkerEvent(compactions[nextCompaction]!.entry, input.provider);
+  }
+  for (const transcript of readSubagentTranscripts(messages, input.sessionFile)) {
+    yield* replaySubagentTranscript(transcript, input.provider, visitedSessionFiles);
+  }
+}
+
+function collectOmpHistoryEntries(entries: readonly OmpSessionEntry[]): {
+  messages: OmpAgentMessage[];
+  messageEntries: OmpSessionEntry[];
+  userEntries: OmpCapturedUserMessageEntry[];
+  // Compaction rows persist the post-compaction context as a prompt-shaped
+  // summary; replay them as completed markers at their original position
+  // instead of dumping the summary into the timeline.
+  compactions: Array<{ beforeMessageIndex: number; entry: OmpSessionEntry }>;
+} {
   const messages: OmpAgentMessage[] = [];
   const messageEntries: OmpSessionEntry[] = [];
   const userEntries: OmpCapturedUserMessageEntry[] = [];
+  const compactions: Array<{ beforeMessageIndex: number; entry: OmpSessionEntry }> = [];
   for (const entry of entries) {
+    if (entry.type === "compaction") {
+      compactions.push({ beforeMessageIndex: messages.length, entry });
+      continue;
+    }
     const mapped = mapEntryMessage(entry);
     if (!mapped) continue;
     messages.push(mapped);
@@ -102,21 +142,7 @@ export async function* streamOmpHistory(input: {
       userEntries.push({ id: entry.id, text: textOf(mapped.content) });
     }
   }
-  const mapper = new OmpHistoryMapper(
-    input.provider,
-    userEntries,
-    OMP_HISTORY_MAPPER_HOOKS,
-    input.bridgedTools,
-  );
-  for (let index = 0; index < messages.length; index += 1) {
-    const timestamp = normalizeProviderReplayTimestamp(messageEntries[index]?.timestamp);
-    for (const event of mapper.mapMessages([messages[index]!])) {
-      yield timestamp && event.type === "timeline" ? { ...event, timestamp } : event;
-    }
-  }
-  for (const transcript of readSubagentTranscripts(messages, input.sessionFile)) {
-    yield* replaySubagentTranscript(transcript, input.provider, visitedSessionFiles);
-  }
+  return { messages, messageEntries, userEntries, compactions };
 }
 
 async function* replaySubagentTranscript(
@@ -348,6 +374,18 @@ export async function readActiveOmpEntryChain(
   return chain.toReversed();
 }
 
+// Compaction summaries are prompt-shaped context injections, not conversation;
+// the marker mirrors what live compaction events emit.
+function compactionMarkerEvent(entry: OmpSessionEntry, provider: AgentProvider): AgentStreamEvent {
+  const timestamp = normalizeProviderReplayTimestamp(entry.timestamp);
+  return {
+    type: "timeline",
+    provider,
+    item: { type: "compaction", status: "completed" },
+    ...(timestamp ? { timestamp } : {}),
+  };
+}
+
 function mapEntryMessage(entry: OmpSessionEntry): OmpAgentMessage | null {
   const message = entry.message;
   if (message && typeof message.role === "string") {
@@ -414,6 +452,9 @@ function isControlEntryType(type: string): boolean {
     type === "system_prompt" ||
     type === "model_change" ||
     type === "thinking_level_change" ||
+    // model_usage rows are auxiliary-call token/cost accounting (judge,
+    // background calls); they carry no conversation content.
+    type === "model_usage" ||
     // Rule injections carry no user-facing text.
     type === "ttsr_injection" ||
     // Branch summaries are abandoned-branch context for /tree navigation, not conversation.

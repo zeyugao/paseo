@@ -1052,6 +1052,83 @@ describe("OMP history mapper", () => {
     ]);
   });
 
+  test("skips model_usage accounting rows and marks compaction rows", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omp-model-usage-history-"));
+    const sessionFile = join(dir, "session.jsonl");
+    writeFileSync(
+      sessionFile,
+      [
+        { type: "session", id: "root", parentId: null },
+        {
+          type: "message",
+          id: "user-1",
+          parentId: "root",
+          timestamp: "2026-09-29T21:40:00.000Z",
+          message: { role: "user", content: "keep going" },
+        },
+        {
+          // omp persists auxiliary-call token/cost accounting as top-level
+          // model_usage rows linked into the chain; they are not conversation.
+          type: "model_usage",
+          id: "usage-1",
+          parentId: "user-1",
+          timestamp: "2026-09-29T21:45:27.467Z",
+          purpose: "unexpected-stop",
+          role: "judge",
+          api: "openai-responses",
+          provider: "newapi",
+          model: "glm-5.3",
+          usage: { input: 808, output: 3, totalTokens: 811, cost: { total: 0.0011444 } },
+          stopReason: "stop",
+        },
+        {
+          type: "message",
+          id: "assistant-1",
+          parentId: "usage-1",
+          timestamp: "2026-09-29T21:46:00.000Z",
+          message: { role: "assistant", content: [{ type: "text", text: "answer" }] },
+        },
+        {
+          type: "compaction",
+          id: "compaction-1",
+          parentId: "assistant-1",
+          timestamp: "2026-09-29T21:47:00.000Z",
+          summary: "Resume prior conversation. Earlier turns archived under HISTORY below.",
+        },
+        {
+          type: "message",
+          id: "user-2",
+          parentId: "compaction-1",
+          timestamp: "2026-09-29T21:48:00.000Z",
+          message: { role: "user", content: "after compaction" },
+        },
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n"),
+    );
+
+    const events: AgentStreamEvent[] = [];
+    for await (const event of streamOmpHistory({ sessionFile, provider: "omp" })) {
+      events.push(event);
+    }
+    expect(events.map((event) => event.item)).toEqual([
+      { type: "user_message", text: "keep going", messageId: "user-1" },
+      { type: "assistant_message", text: "answer", messageId: "omp-history-assistant-1" },
+      { type: "compaction", status: "completed" },
+      { type: "user_message", text: "after compaction", messageId: "user-2" },
+    ]);
+    const compactionEvent = events.find(
+      (event): event is Extract<AgentStreamEvent, { type: "timeline" }> =>
+        event.type === "timeline" && event.item.type === "compaction",
+    );
+    expect(compactionEvent).toMatchObject({
+      type: "timeline",
+      provider: "omp",
+      item: { type: "compaction", status: "completed" },
+      timestamp: "2026-09-29T21:47:00.000Z",
+    });
+  });
+
   test("maps omp 18.1 custom_message entries like live custom messages", async () => {
     const dir = mkdtempSync(join(tmpdir(), "omp-custom-message-history-"));
     const sessionFile = join(dir, "session.jsonl");

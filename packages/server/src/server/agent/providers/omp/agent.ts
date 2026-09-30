@@ -1050,7 +1050,7 @@ export class OmpAgentSession implements AgentSession {
     // for the first turn.
     if (!this.initialUsageReadStarted) {
       this.initialUsageReadStarted = true;
-      void this.usagePoller.readInitial();
+      void this.usagePoller.readOnce();
     }
     return () => {
       this.subscribers.delete(callback);
@@ -1531,6 +1531,9 @@ export class OmpAgentSession implements AgentSession {
         return;
       }
       tryEmitCompaction("completed");
+      // Compaction shrank the context while no turn is polling stats — read
+      // once so the context meter follows the new usage.
+      await this.usagePoller.readOnce();
     } finally {
       this.outOfBandCompactionRunning = false;
     }

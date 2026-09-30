@@ -105,9 +105,10 @@ export class OmpUsagePoller {
     this.publishUsage(usage, turnId);
   }
 
-  // One-shot read for session load/resume: populates the context window
-  // meter before the first turn starts the polling loop.
-  async readInitial(): Promise<void> {
+  // One-shot read outside the turn polling loop: populates the context
+  // window meter on session load/resume, and refreshes it after out-of-band
+  // context changes such as manual compaction.
+  async readOnce(): Promise<void> {
     if (this.closed || this.active) {
       return;
     }

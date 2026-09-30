@@ -1884,6 +1884,32 @@ describe("OMP agent client and session", () => {
     expect(events).toEqual([...MANUAL_COMPACTION_EVENTS]);
   });
 
+  test("refreshes token usage after manual compaction", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    omp.runtime().stats = {
+      tokens: { input: 900, cacheRead: 10, output: 90 },
+      cost: 0.5,
+      contextUsage: { contextWindow: 200_000, tokens: 12_000 },
+    };
+    const events: AgentStreamEvent[] = [];
+
+    await omp.runOutOfBandCommand("/compact", (event) => events.push(event));
+
+    expect(omp.runtime().compactRequests).toEqual([{}]);
+    expect(events).toEqual([...MANUAL_COMPACTION_EVENTS]);
+    expect(omp.usageUpdates()).toEqual([
+      {
+        inputTokens: 900,
+        cachedInputTokens: 10,
+        outputTokens: 90,
+        totalCostUsd: 0.5,
+        contextWindowMaxTokens: 200_000,
+        contextWindowUsedTokens: 12_000,
+      },
+    ]);
+  });
+
   test("closes the manual compaction marker when /compact rejects", async () => {
     const omp = new OmpHarness();
     await omp.start();

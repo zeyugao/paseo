@@ -172,7 +172,7 @@ describe("OMP usage poller", () => {
     expect(scheduler.activePollCount()).toBe(0);
   });
 
-  test("readInitial publishes usage once without a turn", async () => {
+  test("readOnce publishes usage once without a turn", async () => {
     const scheduler = new ManualPollScheduler();
     const updates: AgentUsage[] = [];
     let stats: OmpSessionStats = {
@@ -189,16 +189,16 @@ describe("OMP usage poller", () => {
       },
     });
 
-    await poller.readInitial();
+    await poller.readOnce();
     // Empty stats and unchanged stats never re-emit.
     stats = { tokens: { input: 0, cacheRead: 0, output: 0 }, cost: 0 };
-    await poller.readInitial();
+    await poller.readOnce();
     stats = {
       tokens: { input: 900, cacheRead: 10, output: 90 },
       cost: 0.5,
       contextUsage: { contextWindow: 200_000, tokens: 130 },
     };
-    await poller.readInitial();
+    await poller.readOnce();
 
     expect(updates).toEqual([
       {
@@ -213,7 +213,7 @@ describe("OMP usage poller", () => {
     expect(scheduler.activePollCount()).toBe(0);
   });
 
-  test("readInitial drops its read when a turn starts first", async () => {
+  test("readOnce drops its read when a turn starts first", async () => {
     const scheduler = new ManualPollScheduler();
     const stats = deferred<OmpSessionStats>();
     const updates: AgentUsage[] = [];
@@ -226,7 +226,7 @@ describe("OMP usage poller", () => {
       },
     });
 
-    const initial = poller.readInitial();
+    const initial = poller.readOnce();
     poller.startTurn();
     stats.resolve({ contextUsage: { contextWindow: 200_000, tokens: 130 } });
     await initial;
@@ -249,7 +249,7 @@ describe("OMP usage poller", () => {
     poller.stopTurn();
   });
 
-  test("readInitial ignores read errors and skips while a turn is active", async () => {
+  test("readOnce ignores read errors and skips while a turn is active", async () => {
     const scheduler = new ManualPollScheduler();
     const updates: AgentUsage[] = [];
     let stats: OmpSessionStats | Error = new Error("stats unavailable");
@@ -265,10 +265,10 @@ describe("OMP usage poller", () => {
       },
     });
 
-    await expect(poller.readInitial()).resolves.toBeUndefined();
+    await expect(poller.readOnce()).resolves.toBeUndefined();
     stats = { contextUsage: { contextWindow: 200_000, tokens: 130 } };
     poller.startTurn();
-    await poller.readInitial();
+    await poller.readOnce();
 
     expect(updates).toEqual([]);
     poller.stopTurn();

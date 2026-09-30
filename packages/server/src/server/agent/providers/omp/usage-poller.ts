@@ -105,6 +105,25 @@ export class OmpUsagePoller {
     this.publishUsage(usage, turnId);
   }
 
+  // One-shot read for session load/resume: populates the context window
+  // meter before the first turn starts the polling loop.
+  async readInitial(): Promise<void> {
+    if (this.closed || this.active) {
+      return;
+    }
+    const generation = this.generation;
+    let usage: AgentUsage | undefined;
+    try {
+      usage = toAgentUsage(await this.options.readStats());
+    } catch {
+      return;
+    }
+    if (this.closed || this.active || this.generation !== generation) {
+      return;
+    }
+    this.publishUsage(usage);
+  }
+
   close(): void {
     this.closed = true;
     this.active = false;

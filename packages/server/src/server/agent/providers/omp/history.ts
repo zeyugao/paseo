@@ -3,7 +3,6 @@ import { basename, extname, join } from "node:path";
 import type { AgentProvider, AgentStreamEvent, AgentTimelineItem } from "../../agent-sdk-types.js";
 import { normalizeProviderReplayTimestamp } from "../../provider-history-timestamps.js";
 import { OmpHistoryMapper, type OmpCapturedUserMessageEntry } from "./message-history.js";
-import { mapOmpCustomMessageEntry } from "./custom-message.js";
 import type { OmpAgentMessage } from "./rpc-types.js";
 import type { OmpRuntimeSession } from "./runtime.js";
 import { OMP_HISTORY_MAPPER_HOOKS } from "./history-hooks.js";
@@ -403,9 +402,6 @@ function mapEntryMessage(entry: OmpSessionEntry): OmpAgentMessage | null {
   if (!entry.type || isControlEntryType(entry.type)) {
     return null;
   }
-  if (entry.type === "custom_message") {
-    return mapOmpCustomMessageEntry(entry);
-  }
   return visibleFallback(entry.type, entry);
 }
 
@@ -455,6 +451,9 @@ function isControlEntryType(type: string): boolean {
     type === "system_prompt" ||
     type === "model_change" ||
     type === "thinking_level_change" ||
+    // model_usage rows are auxiliary-call token/cost accounting (judge,
+    // background calls); they carry no conversation content.
+    type === "model_usage" ||
     // Rule injections carry no user-facing text.
     type === "ttsr_injection" ||
     // Branch summaries are abandoned-branch context for /tree navigation, not conversation.

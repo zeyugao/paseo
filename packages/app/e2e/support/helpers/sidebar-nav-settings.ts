@@ -230,26 +230,31 @@ const FOOTER_GEOMETRY_TOLERANCE = 0.01;
 
 /**
  * One line of same-size icons: Add project, Usage and Hosts together on the left, Help and
- * Settings together at the end.
+ * Settings together at the end. The footer settles asynchronously (usage rows mount, the
+ * compact sidebar slides in), so the one-shot box reads must retry until the row agrees.
  */
 export async function expectFooterIconRow(page: Page): Promise<void> {
-  const boxes = (
-    await Promise.all(
-      FOOTER_ICON_TEST_IDS.map((testID) =>
-        page.locator(`[data-testid="${testID}"]:visible`).first().boundingBox(),
-      ),
-    )
-  ).map((box) => box!);
-  const [first] = boxes;
-  for (const box of boxes) {
-    expect(Math.abs(box.y + box.height / 2 - first!.y - first!.height / 2)).toBeLessThan(2);
-    expect(Math.abs(box.width - first!.width)).toBeLessThan(FOOTER_GEOMETRY_TOLERANCE);
-  }
-  const gaps = boxes.slice(1).map((box, index) => box.x - (boxes[index]!.x + boxes[index]!.width));
-  for (const index of [0, 1, 3]) {
-    expect(Math.abs(gaps[index]!)).toBeLessThan(FOOTER_GEOMETRY_TOLERANCE);
-  }
-  expect(gaps[2]).toBeGreaterThan(first!.width);
+  await expect(async () => {
+    const boxes = (
+      await Promise.all(
+        FOOTER_ICON_TEST_IDS.map((testID) =>
+          page.locator(`[data-testid="${testID}"]:visible`).first().boundingBox(),
+        ),
+      )
+    ).map((box) => box!);
+    const [first] = boxes;
+    for (const box of boxes) {
+      expect(Math.abs(box.y + box.height / 2 - first!.y - first!.height / 2)).toBeLessThan(2);
+      expect(Math.abs(box.width - first!.width)).toBeLessThan(FOOTER_GEOMETRY_TOLERANCE);
+    }
+    const gaps = boxes
+      .slice(1)
+      .map((box, index) => box.x - (boxes[index]!.x + boxes[index]!.width));
+    for (const index of [0, 1, 3]) {
+      expect(Math.abs(gaps[index]!)).toBeLessThan(FOOTER_GEOMETRY_TOLERANCE);
+    }
+    expect(gaps[2]).toBeGreaterThan(first!.width);
+  }).toPass({ timeout: 15_000 });
 }
 
 export async function expectFooterSeparator(page: Page, shown: boolean): Promise<void> {

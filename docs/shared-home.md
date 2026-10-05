@@ -81,6 +81,10 @@ one journal.
 - The Hub relationship is per-home and single-connection: one daemon holds the
   `hub-connection.lock` lease and the others start with Hub disabled (the log names
   the owner). If that daemon dies, the lease goes stale and another host takes over.
+- A client-supplied `agentId` in a create request can collide with a foreign record
+  written by another host within the local 5-second rescan window. Today's clients
+  generate IDs server-side; if a future client retries a create with the same ID
+  against a different host, the foreign check may not see the record yet.
 
 ## Not supported
 

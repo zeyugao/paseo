@@ -2,6 +2,7 @@ import type { PluginAgentToolsRuntime } from "./agent-tools.js";
 import type { PluginLifecycle } from "./lifecycle/index.js";
 import path from "node:path";
 import { stat, rm } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import type pino from "pino";
 import type { ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import {
@@ -20,6 +21,8 @@ import { parsePluginSourceReference } from "@getpaseo/protocol/plugin-source-ref
 import { assertPluginCompatibility } from "@getpaseo/protocol/plugin-requirements";
 import { BUILTIN_PROVIDER_IDS } from "@getpaseo/protocol/provider-manifest";
 import type { DaemonConfigStore } from "../daemon-config-store.js";
+import { withReclaimLock } from "../pid-lock.js";
+import { readPersistedConfig } from "../persisted-config.js";
 import { type ManagedPluginCandidate, ManagedPluginSources } from "./managed-source.js";
 import { readPluginManifest } from "./manifest.js";
 import { expandTilde } from "../../utils/path.js";
@@ -36,6 +39,24 @@ import {
 import type { PluginUsageSourceMetadata } from "./plugin-process-protocol.js";
 
 const BUILTIN_PROVIDER_ID_SET: ReadonlySet<string> = new Set(BUILTIN_PROVIDER_IDS);
+const PLUGIN_PATCH_WRAPPED_STORES = new WeakSet<DaemonConfigStore>();
+const PLUGIN_LOCK_HELD_PATHS = new Set<string>();
+
+function installPluginPatchLock(configStore: DaemonConfigStore): void {
+  if (PLUGIN_PATCH_WRAPPED_STORES.has(configStore)) return;
+  const patch = configStore.patch.bind(configStore);
+  const pluginsLockPath = path.resolve(configStore.paseoHome, ".plugins.lock");
+  configStore.patch = (partial) => {
+    if (
+      !Object.prototype.hasOwnProperty.call(partial, "plugins") ||
+      PLUGIN_LOCK_HELD_PATHS.has(pluginsLockPath)
+    ) {
+      return patch(partial);
+    }
+    return withReclaimLock(pluginsLockPath, () => patch(partial));
+  };
+  PLUGIN_PATCH_WRAPPED_STORES.add(configStore);
+}
 
 interface PluginRuntimePort {
   subscribeSessionOpenChanges?: PluginRuntime["subscribeSessionOpenChanges"];
@@ -97,6 +118,7 @@ export class PluginService {
   private readonly providerIdsByPlugin = new Map<string, readonly string[]>();
   private readonly providerListeners = new Set<() => void>();
   private lifecycle = Promise.resolve();
+  private configMutations = Promise.resolve();
   private globalStartsBlocked = true;
   private readonly pendingOperations = new Map<
     string,
@@ -111,6 +133,7 @@ export class PluginService {
     private readonly daemonVersion: string,
     private readonly dependencies: PluginServiceDependencies = {},
   ) {
+    installPluginPatchLock(configStore);
     this.logger = logger.child({ module: "plugin-service" });
     this.usageSources = new UsageSourceRegistry(
       Date.now,
@@ -308,7 +331,11 @@ export class PluginService {
           `Plugin ID "${pluginId}" is already configured; choose another ID with --id`,
         );
       }
-      await this.patchSource(pluginId, { source: "directory", path: directory, enabled: true });
+      await this.installSourceEntry(pluginId, {
+        source: "directory",
+        path: directory,
+        enabled: true,
+      });
       if (this.canPublish(pluginId)) await this.startConfigured(pluginId);
       this.notify(pluginId);
       const installed = await this.requireItem(pluginId);
@@ -363,22 +390,26 @@ export class PluginService {
         candidate = await managedSources.place(pluginId, candidate);
         await this.validateCandidate(candidate);
         await managedSources.verifyCandidate(pluginId, candidate);
+        await this.installManagedSourceEntry(
+          pluginId,
+          {
+            source: "directory",
+            path: candidate.directory,
+            enabled: true,
+          },
+          candidate,
+        );
       } catch (error) {
         await managedSources.discard(candidate);
         throw error;
       }
-      await this.patchSource(pluginId, {
-        source: "directory",
-        path: candidate.directory,
-        enabled: true,
-      });
+
       try {
         if (this.canPublish(pluginId)) await this.startExplicit(pluginId, candidate.directory);
-        managedSources.commit(pluginId, candidate.record);
       } catch (error) {
         await this.stopPlugin(pluginId);
-        await this.removeSource(pluginId);
-        await managedSources.discard(candidate);
+        await this.removeSourceEntry(pluginId);
+        await managedSources.remove(pluginId);
         this.errors.delete(pluginId);
         this.notify(pluginId);
         throw error;
@@ -456,10 +487,12 @@ export class PluginService {
 
   async reloadPlugin(pluginId: string): Promise<PluginListItem> {
     return this.enqueue(async () => {
-      const source = this.requireEnabledSource(pluginId);
+      this.requireEnabledSource(pluginId);
       if (this.configStore.get().pluginsEnabled !== true) {
         throw new Error("Plugins are globally disabled");
       }
+      await this.adoptPersistedSource(pluginId);
+      const source = this.requireEnabledSource(pluginId);
       this.errors.delete(pluginId);
       await this.stopPlugin(pluginId);
       await this.startExplicit(pluginId, this.resolveDirectory(source.path));
@@ -469,7 +502,8 @@ export class PluginService {
   }
 
   async enablePlugin(pluginId: string): Promise<PluginListItem> {
-    await this.patchSource(pluginId, (source) => ({ ...source, enabled: true }));
+    this.requireSource(pluginId);
+    await this.patchSourceEntry(pluginId, (source) => ({ ...source, enabled: true }));
     this.errors.delete(pluginId);
     return this.enqueue(async () => {
       // Cancellation persistence uses the store queue, so it never waits behind a blocked start.
@@ -484,9 +518,10 @@ export class PluginService {
   }
 
   async disablePlugin(pluginId: string): Promise<PluginListItem> {
+    this.requireSource(pluginId);
     const operation = {
       kind: "disable",
-      completion: this.patchSource(pluginId, (source) => ({ ...source, enabled: false })),
+      completion: this.patchSourceEntry(pluginId, (source) => ({ ...source, enabled: false })),
     } as const;
     this.pendingOperations.set(pluginId, operation);
     try {
@@ -506,7 +541,7 @@ export class PluginService {
 
   async removePlugin(pluginId: string): Promise<void> {
     this.requireSource(pluginId);
-    const operation = { kind: "remove", completion: this.removeSource(pluginId) } as const;
+    const operation = { kind: "remove", completion: this.removeSourceEntry(pluginId) } as const;
     this.pendingOperations.set(pluginId, operation);
     try {
       await operation.completion;
@@ -515,6 +550,7 @@ export class PluginService {
         this.pendingOperations.delete(pluginId);
     }
     const stopping = this.stopPlugin(pluginId);
+
     await this.enqueue(async () => {
       await stopping;
       this.runtime.clearLogs(pluginId);
@@ -801,13 +837,12 @@ export class PluginService {
         throw error;
       }
     }
-    const activatedSource = this.configStore.get().plugins?.[pluginId];
-    if (!activatedSource) {
+    if (!this.configStore.get().plugins?.[pluginId]) {
       await this.stopPlugin(pluginId);
       await managedSources.discard(candidate);
       throw new Error(`Plugin is no longer configured: ${pluginId}`);
     }
-    await this.patchSource(pluginId, (currentSource) => ({
+    await this.patchSourceEntry(pluginId, (currentSource) => ({
       ...currentSource,
       path: candidate.directory,
     }));
@@ -861,29 +896,122 @@ export class PluginService {
     return source;
   }
 
-  private async patchSource(
-    pluginId: string,
-    update: PluginSource | ((source: PluginSource) => PluginSource),
-  ): Promise<void> {
-    await this.configStore.patch((current) => {
-      const source = current.plugins?.[pluginId];
-      if (typeof update === "function" && !source)
-        throw new Error(`Plugin is not configured: ${pluginId}`);
-      return {
-        plugins: {
-          ...current.plugins,
-          [pluginId]: typeof update === "function" ? update(source!) : update,
-        },
-      };
+  // Plugins-map mutations are serialized in-process for call-order
+  // determinism, then run under a cross-process lock with a re-read from
+  // disk: another daemon sharing PASEO_HOME may have changed config.json
+  // since this process cached its config, and a patch replaces the whole map.
+  private queuePluginsMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.configMutations.then(operation, operation);
+    this.configMutations = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private get pluginsLockPath(): string {
+    return path.resolve(this.configStore.paseoHome, ".plugins.lock");
+  }
+
+  private withPluginsLock<T>(operation: () => Promise<T>): Promise<T> {
+    return withReclaimLock(this.pluginsLockPath, async () => {
+      PLUGIN_LOCK_HELD_PATHS.add(this.pluginsLockPath);
+      try {
+        return await operation();
+      } finally {
+        PLUGIN_LOCK_HELD_PATHS.delete(this.pluginsLockPath);
+      }
     });
   }
 
-  private async removeSource(pluginId: string): Promise<void> {
-    await this.configStore.patch((current) => {
-      const sources = { ...current.plugins };
-      delete sources[pluginId];
-      return { plugins: sources };
-    });
+  private readDiskPlugins(): Record<string, PluginSource> {
+    return { ...readPersistedConfig(this.configStore.paseoHome).plugins };
+  }
+
+  private installSourceEntry(pluginId: string, source: PluginSource): Promise<void> {
+    return this.queuePluginsMutation(() =>
+      this.withPluginsLock(async () => {
+        const plugins = this.readDiskPlugins();
+        if (plugins[pluginId]) {
+          throw new Error(
+            `Plugin ID "${pluginId}" is already configured; choose another ID with --id`,
+          );
+        }
+        plugins[pluginId] = source;
+        await this.configStore.patch({ plugins });
+      }),
+    );
+  }
+
+  private installManagedSourceEntry(
+    pluginId: string,
+    source: PluginSource,
+    candidate: ManagedPluginCandidate,
+  ): Promise<void> {
+    return this.queuePluginsMutation(() =>
+      this.withPluginsLock(async () => {
+        if (this.readDiskPlugins()[pluginId]) {
+          throw new Error(
+            `Plugin ID "${pluginId}" is already configured; choose another ID with --id`,
+          );
+        }
+        const managedSources = this.requireManagedSources();
+        await managedSources.commit(pluginId, candidate.record);
+        const plugins = this.readDiskPlugins();
+        if (plugins[pluginId]) {
+          await managedSources.remove(pluginId);
+          throw new Error(
+            `Plugin ID "${pluginId}" is already configured; choose another ID with --id`,
+          );
+        }
+        plugins[pluginId] = source;
+        try {
+          await this.configStore.patch({ plugins });
+        } catch (error) {
+          await managedSources.remove(pluginId);
+          throw error;
+        }
+      }),
+    );
+  }
+
+  private patchSourceEntry(
+    pluginId: string,
+    patch: (current: PluginSource) => PluginSource,
+  ): Promise<void> {
+    return this.queuePluginsMutation(() =>
+      this.withPluginsLock(async () => {
+        const plugins = this.readDiskPlugins();
+        const current = plugins[pluginId];
+        if (!current) throw new Error(`Plugin is not configured: ${pluginId}`);
+        plugins[pluginId] = patch(current);
+        await this.configStore.patch({ plugins });
+      }),
+    );
+  }
+
+  private removeSourceEntry(pluginId: string): Promise<void> {
+    return this.queuePluginsMutation(() =>
+      this.withPluginsLock(async () => {
+        const plugins = this.readDiskPlugins();
+        delete plugins[pluginId];
+        await this.configStore.patch({ plugins });
+      }),
+    );
+  }
+
+  // Another daemon sharing PASEO_HOME may have updated this plugin's
+  // installation while this daemon still holds the older in-memory source.
+  // Adopt the persisted entry when its directory still exists so a reload
+  // starts the current installation instead of a removed path.
+  private async adoptPersistedSource(pluginId: string): Promise<void> {
+    const persisted = readPersistedConfig(this.configStore.paseoHome).plugins?.[pluginId];
+    if (!persisted) return;
+    if (isDeepStrictEqual(persisted, this.configStore.get().plugins?.[pluginId])) return;
+    const directory = this.resolveDirectory(persisted.path);
+    const info = await stat(directory).catch(() => null);
+    if (!info?.isDirectory()) return;
+    await this.patchSourceEntry(pluginId, () => persisted);
   }
 
   private async requireItem(pluginId: string): Promise<PluginListItem> {

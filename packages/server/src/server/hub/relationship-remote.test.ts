@@ -628,6 +628,7 @@ async function connectController(
     updateAttachedPermissions: () => undefined,
     createExecutionAgents: () => unusedExecutionAgents,
   });
+  await controller.start();
   await controller.connect({
     hubUrl: hub.origin,
     token: "enrollment-token",

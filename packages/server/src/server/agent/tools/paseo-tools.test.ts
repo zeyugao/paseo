@@ -272,6 +272,83 @@ describe("paseo tools workspace ownership", () => {
     expect(createAgent).not.toHaveBeenCalled();
   });
 
+  test("create_agent current placement rejects a client cwd owned by another host", async () => {
+    const foreign = { ...createWorkspaceRecord("srv-other"), cwd: process.cwd() };
+    const caller = {
+      id: "caller",
+      cwd: "/caller-workspace",
+      workspaceId: "ws-caller",
+      provider: "codex",
+      config: { provider: "codex", cwd: "/caller-workspace" },
+    };
+    const createAgent = vi.fn();
+    const { catalog } = createCatalogForWorkspaces([foreign], {
+      callerAgentId: caller.id,
+      agentManager: {
+        getAgent: (agentId: string) => (agentId === caller.id ? caller : null),
+        createAgent,
+      } as unknown as AgentManager,
+    });
+
+    await expect(
+      catalog.executeTool("create_agent", {
+        title: "Blocked child",
+        provider: "codex/gpt-5.4",
+        initialPrompt: "Do work",
+        relationship: { kind: "subagent" },
+        workspace: { kind: "current", cwd: foreign.cwd },
+      }),
+    ).rejects.toThrow("owned by host srv-other");
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+
+  test("create_agent existing placement rejects a client cwd owned by another host", async () => {
+    const foreign = { ...createWorkspaceRecord("srv-other"), cwd: process.cwd() };
+    const existing = {
+      ...createWorkspaceRecord("srv-local"),
+      workspaceId: "ws-existing",
+      cwd: "/existing-workspace",
+    };
+    const createAgent = vi.fn();
+    const { catalog } = createCatalogForWorkspaces([foreign], {
+      listActiveWorkspaces: async () => [existing],
+      agentManager: { createAgent } as unknown as AgentManager,
+    });
+
+    await expect(
+      catalog.executeTool("create_agent", {
+        title: "Blocked agent",
+        provider: "codex/gpt-5.4",
+        initialPrompt: "Do work",
+        relationship: { kind: "detached" },
+        workspace: {
+          kind: "existing",
+          workspaceId: existing.workspaceId,
+          cwd: foreign.cwd,
+        },
+      }),
+    ).rejects.toThrow("owned by host srv-other");
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+
+  test("create_terminal rejects a cwd owned by another host before creating a workspace", async () => {
+    const foreign = { ...createWorkspaceRecord("srv-other"), cwd: process.cwd() };
+    const ensureWorkspaceForCreate = vi.fn(async () => "ws-created");
+    const createTerminal = vi.fn();
+    const { catalog } = createCatalogForWorkspaces([foreign], {
+      ensureWorkspaceForCreate,
+      terminalManager: {
+        createTerminal,
+      } as unknown as PaseoToolHostDependencies["terminalManager"],
+    });
+
+    await expect(catalog.executeTool("create_terminal", { cwd: foreign.cwd })).rejects.toThrow(
+      "owned by host srv-other",
+    );
+    expect(ensureWorkspaceForCreate).not.toHaveBeenCalled();
+    expect(createTerminal).not.toHaveBeenCalled();
+  });
+
   test("create_agent directory placement rejects a foreign workspace before minting", async () => {
     const foreign = { ...createWorkspaceRecord("srv-other"), cwd: process.cwd() };
     const ensureWorkspaceForCreate = vi.fn(async () => "ws-created");

@@ -49,6 +49,7 @@ function canonicalLocalProjectKey(rootPath: string): string {
   });
 }
 
+
 interface CapturedLogRecord {
   message: string;
   payload: unknown;

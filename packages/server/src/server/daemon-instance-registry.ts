@@ -124,6 +124,22 @@ export async function readRegisteredDaemonInstance(
   return readInstanceFile(instancePath(paseoHome, serverId));
 }
 
+export async function releaseDaemonInstanceForExitedWorker(
+  paseoHome: string,
+  serverId: string,
+  workerPid: number,
+  hostname = getOsHostname(),
+): Promise<boolean> {
+  const filePath = instancePath(paseoHome, serverId);
+  const reclaimLockPath = path.join(path.dirname(filePath), ".reclaim.lock");
+  return withReclaimLock(reclaimLockPath, async () => {
+    const current = await readInstanceFile(filePath);
+    if (current?.pid !== workerPid || current.hostname !== hostname) return false;
+    await unlink(filePath);
+    return true;
+  });
+}
+
 async function clearAbandonedInstance(
   filePath: string,
   existing: DaemonInstanceInfo,

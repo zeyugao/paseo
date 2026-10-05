@@ -2,6 +2,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import pino from "pino";
+import type { Logger } from "pino";
 import { describe, expect, test, vi } from "vitest";
 
 import { OmpCliRuntime } from "./cli-runtime.js";
@@ -52,10 +53,10 @@ function createOmpChild(options?: {
 function createRuntime(
   child: OmpChild,
   launches: OmpRuntimeLaunch[] = [],
-  options?: { requestTimeoutMs?: number },
+  options?: { requestTimeoutMs?: number; logger?: Logger },
 ): OmpCliRuntime {
   return new OmpCliRuntime({
-    logger: pino({ level: "silent" }),
+    logger: options?.logger ?? pino({ level: "silent" }),
     command: ["omp"],
     commandsRpcName: "get_available_commands",
     requestTimeoutMs: options?.requestTimeoutMs,
@@ -394,6 +395,37 @@ describe("OMP CLI runtime", () => {
     );
 
     expect(eventTypes).toEqual(["message_end", "agent_end"]);
+  });
+
+  test("warns when an event frame fails schema validation", async () => {
+    const child = createOmpChild();
+    const warnings: Array<{ eventType: unknown; msg: string }> = [];
+    const logger = {
+      debug: () => undefined,
+      info: () => undefined,
+      error: () => undefined,
+      warn: (obj: Record<string, unknown>, msg: string) =>
+        warnings.push({ eventType: obj.eventType, msg }),
+    } as unknown as Logger;
+    const session = await createRuntime(child, [], { logger }).startSession({
+      cwd: "/workspace/project",
+    });
+    const eventTypes: string[] = [];
+    session.onEvent((event) => eventTypes.push(event.type));
+
+    // A known role with a malformed field fails its strict schema instead of
+    // being accepted as an unknown-role fallback.
+    child.stdout.write(
+      `${JSON.stringify({ type: "message_end", message: { role: "user", content: 42 } })}\n`,
+    );
+
+    expect(eventTypes).toEqual([]);
+    expect(warnings).toEqual([
+      {
+        eventType: "message_end",
+        msg: "Ignoring OMP RPC event that failed schema validation",
+      },
+    ]);
   });
 
   test("lists commands through get_available_commands", async () => {

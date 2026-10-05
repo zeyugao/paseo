@@ -27,6 +27,7 @@ import {
   OmpModelsResultSchema,
   OmpPromptAckSchema,
   OmpRpcCommandSchema,
+  OmpRuntimeEventSchema,
   parseOmpRuntimeEvent,
   OmpSessionStateSchema,
   OmpSessionStatsSchema,
@@ -106,7 +107,12 @@ export class OmpCliRuntime implements OmpRuntime {
         requestTimeoutMs: this.options.requestTimeoutMs,
       });
       input.signal?.throwIfAborted();
-      return new OmpCliRuntimeSession(process, this.commandsRpcName, launch.env);
+      return new OmpCliRuntimeSession(
+        process,
+        this.commandsRpcName,
+        launch.env,
+        this.options.logger,
+      );
     } catch (error) {
       const startupError = error instanceof Error ? error : new Error(String(error));
       await process.close(startupError);
@@ -125,12 +131,28 @@ class OmpCliRuntimeSession implements OmpRuntimeSession {
     private readonly process: JsonlRpcProcess,
     private readonly commandsRpcName: "get_available_commands",
     private readonly launchEnvironment: Record<string, string>,
+    private readonly logger: Logger,
   ) {
     process.onMessage((message) => {
       const event = parseOmpRuntimeEvent(message);
       if (event) {
         this.emit(event);
+        return;
       }
+      // A dropped frame can strand an active turn — e.g. a terminal agent_end
+      // carrying a message shape this build does not know — so the failure must
+      // be visible in the daemon log instead of silently discarded.
+      const eventType = typeof message.type === "string" ? message.type : "unknown";
+      const rejection = OmpRuntimeEventSchema.safeParse(message);
+      this.logger.warn(
+        {
+          eventType,
+          issues: rejection.success
+            ? []
+            : rejection.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
+        },
+        "Ignoring OMP RPC event that failed schema validation",
+      );
     });
     process.onExit(({ error }) => {
       this.emit({ type: "process_exit", error: error.message });

@@ -1741,6 +1741,10 @@ export class OmpAgentSession implements AgentSession {
   }
 
   private handleExtraRuntimeEvent(event: OmpRuntimeEvent): boolean {
+    if (event.type === "session_settled") {
+      this.settleTurnAfterSessionSettled();
+      return true;
+    }
     if (event.type === "model_changed") {
       void this.refreshState()
         .then(() =>
@@ -2298,6 +2302,23 @@ export class OmpAgentSession implements AgentSession {
       turnId,
     });
     void this.refreshAfterTurn(finalUsage);
+  }
+
+  // OMP's settle watcher reports `session_settled` once a stretch of agent
+  // activity is fully quiet: the terminal `agent_end` went out and nothing
+  // queued or running in the background can re-wake the session. When the
+  // terminal `agent_end` never reached this side (a frame dropped mid-flight),
+  // this is the last chance to settle the turn instead of advertising
+  // "running" forever on a session OMP already considers idle.
+  private settleTurnAfterSessionSettled(): void {
+    if (!this.activeTurnId || !this.activeTurnStarted) {
+      return;
+    }
+    const turnId = this.activeTurnId;
+    const messages = this.activeTurnTerminalAssistantMessage
+      ? [this.activeTurnTerminalAssistantMessage]
+      : [];
+    void this.completeTurnAfterProviderIdle(turnId, messages);
   }
 
   private async completeTurnAfterProviderIdle(

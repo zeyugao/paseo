@@ -98,7 +98,7 @@ const OmpCompactionSummaryMessageSchema = z
   .passthrough();
 const OmpFileMentionMessageSchema = z.object({ role: z.literal("fileMention") }).passthrough();
 
-export const OmpAgentMessageSchema = z.discriminatedUnion("role", [
+const OmpKnownAgentMessageSchema = z.discriminatedUnion("role", [
   OmpUserMessageSchema,
   OmpDeveloperMessageSchema,
   OmpCustomMessageSchema,
@@ -111,6 +111,75 @@ export const OmpAgentMessageSchema = z.discriminatedUnion("role", [
   OmpCompactionSummaryMessageSchema,
   OmpFileMentionMessageSchema,
 ]);
+type OmpKnownAgentMessage = z.infer<typeof OmpKnownAgentMessageSchema>;
+
+const OMP_KNOWN_MESSAGE_ROLES: Record<string, true> = {
+  user: true,
+  custom: true,
+  assistant: true,
+  toolResult: true,
+  bashExecution: true,
+};
+
+// OMP adds message roles on its own release cadence (18.x added `developer`
+// for TTSR rule injections and passive tool context). A terminal `agent_end`
+// carries the whole run's message list, so a single unknown role failing the
+// frame would strand the turn in "running" forever. Unknown roles normalize to
+// the same `[role] text` fallback the replay path renders (history.ts);
+// `<system-reminder>` injections stay off the timeline via display=false.
+const OmpUnknownRoleMessageSchema = z
+  .object({ role: z.string() })
+  .passthrough()
+  .refine((message) => OMP_KNOWN_MESSAGE_ROLES[message.role] !== true, {
+    message: "Known roles must validate against their strict schema",
+  });
+
+function ompUnknownMessageText(message: Record<string, unknown>): string {
+  const content = message.content;
+  if (typeof content === "string" && content.length > 0) {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    const text = content
+      .map((part) =>
+        part !== null && typeof part === "object" && typeof Reflect.get(part, "text") === "string"
+          ? (Reflect.get(part, "text") as string)
+          : "",
+      )
+      .filter((part) => part.length > 0)
+      .join("\n");
+    if (text.length > 0) {
+      return text;
+    }
+  }
+  if (typeof message.text === "string" && message.text.length > 0) {
+    return message.text;
+  }
+  return "Unsupported message";
+}
+
+function normalizeOmpUnknownRoleMessage(message: Record<string, unknown>): OmpKnownAgentMessage {
+  const role = message.role;
+  const text = ompUnknownMessageText(message);
+  if (
+    role === "system" ||
+    (text.trim().startsWith("<system-reminder>") && text.trim().endsWith("</system-reminder>"))
+  ) {
+    return { role: "custom", content: text, display: false };
+  }
+  return { role: "custom", content: `[${role}] ${text}` };
+}
+
+export const OmpAgentMessageSchema = z
+  .union([OmpKnownAgentMessageSchema, OmpUnknownRoleMessageSchema])
+  .transform((message) =>
+    // A known role can only reach the transform through the strict schema: the
+    // fallback branch rejects known roles, so this cast is guaranteed by the
+    // union itself.
+    OMP_KNOWN_MESSAGE_ROLES[message.role] === true
+      ? (message as OmpKnownAgentMessage)
+      : normalizeOmpUnknownRoleMessage(message),
+  );
 
 export const OmpModelThinkingSchema = z
   .object({
@@ -499,6 +568,11 @@ export const OmpRuntimeEventSchema = z.discriminatedUnion("type", [
     })
     .passthrough(),
   z.object({ type: z.literal("process_exit"), error: z.string() }).passthrough(),
+  // OMP's settle watcher emits this once a stretch of agent activity is fully
+  // quiet: the terminal agent_end went out and no queued or background work can
+  // re-wake the session. It is the last-resort signal that an active turn is
+  // over when the terminal agent_end itself never made it through.
+  z.object({ type: z.literal("session_settled") }).passthrough(),
   OmpSubagentLifecycleEventSchema,
   OmpSubagentProgressEventSchema,
   OmpSubagentEventSchema,

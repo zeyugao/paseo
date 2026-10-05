@@ -258,6 +258,7 @@ describe("terminal-session-controller legacy terminal creation", () => {
       subscribeTerminalActivity: vi.fn(() => vi.fn()),
       subscribeTerminalWorkspaceContributionChanged: vi.fn(() => vi.fn()),
     };
+    const assertCwdWorkspaceOwnedByThisServer = vi.fn(async () => undefined);
     const controller = createController({
       terminalManager,
       emit: (message) => outboundMessages.push(message),
@@ -269,6 +270,7 @@ describe("terminal-session-controller legacy terminal creation", () => {
         { workspaceId: "ws-root", cwd: rootCwd },
         { workspaceId: "ws-app", cwd: appCwd },
       ],
+      assertCwdWorkspaceOwnedByThisServer,
     });
 
     await controller.dispatch({
@@ -277,6 +279,7 @@ describe("terminal-session-controller legacy terminal creation", () => {
       name: "App Shell",
       requestId: "req-1",
     });
+    expect(assertCwdWorkspaceOwnedByThisServer).toHaveBeenCalledWith(terminalCwd);
 
     expect(createTerminal).toHaveBeenCalledWith(
       expect.objectContaining({

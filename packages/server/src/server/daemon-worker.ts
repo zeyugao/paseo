@@ -6,6 +6,7 @@ import { resolvePaseoHome } from "./paseo-home.js";
 import { daemonLogPath } from "./daemon-instance.js";
 import { createRootLogger } from "./logger.js";
 import type { DaemonLifecycleIntent } from "./bootstrap.js";
+import { releaseDaemonInstanceForExitedWorker } from "./daemon-instance-registry.js";
 import { getProcessDiagnostics } from "./process-diagnostics.js";
 
 process.title = "Paseo Daemon";
@@ -295,6 +296,15 @@ async function main() {
       // The supervisor owns the worker's stdout/stderr pipes. Once it is gone,
       // logging during graceful shutdown can block on the broken pipe and leave
       // the daemon orphaned, so supervisor loss is a hard process boundary.
+      // Release the instance lease first (file-only, no pipe writes): without
+      // it, the fresh mtime blocks restarts for up to 120 seconds.
+      const serverId = daemon?.getServerId() ?? process.env.PASEO_SERVER_ID;
+      if (serverId) {
+        void releaseDaemonInstanceForExitedWorker(paseoHome, serverId, process.pid)
+          .catch(() => undefined)
+          .finally(() => process.exit(0));
+        return;
+      }
       process.exit(0);
     };
 

@@ -589,6 +589,14 @@ describe("workspace registries", () => {
     writeFileSync(projectsPath, "{not-json");
     await expect(projectRegistry.list()).resolves.toEqual([existing]);
 
+    // Mutations are blocked while the file is unreadable: writing the stale
+    // cache would silently destroy concurrent records from other daemons.
+    await expect(projectRegistry.upsert(added)).rejects.toThrow(
+      "Workspace registry file is unreadable",
+    );
+
+    // Repairing the file unblocks mutations.
+    writeFileSync(projectsPath, JSON.stringify([existing]));
     await projectRegistry.upsert(added);
     expect(JSON.parse(readFileSync(projectsPath, "utf8"))).toEqual([existing, added]);
   });

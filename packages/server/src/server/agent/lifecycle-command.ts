@@ -12,13 +12,13 @@ export type LifecycleAgentSnapshot = Pick<ManagedAgent, "id" | "cwd" | "lifecycl
 
 export interface LifecycleAgentManager {
   getAgent(agentId: string): LifecycleAgentSnapshot | null;
+  assertAgentMutable?(agentId: string): Promise<void>;
   hasInFlightRun(agentId: string): boolean;
   cancelAgentRun(agentId: string): Promise<AgentRunCancellationResult>;
   clearAgentAttention(agentId: string): Promise<void>;
   archiveAgent(agentId: string): Promise<{ archivedAt: string }>;
   archiveSnapshot(agentId: string, archivedAt: string): Promise<StoredAgentRecord>;
   closeAgent(agentId: string): Promise<void>;
-  setLabels(agentId: string, labels: Record<string, string>): Promise<void>;
   detachAgent(agentId: string): Promise<{
     record: StoredAgentRecord;
     live: boolean;
@@ -66,6 +66,7 @@ async function requestAgentRunCancellation(
     throw new Error(`Agent ${agentId} not found`);
   }
 
+  await agentManager.assertAgentMutable?.(agentId);
   const hasInFlightRun = agentManager.hasInFlightRun(agentId);
   if (!hasInFlightRun) {
     logger.trace(
@@ -152,6 +153,7 @@ export async function closeAgentCommand(
   dependencies: Pick<AgentLifecycleCommandDependencies, "agentManager">,
   agentId: string,
 ): Promise<void> {
+  await dependencies.agentManager.assertAgentMutable?.(agentId);
   await dependencies.agentManager.closeAgent(agentId);
 }
 

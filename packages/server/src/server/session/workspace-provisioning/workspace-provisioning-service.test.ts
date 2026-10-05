@@ -185,6 +185,56 @@ test("background workspace creation preserves hooks, inheritance and durable vis
   expect((await reloaded.get(child.workspaceId))?.background).toBe(true);
 });
 
+test("rejects directory provisioning that overlaps another host's workspace", async () => {
+  const repo = path.join(tmpDir, "shared-repo");
+  const hostedProvisioning = createWorkspaceProvisioningService({
+    serverId: "srv-a",
+    workspaceRegistry,
+    projectRegistry,
+    workspaceGitService: gitService(),
+    isDirectory,
+    logger,
+  });
+  const foreignProject = await projectRegistry.getOrCreateActiveByRoot({
+    rootPath: repo,
+    kind: "non_git",
+    displayName: "shared-repo",
+    timestamp: "2026-03-01T00:00:00.000Z",
+  });
+  const foreign = createPersistedWorkspaceRecord({
+    workspaceId: "foreign-workspace",
+    projectId: foreignProject.projectId,
+    cwd: repo,
+    kind: "directory",
+    displayName: "foreign-workspace",
+    hostId: "srv-other",
+    createdAt: "2026-03-01T00:00:00.000Z",
+    updatedAt: "2026-03-01T00:00:00.000Z",
+  });
+  await workspaceRegistry.upsert(foreign);
+
+  await expect(
+    hostedProvisioning.findOrCreateWorkspaceForDirectory(path.join(repo, "nested")),
+  ).rejects.toThrow("owned by host srv-other");
+  await expect(hostedProvisioning.createWorkspaceForDirectory(repo)).rejects.toThrow(
+    "owned by host srv-other",
+  );
+  expect(await workspaceRegistry.list()).toEqual([foreign]);
+
+  const worktree = await hostedProvisioning.createWorkspaceForWorktree({
+    sourceCwd: repo,
+    projectId: foreignProject.projectId,
+    repoRoot: repo,
+    cwd: path.join(tmpDir, "shared-worktree"),
+    worktreeRoot: path.join(tmpDir, "shared-worktree"),
+    branch: "feature/host-a",
+    baseBranch: "main",
+    title: null,
+  });
+  expect(worktree.hostId).toBe("srv-a");
+  expect(await workspaceRegistry.get(foreign.workspaceId)).toEqual(foreign);
+});
+
 test("re-opening an active workspace by exact path returns the same record without duplicating", async () => {
   const repo = path.join(tmpDir, "repo");
   gitRoots.add(repo);

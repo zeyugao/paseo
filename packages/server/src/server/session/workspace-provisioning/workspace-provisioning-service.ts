@@ -9,7 +9,9 @@ import {
   reconcileWorkspacePlacement,
 } from "../../workspace-registry-model.js";
 import {
+  assertCwdWorkspaceRecordsOwnedByThisServer,
   createPersistedWorkspaceRecord,
+  isWorkspaceVisibleToServer,
   type PersistedProjectRecord,
   type PersistedWorkspaceRecord,
   type ProjectRegistry,
@@ -131,7 +133,7 @@ export function createWorkspaceProvisioningService(deps: {
   ): Promise<ImportWorkspaceResult<T>> {
     if (input.requestedWorkspaceId) {
       const workspace = await workspaceRegistry.get(input.requestedWorkspaceId);
-      if (!workspace || workspace.archivedAt) {
+      if (!workspace || workspace.archivedAt || !isWorkspaceVisibleToServer(workspace, serverId)) {
         throw new Error(`Workspace not found: ${input.requestedWorkspaceId}`);
       }
       const project = await projectRegistry.get(workspace.projectId);
@@ -147,10 +149,13 @@ export function createWorkspaceProvisioningService(deps: {
       };
     }
 
-    const [projectsBeforeImport, workspacesBeforeImport] = await Promise.all([
+    const [projectsBeforeImport, allWorkspacesBeforeImport] = await Promise.all([
       projectRegistry.list(),
       workspaceRegistry.list(),
     ]);
+    const workspacesBeforeImport = allWorkspacesBeforeImport.filter((workspace) =>
+      isWorkspaceVisibleToServer(workspace, serverId),
+    );
     const workspace = await findOrCreateWorkspaceForDirectory(input.cwd);
     const createdWorkspace = workspacesBeforeImport.some(
       (candidate) => candidate.workspaceId === workspace.workspaceId,
@@ -247,6 +252,8 @@ export function createWorkspaceProvisioningService(deps: {
     },
   ): Promise<PersistedWorkspaceRecord> {
     const normalizedCwd = resolve(cwd);
+    const allWorkspaces = await workspaceRegistry.list();
+    assertCwdWorkspaceRecordsOwnedByThisServer(normalizedCwd, allWorkspaces, serverId);
     const checkout = await workspaceGitService.getCheckout(normalizedCwd);
     const project = projectId
       ? await refreshProjectKind(await requireActiveProject(projectId), normalizedCwd, checkout)
@@ -256,6 +263,7 @@ export function createWorkspaceProvisioningService(deps: {
     const workspace = createPersistedWorkspaceRecord({
       workspaceId: context?.workspaceId ?? generateWorkspaceId(),
       projectId: project.projectId,
+      ...(serverId === undefined ? {} : { hostId: serverId }),
       ...initialWorkspacePlacement({ source: "checkout", cwd: normalizedCwd, checkout }),
       title: title?.trim() || null,
       createdAt: timestamp,
@@ -285,6 +293,7 @@ export function createWorkspaceProvisioningService(deps: {
     const workspace = createPersistedWorkspaceRecord({
       workspaceId: input.workspaceId ?? generateWorkspaceId(),
       projectId: project.projectId,
+      ...(serverId === undefined ? {} : { hostId: serverId }),
       ...initialWorkspacePlacement({
         source: "created_worktree",
         cwd,
@@ -319,7 +328,9 @@ export function createWorkspaceProvisioningService(deps: {
       return refreshProjectKind(await requireActiveProject(input.projectId));
     }
 
-    const workspaces = await workspaceRegistry.list();
+    const workspaces = (await workspaceRegistry.list()).filter((workspace) =>
+      isWorkspaceVisibleToServer(workspace, serverId),
+    );
     const sourceWorkspace =
       workspaces.find(
         (workspace) => !workspace.archivedAt && areEquivalentPaths(workspace.cwd, input.sourceCwd),
@@ -354,7 +365,10 @@ export function createWorkspaceProvisioningService(deps: {
   async function findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord> {
     const normalizedCwd = resolve(cwd);
     // Path-based discovery selects public work; explicit-ID recovery bypasses this selector.
-    const workspaces = (await workspaceRegistry.list())
+    const allWorkspaces = await workspaceRegistry.list();
+    assertCwdWorkspaceRecordsOwnedByThisServer(normalizedCwd, allWorkspaces, serverId);
+    const workspaces = allWorkspaces
+      .filter((workspace) => isWorkspaceVisibleToServer(workspace, serverId))
       .filter(
         (workspace) => !workspace.background && areEquivalentPaths(workspace.cwd, normalizedCwd),
       )
@@ -406,6 +420,9 @@ export function createWorkspaceProvisioningService(deps: {
   async function ensureWorkspaceRecordUnarchived(
     workspace: PersistedWorkspaceRecord,
   ): Promise<PersistedWorkspaceRecord> {
+    if (!isWorkspaceVisibleToServer(workspace, serverId)) {
+      throw new Error(`Workspace not found: ${workspace.workspaceId}`);
+    }
     const project = await projectRegistry.get(workspace.projectId);
     if (!project) throw new Error(`Unknown project: ${workspace.projectId}`);
     const timestamp = new Date().toISOString();

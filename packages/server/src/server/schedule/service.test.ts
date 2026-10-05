@@ -669,6 +669,40 @@ describe("ScheduleService", () => {
     expect(foreignAfter.status).toBe("active");
   });
 
+  test("does not claim or manually run a new-agent schedule in a foreign workspace", async () => {
+    const runner = vi.fn(async () => ({ agentId: null, output: "unexpected" }));
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+      assertCwdWorkspaceOwnedByThisServer: async (cwd) => {
+        if (cwd === "/foreign/workspace") {
+          throw new Error("Workspace ws-foreign is owned by host srv-foreign");
+        }
+      },
+    });
+    const schedule = await service.create({
+      prompt: "Foreign new-agent schedule",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: "/foreign/workspace" } },
+    });
+    const nextRunAt = schedule.nextRunAt;
+
+    now = new Date(now.getTime() + 60_000);
+    await service.tick();
+
+    expect(runner).not.toHaveBeenCalled();
+    expect((await service.inspect(schedule.id)).nextRunAt).toBe(nextRunAt);
+    await expect(service.runOnce(schedule.id)).rejects.toThrow(
+      "Workspace ws-foreign is owned by host srv-foreign",
+    );
+  });
+
   test("renews a running claim so another host does not reclaim it as stale", async () => {
     let releaseRun!: () => void;
     let signalRunStarted!: () => void;

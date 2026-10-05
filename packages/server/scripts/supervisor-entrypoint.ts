@@ -10,6 +10,7 @@ import {
 } from "../src/server/pid-lock.js";
 import { resolvePaseoHome } from "../src/server/paseo-home.js";
 import { daemonLogPath } from "../src/server/daemon-instance.js";
+import { releaseDaemonInstanceForExitedWorker } from "../src/server/daemon-instance-registry.js";
 import { PRIVATE_FILE_MODE } from "../src/server/private-files.js";
 import { loadPersistedConfig } from "../src/server/persisted-config.js";
 import { runSupervisor } from "./supervisor.js";
@@ -215,9 +216,14 @@ async function main(): Promise<void> {
           await updatePidLock(paseoHome, { listen, serverId }, { ownerPid: process.pid });
         }
       : undefined,
-    onWorkerExit: ownsPidLock
-      ? () => updatePidLock(paseoHome, { listen: null, serverId: null }, { ownerPid: process.pid })
-      : undefined,
+    onWorkerExit: async ({ pid, serverId }) => {
+      if (pid !== null && serverId !== null) {
+        await releaseDaemonInstanceForExitedWorker(paseoHome, serverId, pid);
+      }
+      if (ownsPidLock) {
+        await updatePidLock(paseoHome, { listen: null, serverId: null }, { ownerPid: process.pid });
+      }
+    },
     onSupervisorExit: releaseLock,
   });
   requestSupervisorShutdown = supervisor.requestShutdown;

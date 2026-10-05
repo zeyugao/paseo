@@ -566,6 +566,33 @@ describe("workspace registries", () => {
     await expect(workspaceRegistry.list()).resolves.toEqual([workspace]);
   });
 
+  test("keeps the last valid cache when a registry reload fails", async () => {
+    const projectsPath = path.join(tmpDir, "projects", "projects.json");
+    const existing = createPersistedProjectRecord({
+      projectId: "existing-project",
+      rootPath: "/tmp/existing-project",
+      kind: "non_git",
+      displayName: "existing-project",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+    const added = createPersistedProjectRecord({
+      projectId: "added-project",
+      rootPath: "/tmp/added-project",
+      kind: "non_git",
+      displayName: "added-project",
+      createdAt: "2026-03-02T00:00:00.000Z",
+      updatedAt: "2026-03-02T00:00:00.000Z",
+    });
+    await projectRegistry.upsert(existing);
+
+    writeFileSync(projectsPath, "{not-json");
+    await expect(projectRegistry.list()).resolves.toEqual([existing]);
+
+    await projectRegistry.upsert(added);
+    expect(JSON.parse(readFileSync(projectsPath, "utf8"))).toEqual([existing, added]);
+  });
+
   test("refreshes workspace archive timestamps when an archive is repeated", async () => {
     await workspaceRegistry.initialize();
     await workspaceRegistry.upsert(

@@ -2479,7 +2479,7 @@ describe("session checkout merge handling", () => {
     });
   });
 
-  test("rejects merge-to-base when the target worktree cannot be resolved", async () => {
+  test("falls back to the current worktree when the base worktree cannot be resolved", async () => {
     const messages: unknown[] = [];
     const workspaceGitService = {
       getSnapshot: vi.fn().mockResolvedValue(
@@ -2489,26 +2489,28 @@ describe("session checkout merge handling", () => {
       ),
     };
     gitCommandMocks.runGitCommand.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+    checkoutGitMocks.mergeToBase.mockResolvedValue("/tmp/request-worktree");
     const session = createSessionForTest({ workspaceGitService, messages });
 
     await session.handleMessage({
       type: "checkout_merge_request",
       cwd: "/tmp/request-worktree",
       baseRef: "main",
-      requestId: "unresolved-base-worktree",
+      requestId: "fallback-current-worktree",
     });
 
-    expect(checkoutGitMocks.mergeToBase).not.toHaveBeenCalled();
+    expect(checkoutGitMocks.mergeToBase).toHaveBeenCalledWith(
+      "/tmp/request-worktree",
+      { baseRef: "main", mode: "merge" },
+      { paseoHome: "/tmp/paseo-home", worktreesRoot: undefined },
+    );
     expect(messages).toContainEqual({
       type: "checkout_merge_response",
       payload: {
         cwd: "/tmp/request-worktree",
-        success: false,
-        error: {
-          code: "UNKNOWN",
-          message: "Unable to resolve the merge target worktree for main",
-        },
-        requestId: "unresolved-base-worktree",
+        success: true,
+        error: null,
+        requestId: "fallback-current-worktree",
       },
     });
   });

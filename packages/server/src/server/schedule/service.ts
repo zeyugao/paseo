@@ -239,6 +239,7 @@ export interface ScheduleServiceOptions {
     input: ScheduleWorkspaceCreateInput,
   ) => Promise<CreatePaseoWorktreeWorkflowResult>;
   archiveWorkspace: (workspaceId: string) => Promise<void>;
+  assertCwdWorkspaceOwnedByThisServer?: (cwd: string) => Promise<void>;
   now?: () => Date;
   runner?: (schedule: StoredSchedule, runId: string) => Promise<ScheduleExecutionResult>;
 }
@@ -259,7 +260,7 @@ export class ScheduleService {
     input: ScheduleWorkspaceCreateInput,
   ) => Promise<CreatePaseoWorktreeWorkflowResult>;
   private readonly archiveWorkspace: (workspaceId: string) => Promise<void>;
-  private readonly now: () => Date;
+  private readonly assertCwdWorkspaceOwnedByThisServer: ((cwd: string) => Promise<void>) | null;
   private readonly runner: (
     schedule: StoredSchedule,
     runId: string,
@@ -267,6 +268,7 @@ export class ScheduleService {
   private readonly runningScheduleIds = new Set<string>();
   private readonly runningClaims = new Map<string, string>();
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly now: () => Date;
 
   constructor(options: ScheduleServiceOptions) {
     this.logger = options.logger.child({ module: "schedule-service" });
@@ -280,6 +282,7 @@ export class ScheduleService {
     this.createDirectoryWorkspace = options.createDirectoryWorkspace;
     this.createPaseoWorktreeWorkspace = options.createPaseoWorktreeWorkspace;
     this.archiveWorkspace = options.archiveWorkspace;
+    this.assertCwdWorkspaceOwnedByThisServer = options.assertCwdWorkspaceOwnedByThisServer ?? null;
     this.now = options.now ?? (() => new Date());
     this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
   }
@@ -554,6 +557,9 @@ export class ScheduleService {
       throw new Error(`Schedule ${id} is already running`);
     }
     await this.assertAgentTargetOwnedByThisHost(schedule.target);
+    if (schedule.target.type === "new-agent" && this.assertCwdWorkspaceOwnedByThisServer) {
+      await this.assertCwdWorkspaceOwnedByThisServer(schedule.target.config.cwd);
+    }
     const now = this.now();
     const runId = randomUUID();
     const claimPath = await this.tryClaimSchedule(schedule, runId, now, "manual");
@@ -577,7 +583,7 @@ export class ScheduleService {
     for (const schedule of schedules) {
       if (schedule.status !== "active" || !schedule.nextRunAt) continue;
       if (this.runningScheduleIds.has(schedule.id)) continue;
-      if (await this.isAgentTargetOwnedByAnotherHost(schedule)) continue;
+      if (await this.isScheduleTargetOwnedByAnotherHost(schedule)) continue;
       if (shouldCompleteSchedule(schedule, now)) {
         await this.completeScheduleIfDue(schedule.id, now);
         continue;
@@ -619,6 +625,19 @@ export class ScheduleService {
 
   private async isAgentTargetOwnedByAnotherHost(schedule: StoredSchedule): Promise<boolean> {
     return (await this.foreignAgentTargetHost(schedule)) !== null;
+  }
+
+  private async isScheduleTargetOwnedByAnotherHost(schedule: StoredSchedule): Promise<boolean> {
+    if (await this.isAgentTargetOwnedByAnotherHost(schedule)) return true;
+    if (schedule.target.type !== "new-agent" || !this.assertCwdWorkspaceOwnedByThisServer) {
+      return false;
+    }
+    try {
+      await this.assertCwdWorkspaceOwnedByThisServer(schedule.target.config.cwd);
+      return false;
+    } catch {
+      return true;
+    }
   }
 
   private async confirmDueSchedule(schedule: StoredSchedule): Promise<StoredSchedule | null> {

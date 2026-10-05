@@ -1473,6 +1473,8 @@ export async function createPaseoDaemon(
     createDirectoryWorkspace: createScheduleLocalWorkspaceExternal,
     createPaseoWorktreeWorkspace: createSchedulePaseoWorktreeExternal,
     archiveWorkspace: archiveScheduleWorkspaceExternal,
+    assertCwdWorkspaceOwnedByThisServer: (cwd) =>
+      assertCwdWorkspaceOwnedByThisServer(cwd, workspaceRegistry, serverId),
   });
   await scheduleService.start();
   agentManager.setAgentArchivedCallback(async (agentId) => {

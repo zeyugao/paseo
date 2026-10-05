@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync, unlinkSync } from "node:fs";
 import { open, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
 
 import { hostname as getOsHostname } from "node:os";
@@ -122,6 +123,29 @@ export async function readRegisteredDaemonInstance(
   serverId: string,
 ): Promise<DaemonInstanceInfo | null> {
   return readInstanceFile(instancePath(paseoHome, serverId));
+}
+/**
+ * Synchronous, lock-free release for hard-exit paths (supervisor loss, tree-kill).
+ * Must not spawn child processes (flock) — the tree-kill test expects the
+ * entire process tree to die. The lock-free read is safe in the exit path
+ * because no other code in this process is running.
+ */
+export function releaseDaemonInstanceSync(
+  paseoHome: string,
+  serverId: string,
+  workerPid: number,
+  hostname = getOsHostname(),
+): boolean {
+  const filePath = instancePath(paseoHome, serverId);
+  try {
+    const raw = readFileSync(filePath, "utf8");
+    const current = JSON.parse(raw) as DaemonInstanceInfo;
+    if (current.pid !== workerPid || current.hostname !== hostname) return false;
+    unlinkSync(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function releaseDaemonInstanceForExitedWorker(

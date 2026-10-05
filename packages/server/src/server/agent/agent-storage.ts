@@ -150,10 +150,13 @@ export class AgentStorage {
    * agent's queued writes so the disk read observes them, then reads the
    * record file directly. A fresh hit also refreshes the cached entry.
    */
-  async getFresh(agentId: string): Promise<StoredAgentRecord | null> {
+  async getFresh(
+    agentId: string,
+    options?: { ignoreDeleteFence?: boolean },
+  ): Promise<StoredAgentRecord | null> {
     await this.load();
     await this.waitForPendingWrite(agentId);
-    if (this.deleting.has(agentId)) {
+    if (this.deleting.has(agentId) && options?.ignoreDeleteFence !== true) {
       return null;
     }
     for (const filePath of this.pathsById.get(agentId) ?? []) {

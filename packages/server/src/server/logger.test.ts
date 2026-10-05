@@ -132,6 +132,20 @@ describe("resolveLogConfig", () => {
       },
     });
   });
+
+  it("uses the env serverId in the default file log name", () => {
+    const config: PersistedConfig = { log: { file: {} } };
+
+    expect(
+      resolveLogConfig(config, {
+        paseoHome,
+        env: { PASEO_SERVER_ID: "srv_machine_a" },
+      }).file?.path,
+    ).toBe(path.join(paseoHome, "daemon.srv_machine_a.log"));
+    expect(resolveLogConfig(config, { paseoHome, env: {} }).file?.path).toBe(
+      path.join(paseoHome, "daemon.log"),
+    );
+  });
 });
 
 describe("loadConfig logger config", () => {

@@ -972,6 +972,7 @@ describe("WorkspaceReconciliationService", () => {
       displayName: "Stable workspace name",
       title: "Pinned workspace name",
       branch: "stale-branch",
+      hostId: "srv-a",
       baseBranch: "main",
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -1029,6 +1030,7 @@ describe("WorkspaceReconciliationService", () => {
       branch: null,
       updatedAt: expect.any(String),
     });
+    expect(workspaces.get("w1")?.hostId).toBe("srv-a");
   });
 
   test("archives workspaces whose directories no longer exist", async () => {

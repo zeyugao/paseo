@@ -1,11 +1,11 @@
-import { describe, expect, test, beforeEach, afterEach } from "vitest";
+import { describe, expect, test, beforeEach, afterEach, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { promises as fs } from "node:fs";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
-import { AgentStorage } from "./agent-storage.js";
+import { AgentStorage, type StoredAgentRecord } from "./agent-storage.js";
 import { buildConfigOverrides, buildSessionConfig } from "../persistence-hooks.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type {
@@ -103,6 +103,8 @@ function createManagedAgent(overrides: ManagedAgentOverrides = {}): ManagedAgent
     provider: core.provider,
     cwd: core.cwd,
     workspaceId: overrides.workspaceId,
+    hostId: overrides.hostId,
+    projectedLifecycle: overrides.projectedLifecycle,
     session: core.session,
     capabilities: overrides.capabilities ?? buildDefaultCapabilities(),
     config: core.config,
@@ -574,5 +576,134 @@ describe("AgentStorage", () => {
     const afterReload = new AgentStorage(storagePath, logger);
     const after = await afterReload.list();
     expect(after.some((r) => r.id === agentId)).toBe(false);
+  });
+  test("persists optional host ownership", async () => {
+    await storage.applySnapshot(createManagedAgent({ id: "host-owned-agent", hostId: "host-a" }));
+
+    const reloaded = new AgentStorage(storagePath, logger);
+    await expect(reloaded.get("host-owned-agent")).resolves.toMatchObject({ hostId: "host-a" });
+  });
+
+  test("rescans stale listings for externally added and removed records", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    try {
+      const observer = new AgentStorage(storagePath, logger);
+      const writer = new AgentStorage(storagePath, logger);
+      await observer.initialize();
+
+      await writer.applySnapshot(
+        createManagedAgent({ id: "external-agent", cwd: "/tmp/external-project" }),
+      );
+      now.mockReturnValue(15_001);
+      await expect(observer.list()).resolves.toMatchObject([{ id: "external-agent" }]);
+
+      await writer.remove("external-agent");
+      now.mockReturnValue(20_002);
+      await expect(observer.list()).resolves.toEqual([]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  test("getFresh reads external writes while get serves the cache", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    try {
+      const observer = new AgentStorage(storagePath, logger);
+      const writer = new AgentStorage(storagePath, logger);
+      await writer.applySnapshot(
+        createManagedAgent({ id: "shared-agent", cwd: "/tmp/external-project" }),
+      );
+      await observer.initialize();
+
+      const stored = await writer.get("shared-agent");
+      if (!stored) {
+        throw new Error("expected stored record");
+      }
+      await writer.upsert({ ...stored, title: "updated-externally", hostId: "host-b" });
+
+      expect((await observer.get("shared-agent"))?.title).not.toBe("updated-externally");
+      await expect(observer.getFresh("shared-agent")).resolves.toMatchObject({
+        title: "updated-externally",
+        hostId: "host-b",
+      });
+      // The fresh hit also refreshes the cached entry.
+      expect((await observer.get("shared-agent"))?.title).toBe("updated-externally");
+
+      await expect(observer.getFresh("missing-agent")).resolves.toBeNull();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  test("getFresh waits for in-flight writes before reading from disk", async () => {
+    await storage.applySnapshot(createManagedAgent({ id: "agent-pending" }));
+    const internals = storage as unknown as {
+      pendingWrites: Map<string, Promise<void>>;
+      writeRecord: (record: StoredAgentRecord) => Promise<void>;
+    };
+    const originalWriteRecord = internals.writeRecord.bind(storage);
+    const writeGate = Promise.withResolvers<void>();
+    vi.spyOn(internals, "writeRecord").mockImplementation(async (record) => {
+      await writeGate.promise;
+      return originalWriteRecord(record);
+    });
+
+    const write = storage.setTitle("agent-pending", "fresh-title");
+    await vi.waitFor(() => {
+      expect(internals.pendingWrites.has("agent-pending")).toBe(true);
+    });
+
+    // The write is gated mid-flight; a read that skipped the write queue
+    // would observe the pre-write record.
+    const freshPromise = storage.getFresh("agent-pending");
+    writeGate.resolve();
+    await expect(freshPromise).resolves.toMatchObject({ title: "fresh-title" });
+    await write;
+  });
+
+  test("rescan keeps queued writes authoritative over stale scan data", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    try {
+      await storage.applySnapshot(
+        createManagedAgent({ id: "agent-race", cwd: "/tmp/race-project" }),
+      );
+      const base = await storage.get("agent-race");
+      if (!base) {
+        throw new Error("expected base record");
+      }
+      const archivedAt = "2025-02-01T00:00:00.000Z";
+
+      type ScanResult = Array<{ record: StoredAgentRecord; filePath: string }>;
+      const internals = storage as unknown as { scanDisk: () => Promise<ScanResult> };
+      const originalScanDisk = internals.scanDisk.bind(storage);
+      const staleScan = await originalScanDisk();
+
+      let snapshot: Promise<void> | null = null;
+      let intercepted = false;
+      vi.spyOn(internals, "scanDisk").mockImplementation(async () => {
+        if (intercepted) {
+          return originalScanDisk();
+        }
+        intercepted = true;
+        // Queue an archive and a trailing snapshot flush, let the archive
+        // commit, then hand the rescan scan data from before it landed.
+        const archived = storage.upsert({ ...base, archivedAt });
+        snapshot = storage.applySnapshot(
+          createManagedAgent({ id: "agent-race", cwd: "/tmp/race-project" }),
+        );
+        await archived;
+        return staleScan;
+      });
+
+      now.mockReturnValue(20_000);
+      await storage.list();
+      await snapshot;
+      await storage.flush();
+
+      const reloaded = new AgentStorage(storagePath, logger);
+      expect((await reloaded.get("agent-race"))?.archivedAt).toBe(archivedAt);
+    } finally {
+      now.mockRestore();
+    }
   });
 });

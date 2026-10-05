@@ -612,6 +612,12 @@ function createSessionForWorkspaceTests(
   const workspaceRegistry: SessionOptions["workspaceRegistry"] = options.workspaceRegistry ?? {
     initialize: async () => {},
     existsOnDisk: async () => true,
+    upsertIfCwdOwnedByThisServer: async function (
+      this: { upsert(r: unknown): Promise<unknown> },
+      record: unknown,
+    ) {
+      await this.upsert(record);
+    },
     list: async () => [
       createPersistedWorkspaceRecord({
         workspaceId: "ws-repo-running",
@@ -655,6 +661,16 @@ function createSessionForWorkspaceTests(
     archive: async () => {},
     remove: async () => {},
   };
+  // Custom registries from tests may not implement the cross-host method;
+  // default it to delegate to their upsert so provisioning keeps working.
+  if (typeof workspaceRegistry.upsertIfCwdOwnedByThisServer !== "function") {
+    (workspaceRegistry as Record<string, unknown>).upsertIfCwdOwnedByThisServer = async function (
+      this: { upsert(r: unknown, c?: unknown): Promise<unknown> },
+      ...args: unknown[]
+    ) {
+      await this.upsert(args[0], args[2]);
+    };
+  }
   const workspaceGitService = options.workspaceGitService ?? createNoopWorkspaceGitService();
   const providerSnapshotManager = createProviderSnapshotManagerStub().manager;
 

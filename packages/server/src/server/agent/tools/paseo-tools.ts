@@ -1935,8 +1935,12 @@ function createToolCatalog(
       if (!callerAgent?.workspaceId) {
         throw new PaseoToolInputError(`Caller agent ${callerAgentId} has no current workspace`);
       }
+      const cwd = resolveScopedCwd(workspace.cwd, { required: true });
+      if (options.workspaceRegistry) {
+        await assertCwdWorkspaceOwnedByThisServer(cwd, options.workspaceRegistry, options.serverId);
+      }
       return {
-        cwd: workspace.cwd,
+        cwd,
         workspaceId: callerAgent.workspaceId,
       };
     }
@@ -1954,6 +1958,9 @@ function createToolCatalog(
       const cwd = workspace.cwd
         ? resolveScopedCwd(workspace.cwd, { required: true })
         : existingWorkspace.cwd;
+      if (options.workspaceRegistry) {
+        await assertCwdWorkspaceOwnedByThisServer(cwd, options.workspaceRegistry, options.serverId);
+      }
       const lockedCwd = callerContext?.lockedCwd?.trim();
       if (lockedCwd && !isSameOrDescendantPath(expandUserPath(lockedCwd), cwd)) {
         throw new PaseoToolInputError(
@@ -2562,6 +2569,13 @@ function createToolCatalog(
       }
 
       const resolvedCwd = resolveScopedCwd(cwd, { required: true });
+      if (options.workspaceRegistry) {
+        await assertCwdWorkspaceOwnedByThisServer(
+          resolvedCwd,
+          options.workspaceRegistry,
+          options.serverId,
+        );
+      }
       const workspaceId = await resolveTerminalWorkspaceId(resolvedCwd);
 
       const terminal = await terminalManager.createTerminal({

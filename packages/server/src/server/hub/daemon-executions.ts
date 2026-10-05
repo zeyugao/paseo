@@ -53,6 +53,7 @@ export type OwnedAgentEvent =
 
 interface DaemonExecutionsOptions {
   daemonId: string;
+  serverId: string;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   createAgent: BoundCreateAgentCommand;
@@ -73,6 +74,7 @@ export interface HubExecutionAgents {
 
 export class DaemonExecutions implements HubExecutionAgents {
   private readonly daemonId: string;
+  private readonly serverId: string;
   private readonly agentManager: AgentManager;
   private readonly agentStorage: AgentStorage;
   private readonly createAgentCommand: BoundCreateAgentCommand;
@@ -85,6 +87,7 @@ export class DaemonExecutions implements HubExecutionAgents {
 
   constructor(private readonly options: DaemonExecutionsOptions) {
     this.daemonId = options.daemonId;
+    this.serverId = options.serverId;
     this.agentManager = options.agentManager;
     this.agentStorage = options.agentStorage;
     this.createAgentCommand = options.createAgent;
@@ -170,9 +173,9 @@ export class DaemonExecutions implements HubExecutionAgents {
     input: HubExecutionAgentCreateInput,
     authorityGeneration: number,
   ): Promise<OwnedAgentSnapshot> {
-    const existing = await this.agentStorage.findByDaemonExecution(owner);
+    const indexed = await this.agentStorage.findByDaemonExecution(owner);
+    const existing = indexed ? await this.agentStorage.getFresh(indexed.id) : null;
     if (existing) {
-      requireExecutionWorkspaceId(existing);
       this.requireAuthority(authorityGeneration);
       return this.resolveRecord(existing);
     }
@@ -252,7 +255,8 @@ export class DaemonExecutions implements HubExecutionAgents {
     authorityGeneration: number,
   ): Promise<void> {
     this.requireAuthority(authorityGeneration, "execution control");
-    const record = await this.agentStorage.findByDaemonExecution(owner);
+    const indexed = await this.agentStorage.findByDaemonExecution(owner);
+    const record = indexed ? await this.agentStorage.getFresh(indexed.id) : null;
     this.requireAuthority(authorityGeneration, "execution control");
     if (!record) {
       return;
@@ -260,7 +264,8 @@ export class DaemonExecutions implements HubExecutionAgents {
     this.requireOwner(record);
 
     if (input.action === "interrupt") {
-      if (!record.archivedAt && this.agentManager.getAgent(record.id)) {
+      const live = this.agentManager.getAgent(record.id);
+      if (!record.archivedAt && this.isOwned(live)) {
         await this.options.interruptAgent(record.id);
       }
       return;
@@ -272,8 +277,9 @@ export class DaemonExecutions implements HubExecutionAgents {
   }
 
   private resolveRecord(record: StoredAgentRecord): OwnedAgentSnapshot {
+    const owner = this.requireOwner(record);
     requireExecutionWorkspaceId(record);
-    return this.projectRecord(record);
+    return this.projectRecord(record, owner);
   }
 
   private requireAuthority(authorityGeneration: number, operation = "agent creation"): void {
@@ -282,9 +288,9 @@ export class DaemonExecutions implements HubExecutionAgents {
     }
   }
 
-  private projectRecord(record: StoredAgentRecord): OwnedAgentSnapshot {
-    const owner = this.requireOwner(record);
-    const live = this.agentManager.getAgent(record.id);
+  private projectRecord(record: StoredAgentRecord, owner: DaemonAgentOwner): OwnedAgentSnapshot {
+    const candidate = this.agentManager.getAgent(record.id);
+    const live = this.isOwned(candidate) ? candidate : null;
     return {
       executionId: owner.executionId,
       agent: live
@@ -331,14 +337,29 @@ export class DaemonExecutions implements HubExecutionAgents {
   }
 
   private isOwned(agent: ManagedAgent | null): agent is ManagedAgent & { owner: DaemonAgentOwner } {
-    return agent?.owner?.kind === "daemon" && agent.owner.daemonId === this.daemonId;
+    return (
+      agent?.owner?.kind === "daemon" &&
+      agent.owner.daemonId === this.daemonId &&
+      this.isLocalHost(agent.hostId)
+    );
   }
 
   private owner(executionId: string): DaemonAgentOwner {
     return { kind: "daemon", daemonId: this.daemonId, executionId };
   }
 
+  private isLocalHost(hostId: string | undefined): boolean {
+    return hostId === undefined || hostId === this.serverId;
+  }
+
+  private requireHost(record: Pick<StoredAgentRecord, "id" | "hostId">): void {
+    if (!this.isLocalHost(record.hostId)) {
+      throw new Error(`Agent ${record.id} is owned by host ${record.hostId}`);
+    }
+  }
+
   private requireOwner(record: StoredAgentRecord): DaemonAgentOwner {
+    this.requireHost(record);
     const owner = record.owner;
     if (owner?.kind !== "daemon" || owner.daemonId !== this.daemonId) {
       throw new Error(`Agent ${record.id} is not owned by daemon ${this.daemonId}`);

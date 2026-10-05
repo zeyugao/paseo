@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { expect, test, onTestFinished } from "vitest";
+import { expect, test, onTestFinished, vi } from "vitest";
 import { MutableDaemonConfigSchema } from "@getpaseo/protocol/messages";
 import { DaemonConfigStore } from "./daemon-config-store.js";
 import { loadPersistedConfig } from "./persisted-config.js";
@@ -11,7 +11,42 @@ import {
 } from "./agent/idle-runtime-cleanup/index.js";
 import { createTestLogger } from "../test-utils/test-logger.js";
 
-import { fanOutReconciledWorkspaceUpdates, connectIdleRuntimeCleanupConfig } from "./bootstrap.js";
+import {
+  createDaemonInstanceHeartbeatErrorHandler,
+  createScheduleLocalWorkspaceHandler,
+  fanOutReconciledWorkspaceUpdates,
+} from "./bootstrap.js";
+import { createPersistedWorkspaceRecord } from "./workspace-registry.js";
+
+test("scheduled local workspace creation rejects a cwd owned by another host", async () => {
+  const foreignWorkspace = createPersistedWorkspaceRecord({
+    workspaceId: "ws-foreign",
+    projectId: "project-foreign",
+    cwd: "/repo/foreign",
+    kind: "directory",
+    displayName: "foreign",
+    hostId: "srv-other",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const createWorkspaceForDirectory = vi.fn();
+  const scheduleForDirectory = vi.fn();
+  const emitWorkspaceUpdates = vi.fn();
+  const createWorkspace = createScheduleLocalWorkspaceHandler({
+    workspaceRegistry: { list: async () => [foreignWorkspace] },
+    serverId: "srv-local",
+    workspaceProvisioning: { createWorkspaceForDirectory },
+    workspaceAutoName: { scheduleForDirectory },
+    emitWorkspaceUpdates,
+  });
+
+  await expect(
+    createWorkspace({ cwd: "/repo/foreign", firstAgentContext: { prompt: "Run locally" } }),
+  ).rejects.toThrow("Workspace ws-foreign is owned by host srv-other");
+  expect(createWorkspaceForDirectory).not.toHaveBeenCalled();
+  expect(scheduleForDirectory).not.toHaveBeenCalled();
+  expect(emitWorkspaceUpdates).not.toHaveBeenCalled();
+});
 
 test("reconciliation emits workspace updates when observer sync fails", async () => {
   const emittedWorkspaceIds: string[][] = [];
@@ -187,10 +222,52 @@ test.each([false, true])(
     refuse();
   },
 );
-
 test("disposing bootstrap's binding stops configuration delivery", async () => {
   const host = liveCleanupHost();
   host.unsubscribe();
   await host.store.patch({ idleRuntimeCleanup: false });
   expect((await host.sweep()).collected).toHaveLength(1);
+});
+
+test("daemon instance heartbeat stops after three failures in one heartbeat window", () => {
+  let currentTime = 0;
+  const shutdown = vi.fn();
+  const logger = { error: vi.fn(), fatal: vi.fn() };
+  const onError = createDaemonInstanceHeartbeatErrorHandler({
+    serverId: "srv_test",
+    logger,
+    shutdown,
+    now: () => currentTime,
+  });
+
+  onError(new Error("EACCES"));
+  currentTime += 30_000;
+  onError(new Error("NFS unavailable"));
+  currentTime += 30_000;
+  onError(new Error("EIO"));
+
+  expect(shutdown).toHaveBeenCalledTimes(1);
+  expect(logger.fatal).toHaveBeenCalledWith(
+    expect.objectContaining({ serverId: "srv_test", consecutiveFailures: 3 }),
+    expect.stringContaining("failed repeatedly"),
+  );
+});
+
+test("daemon instance heartbeat drops failures outside the bounded window", () => {
+  let currentTime = 0;
+  const shutdown = vi.fn();
+  const onError = createDaemonInstanceHeartbeatErrorHandler({
+    serverId: "srv_test",
+    logger: { error: vi.fn(), fatal: vi.fn() },
+    shutdown,
+    now: () => currentTime,
+  });
+
+  onError(new Error("first"));
+  currentTime += 90_000;
+  onError(new Error("second"));
+  currentTime += 30_000;
+  onError(new Error("third"));
+
+  expect(shutdown).not.toHaveBeenCalled();
 });

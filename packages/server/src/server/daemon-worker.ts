@@ -4,6 +4,7 @@ import { initializeEnvironmentProxy } from "./network/index.js";
 import { createPaseoDaemon, formatListenTarget } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
 import { resolvePaseoHome } from "./paseo-home.js";
+import { daemonLogPath } from "./daemon-instance.js";
 import { createRootLogger } from "./logger.js";
 import type { DaemonLifecycleIntent } from "./bootstrap.js";
 import { getProcessDiagnostics } from "./process-diagnostics.js";
@@ -51,7 +52,7 @@ function writeWorkerLifecycleLog(
   fields: Record<string, unknown> = {},
 ): void {
   try {
-    const logPath = path.join(paseoHome, "daemon.log");
+    const logPath = daemonLogPath(paseoHome);
     mkdirSync(path.dirname(logPath), { recursive: true });
     appendFileSync(
       logPath,
@@ -68,6 +69,35 @@ function writeWorkerLifecycleLog(
   } catch {
     // Exit-reason logging must never prevent the worker from exiting.
   }
+}
+
+export interface DaemonWorkerLeaseLostHandlerOptions {
+  paseoHome: string;
+  onLeaseLost?: (error: unknown) => void;
+  exit?: (code: number) => void;
+}
+
+/**
+ * Creates the worker-side terminal action for a lost daemon-instance lease.
+ * The handler is idempotent: only the first lease-loss notification can exit the worker.
+ */
+export function createDaemonWorkerLeaseLostHandler(
+  options: DaemonWorkerLeaseLostHandlerOptions,
+): (error: unknown) => void {
+  let handled = false;
+  return (error: unknown) => {
+    if (handled) return;
+    handled = true;
+    writeWorkerLifecycleLog(options.paseoHome, "Daemon instance lease lost; worker exiting", {
+      error: error instanceof Error ? error.message : String(error),
+      ...getProcessDiagnostics(),
+    });
+    try {
+      options.onLeaseLost?.(error);
+    } finally {
+      (options.exit ?? ((code: number) => process.exit(code)))(1);
+    }
+  };
 }
 
 function bootstrapFromEnvironment(): BootstrapResult {
@@ -342,6 +372,7 @@ async function main() {
       {
         ...config,
         onLifecycleIntent: handleLifecycleIntent,
+        onLeaseLost: createDaemonWorkerLeaseLostHandler({ paseoHome }),
       },
       logger,
     );

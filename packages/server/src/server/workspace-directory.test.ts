@@ -65,12 +65,14 @@ class WorkspaceStatus {
 
   private readonly agents: AgentSnapshotPayload[] = [];
   private readonly providerSubagents: ProviderSubagentWorkspaceActivity[] = [];
+  private readonly hostIds = new Map<string, string | undefined>();
   private readonly terminals: Array<{
     cwd: string;
     workspaceId?: string;
     activity: TerminalActivity | null;
   }> = [];
   private readonly directory = new WorkspaceDirectory({
+    serverId: "srv-local",
     logger: createTestLogger(),
     projectRegistry: { list: async () => [this.project] },
     workspaceRegistry: { list: async () => this.workspaces },
@@ -85,6 +87,7 @@ class WorkspaceStatus {
       }
       return times;
     },
+    resolveAgentHostId: async (agentId) => this.hostIds.get(agentId),
     listProviderSubagentActivity: async () => this.providerSubagents,
     listTerminalActivityContributions: async () => this.terminals,
     isProviderVisibleToClient: () => true,
@@ -117,6 +120,7 @@ class WorkspaceStatus {
         workspaceId: this.workspace.workspaceId,
       }),
     );
+    if (input.hostId !== undefined) this.hostIds.set(input.id, input.hostId);
   }
 
   hasSiblingWorkspaceSameCwd(): void {
@@ -262,6 +266,7 @@ interface AgentState {
   pendingPermissionCount?: number;
   requiresAttention?: boolean;
   attentionReason?: AgentSnapshotPayload["attentionReason"];
+  hostId?: string;
 }
 
 function createAgent(
@@ -328,6 +333,20 @@ describe("WorkspaceDirectory", () => {
     });
 
     await expect(workspace.workspaceStatus()).resolves.toBe("running");
+  });
+
+  test("excludes foreign agent attention from workspace status", async () => {
+    const workspace = new WorkspaceStatus();
+
+    workspace.hasRootAgent({
+      id: "foreign-agent",
+      status: "idle",
+      requiresAttention: true,
+      attentionReason: "finished",
+      hostId: "srv-foreign",
+    });
+
+    await expect(workspace.workspaceStatus()).resolves.toBe("done");
   });
 
   test("same-cwd workspaces attribute agent status only to the owner", async () => {
@@ -571,8 +590,10 @@ describe("WorkspaceDirectory empty projects", () => {
   function makeDirectory(input: {
     projects: PersistedProjectRecord[];
     workspaces: PersistedWorkspaceRecord[];
+    serverId?: string;
   }): WorkspaceDirectory {
     return new WorkspaceDirectory({
+      serverId: input.serverId,
       logger: createTestLogger(),
       projectRegistry: { list: async () => input.projects },
       workspaceRegistry: { list: async () => input.workspaces },
@@ -699,6 +720,37 @@ describe("WorkspaceDirectory empty projects", () => {
     });
     expect(shown.entries.map((entry) => entry.id)).toEqual(["ws-internal"]);
     expect(shown.emptyProjects).toEqual([]);
+  });
+
+  test("shows legacy and own workspaces while hiding another host", async () => {
+    const projectRecord = project({ projectId: "shared" });
+    const base = {
+      projectId: projectRecord.projectId,
+      cwd: projectRecord.rootPath,
+      kind: "directory" as const,
+      createdAt: NOW,
+      updatedAt: NOW,
+      archivedAt: null,
+    };
+    const directory = makeDirectory({
+      serverId: "srv-a",
+      projects: [projectRecord],
+      workspaces: [
+        { ...base, workspaceId: "legacy", displayName: "legacy" },
+        { ...base, workspaceId: "own", displayName: "own", hostId: "srv-a" },
+        { ...base, workspaceId: "other", displayName: "other", hostId: "srv-b" },
+      ],
+    });
+
+    const result = await directory.listFetchEntries({
+      type: "fetch_workspaces_request",
+      requestId: "host-filter",
+    });
+    expect(result.entries.map((entry) => entry.id)).toEqual(["legacy", "own"]);
+    await expect(directory.listObservationTargets()).resolves.toEqual([
+      { id: "legacy", workspaceDirectory: projectRecord.rootPath, workspaceKind: "directory" },
+      { id: "own", workspaceDirectory: projectRecord.rootPath, workspaceKind: "directory" },
+    ]);
   });
 });
 

@@ -70,6 +70,7 @@ export interface CheckoutSessionHost {
   emit(msg: SessionOutboundMessage): void;
   emitWorkspaceUpdateForCwd(cwd: string): Promise<void>;
   handleWorkspaceGitBranchSnapshot(cwd: string, branchName: string | null): void;
+  assertMergeToBaseTargetOwned(cwd: string, baseRef: string): Promise<void>;
   renameCurrentBranch(
     cwd: string,
     branch: string,
@@ -806,6 +807,8 @@ export class CheckoutSession {
       if (baseRef.startsWith("origin/")) {
         baseRef = baseRef.slice("origin/".length);
       }
+
+      await this.host.assertMergeToBaseTargetOwned(cwd, baseRef);
 
       const mutatedCwd = await mergeToBase(
         cwd,

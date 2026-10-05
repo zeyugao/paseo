@@ -258,7 +258,11 @@ export class WorkspaceReconciliationService {
     const missingWorkspaces = workspaceDirectoryStates
       .filter(
         ({ workspace, state }) =>
-          state === "missing" && reachableProjectIds.has(workspace.projectId),
+          state === "missing" &&
+          reachableProjectIds.has(workspace.projectId) &&
+          // In multi-host mode, a missing cwd on this host proves nothing about
+          // other hosts; only hostId-stamped records carry that authority.
+          (workspace.hostId !== undefined || this.serverId === undefined),
       )
       .map(({ workspace }) => workspace);
     await Promise.all(

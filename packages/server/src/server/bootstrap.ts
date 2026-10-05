@@ -1476,7 +1476,8 @@ export async function createPaseoDaemon(
     assertCwdWorkspaceOwnedByThisServer: (cwd) =>
       assertCwdWorkspaceOwnedByThisServer(cwd, workspaceRegistry, serverId),
   });
-  await scheduleService.start();
+  // Deferred to start() after the instance lease is held: a rejected
+  // competitor must never interrupt the live daemon's schedule recovery.
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {
       await scheduleService.completeForAgent(agentId);
@@ -1738,6 +1739,7 @@ export async function createPaseoDaemon(
       void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
         logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
       });
+      await scheduleService.start();
       mirrorsLegacyCredential = process.env.PASEO_PID_LOCK_OWNER !== "0";
       localCredential = await writeLocalCredential(config.paseoHome, {
         serverId,

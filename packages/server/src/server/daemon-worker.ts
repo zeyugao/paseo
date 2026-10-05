@@ -6,7 +6,7 @@ import { resolvePaseoHome } from "./paseo-home.js";
 import { daemonLogPath } from "./daemon-instance.js";
 import { createRootLogger } from "./logger.js";
 import type { DaemonLifecycleIntent } from "./bootstrap.js";
-import { releaseDaemonInstanceForExitedWorker } from "./daemon-instance-registry.js";
+import { releaseDaemonInstanceSync } from "./daemon-instance-registry.js";
 import { getProcessDiagnostics } from "./process-diagnostics.js";
 
 process.title = "Paseo Daemon";
@@ -296,21 +296,16 @@ async function main() {
       // The supervisor owns the worker's stdout/stderr pipes. Once it is gone,
       // logging during graceful shutdown can block on the broken pipe and leave
       // the daemon orphaned, so supervisor loss is a hard process boundary.
-      // Release the instance lease first (file-only, no pipe writes): without
-      // it, the fresh mtime blocks restarts for up to 120 seconds.
+      // Release the instance lease synchronously (no child processes — the
+      // tree-kill test expects the whole process tree to die): without it,
+      // the fresh mtime blocks restarts for up to 120 seconds.
       const serverId = daemon?.getServerId() ?? process.env.PASEO_SERVER_ID;
       if (serverId) {
-        // Hard deadline: the release spawns a flock child (tens of ms); if it
-        // hangs (broken NFS), exit anyway rather than delaying the tree-kill.
-        const exitDeadline = setTimeout(() => process.exit(0), 200);
-        exitDeadline.unref();
-        void releaseDaemonInstanceForExitedWorker(paseoHome, serverId, process.pid)
-          .catch(() => undefined)
-          .finally(() => {
-            clearTimeout(exitDeadline);
-            process.exit(0);
-          });
-        return;
+        try {
+          releaseDaemonInstanceSync(paseoHome, serverId, process.pid);
+        } catch {
+          // Best-effort only; the lease goes stale in 120s regardless.
+        }
       }
       process.exit(0);
     };

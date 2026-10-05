@@ -750,6 +750,9 @@ function createPaseoWorktreeForMcpTest(options: {
     upsert: async (record: PersistedWorkspaceRecord) => {
       workspaces.set(record.workspaceId, record);
     },
+    upsertIfCwdOwnedByThisServer: async (record: PersistedWorkspaceRecord) => {
+      workspaces.set(record.workspaceId, record);
+    },
     archive: async (workspaceId, archivedAt) => {
       const workspace = workspaces.get(workspaceId);
       if (workspace) workspaces.set(workspaceId, { ...workspace, archivedAt });
@@ -2902,6 +2905,12 @@ describe("create_agent MCP tool", () => {
         >,
         findWorkspaceIdForCwd: vi.fn(async () => "ws-archive-tool-worktree"),
         listActiveWorkspaces,
+        workspaceRegistry: {
+          get: async () => null,
+          list: async () => [],
+          update: async () => null,
+          upsert: async () => {},
+        },
         listAllActiveWorkspaces: listActiveWorkspaces,
         archiveWorkspaceRecord,
         emitWorkspaceUpdatesForWorkspaceIds,
@@ -3016,6 +3025,12 @@ describe("create_agent MCP tool", () => {
         >,
         findWorkspaceIdForCwd: vi.fn(async () => "ws-mcp-A"),
         listActiveWorkspaces,
+        workspaceRegistry: {
+          get: async () => null,
+          list: async () => [],
+          update: async () => null,
+          upsert: async () => {},
+        },
         listAllActiveWorkspaces: listActiveWorkspaces,
         archiveWorkspaceRecord,
         emitWorkspaceUpdatesForWorkspaceIds: vi.fn(async () => undefined),

@@ -1,9 +1,16 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type pino from "pino";
 import { z } from "zod";
-import { ensurePrivateFile, writePrivateFileAtomicSync } from "../private-files.js";
+import {
+  ensurePrivateDirectory,
+  ensurePrivateFile,
+  PRIVATE_FILE_MODE,
+  writePrivateFileAtomicSync,
+} from "../private-files.js";
+import { withReclaimLock } from "../pid-lock.js";
 import type { WebSocketLike } from "../websocket-server.js";
 import {
   isDaemonPermission,
@@ -21,6 +28,41 @@ import { HubEnrollmentRejectedError } from "./relationship-remote.js";
 import { BoundedExponentialHubRetryPolicy } from "./relationship-retry.js";
 
 const FILE_NAME = "hub-relationship.json";
+const HUB_CONNECTION_LEASE_FILE_NAME = "hub-connection.lock";
+const HUB_CONNECTION_RECLAIM_LOCK_FILE_NAME = "hub-connection.reclaim.lock";
+const HUB_CONNECTION_LEASE_HEARTBEAT_INTERVAL_MS = 30_000;
+export const HUB_CONNECTION_LEASE_STALE_AFTER_MS = 120_000;
+
+const HubConnectionLeaseOwnerSchema = z.object({
+  serverId: z.string().min(1),
+  hostname: z.string().min(1),
+  pid: z.number().int().positive(),
+  leaseId: z.string().uuid(),
+  acquiredAt: z.string(),
+});
+
+export type HubConnectionLeaseOwner = z.infer<typeof HubConnectionLeaseOwnerSchema>;
+
+export class HubConnectionLeaseOwnedError extends Error {
+  constructor(public readonly owner: HubConnectionLeaseOwner | null) {
+    super(
+      owner
+        ? `Hub connection is owned by server ${owner.serverId} on ${owner.hostname} (PID ${owner.pid})`
+        : "Hub connection lease is not owned by this daemon",
+    );
+    this.name = "HubConnectionLeaseOwnedError";
+  }
+}
+
+interface HubConnectionLeaseRegistration {
+  assertOwned(): Promise<void>;
+  release(): Promise<void>;
+}
+
+export interface HubConnectionLeaseOptions {
+  heartbeatIntervalMs?: number;
+  staleAfterMs?: number;
+}
 const HubOriginSchema = z
   .string()
   .url()
@@ -168,6 +210,7 @@ export interface HubRelationshipControllerOptions {
   clock?: HubRelationshipClock;
   retryPolicy?: HubRelationshipRetryPolicy;
   createDaemonId?: () => string;
+  connectionLease?: HubConnectionLeaseOptions;
   attachSocket: (
     socket: WebSocketLike,
     options: {
@@ -213,7 +256,7 @@ export class HubRelationshipController implements HubRelationshipManagement {
   private readonly filePath: string;
   private readonly clock: HubRelationshipClock;
   private readonly retryPolicy: HubRelationshipRetryPolicy;
-  private record: HubRelationshipRecord | null;
+  private record: HubRelationshipRecord | null = null;
   private state: HubConnectionState = "not_connected";
   private connectedAt: string | null = null;
   private lastError: string | null = null;
@@ -224,49 +267,80 @@ export class HubRelationshipController implements HubRelationshipManagement {
   private retryAttempt = 0;
   private readonly inFlightEnrollments = new Set<Promise<void>>();
   private executionAgents: { daemonId: string; value: HubExecutionAgents } | null = null;
+  private connectionLease: HubConnectionLeaseRegistration | null = null;
+  private blockedLeaseOwner: HubConnectionLeaseOwner | null = null;
 
   constructor(private readonly options: HubRelationshipControllerOptions) {
     this.filePath = path.join(options.paseoHome, FILE_NAME);
     this.clock = options.clock ?? systemClock;
     this.retryPolicy = options.retryPolicy ?? new BoundedExponentialHubRetryPolicy();
-    this.record = this.load();
-    if (this.record?.state === "disconnecting") {
-      // COMPAT(hubUnilateralDisconnect): added in v0.4.0, remove after 2027-02-13 once legacy records have aged out.
-      this.options.logger.warn(
-        { daemonId: this.record.relationship.daemonId },
-        "Removed legacy disconnecting Hub relationship during startup",
-      );
-      rmSync(this.filePath, { force: true });
-      this.record = null;
-    }
-    if (this.record?.state === "revoked") {
-      this.state = "revoked";
-      this.lastError = this.record.reason ?? null;
-    } else if (this.record) this.state = "connecting";
   }
 
   async start(): Promise<void> {
-    if (this.record?.state === "active") this.openSocket(this.record, false);
-    if (this.record?.state === "pending") {
-      const enrollmentGeneration = this.beginEnrollmentAttempt();
+    if (!this.connectionLease) {
       try {
-        await this.tryEnrollment(this.record, enrollmentGeneration);
+        this.connectionLease = await acquireHubConnectionLease({
+          paseoHome: this.options.paseoHome,
+          serverId: this.options.serverId,
+          hostname: this.options.hostname,
+          heartbeatIntervalMs: this.options.connectionLease?.heartbeatIntervalMs,
+          staleAfterMs: this.options.connectionLease?.staleAfterMs,
+          onLost: (error) => this.connectionLeaseLost(error),
+        });
+        this.blockedLeaseOwner = null;
       } catch (error) {
-        if (!(error instanceof HubEnrollmentRejectedError)) throw error;
+        if (!(error instanceof HubConnectionLeaseOwnedError)) throw error;
+        this.blockedLeaseOwner = error.owner;
+        this.state = "not_connected";
+        this.lastError = error.message;
         this.options.logger.warn(
-          { statusCode: error.statusCode },
-          "Discarded rejected pending Hub enrollment during startup",
+          { owner: error.owner },
+          "Hub connection disabled because another daemon owns the per-home lease",
+        );
+        return;
+      }
+    }
+    try {
+      this.loadRelationshipForStartup();
+      if (this.record?.state === "active") this.openSocket(this.record, false);
+      if (this.record?.state === "pending") {
+        const enrollmentGeneration = this.beginEnrollmentAttempt();
+        try {
+          await this.tryEnrollment(this.record, enrollmentGeneration);
+        } catch (error) {
+          if (!(error instanceof HubEnrollmentRejectedError)) throw error;
+          this.options.logger.warn(
+            { statusCode: error.statusCode },
+            "Discarded rejected pending Hub enrollment during startup",
+          );
+        }
+      }
+    } catch (error) {
+      try {
+        await this.stop();
+      } catch (stopError) {
+        this.options.logger.error(
+          { err: stopError },
+          "Failed to clean up Hub connection after startup failure",
         );
       }
+      throw error;
     }
   }
 
   async stop(): Promise<void> {
-    const pendingExecutionCleanup = this.retireExecutionAgents();
-    this.cancelLifecycle();
-    this.socket?.close();
-    this.socket = null;
-    await pendingExecutionCleanup;
+    const lease = this.connectionLease;
+    this.connectionLease = null;
+    this.blockedLeaseOwner = null;
+    try {
+      const pendingExecutionCleanup = this.retireExecutionAgents();
+      this.cancelLifecycle();
+      this.socket?.close();
+      this.socket = null;
+      await pendingExecutionCleanup;
+    } finally {
+      await lease?.release();
+    }
   }
 
   status(): HubRelationshipStatus {
@@ -285,6 +359,7 @@ export class HubRelationshipController implements HubRelationshipManagement {
     token: string;
     permissions: readonly string[];
   }): Promise<HubRelationshipStatus> {
+    await this.requireConnectionLease();
     const permissions = parseDaemonPermissions(input.permissions);
     if (this.record?.state === "pending") {
       if (normalizeHubUrl(input.hubUrl) !== this.record.relationship.hubOrigin) {
@@ -327,6 +402,7 @@ export class HubRelationshipController implements HubRelationshipManagement {
     grant: readonly string[];
     revoke: readonly string[];
   }): Promise<HubRelationshipStatus> {
+    await this.requireConnectionLease();
     if (!this.record || this.record.state !== "active") {
       throw new Error("This daemon is not connected to a Hub");
     }
@@ -342,6 +418,7 @@ export class HubRelationshipController implements HubRelationshipManagement {
       credential: this.record.credential.secret,
       permissions,
     });
+    await this.requireConnectionLease();
     if (!samePermissions(result.permissions, permissions)) {
       throw new Error("Hub permission response did not match the local grant");
     }
@@ -357,6 +434,7 @@ export class HubRelationshipController implements HubRelationshipManagement {
   async disconnect(input: {
     force: boolean;
   }): Promise<{ status: HubRelationshipStatus; warning?: string }> {
+    await this.requireConnectionLease();
     const waitForEnrollment = this.record?.state === "pending";
     const pendingCreateCleanup = this.retireExecutionAgents();
     this.cancelLifecycle();
@@ -595,6 +673,48 @@ export class HubRelationshipController implements HubRelationshipManagement {
     return ++this.enrollmentGeneration;
   }
 
+  private loadRelationshipForStartup(): void {
+    this.record = this.load();
+    if (this.record?.state === "disconnecting") {
+      // COMPAT(hubUnilateralDisconnect): added in v0.4.0, remove after 2027-02-13 once legacy records have aged out.
+      this.options.logger.warn(
+        { daemonId: this.record.relationship.daemonId },
+        "Removed legacy disconnecting Hub relationship during startup",
+      );
+      rmSync(this.filePath, { force: true });
+      this.record = null;
+    }
+    if (this.record?.state === "revoked") {
+      this.state = "revoked";
+      this.lastError = this.record.reason ?? null;
+    } else {
+      this.state = this.record ? "connecting" : "not_connected";
+      this.lastError = null;
+    }
+  }
+
+  private async requireConnectionLease(): Promise<void> {
+    if (!this.connectionLease) {
+      throw new HubConnectionLeaseOwnedError(this.blockedLeaseOwner);
+    }
+    await this.connectionLease.assertOwned();
+  }
+
+  private connectionLeaseLost(error: HubConnectionLeaseOwnedError): void {
+    if (!this.connectionLease) return;
+    this.blockedLeaseOwner = error.owner;
+    this.lastError = error.message;
+    this.state = "not_connected";
+    void this.retireExecutionAgents();
+    this.cancelLifecycle();
+    this.socket?.close();
+    this.socket = null;
+    this.options.logger.error(
+      { err: error, owner: error.owner },
+      "Hub connection stopped after losing the per-home lease",
+    );
+  }
+
   private persist(record: HubRelationshipRecord): void {
     writePrivateFileAtomicSync(this.filePath, `${JSON.stringify(record, null, 2)}\n`, {
       preserveSymlink: true,
@@ -634,6 +754,153 @@ export class HubRelationshipController implements HubRelationshipManagement {
     ensurePrivateFile(this.filePath);
     return record;
   }
+}
+
+interface AcquireHubConnectionLeaseInput {
+  paseoHome: string;
+  serverId: string;
+  hostname: string;
+  heartbeatIntervalMs?: number;
+  staleAfterMs?: number;
+  onLost(error: HubConnectionLeaseOwnedError): void;
+}
+
+async function acquireHubConnectionLease(
+  input: AcquireHubConnectionLeaseInput,
+): Promise<HubConnectionLeaseRegistration> {
+  const filePath = path.join(input.paseoHome, HUB_CONNECTION_LEASE_FILE_NAME);
+  const reclaimLockPath = path.join(input.paseoHome, HUB_CONNECTION_RECLAIM_LOCK_FILE_NAME);
+  const staleAfterMs = input.staleAfterMs ?? HUB_CONNECTION_LEASE_STALE_AFTER_MS;
+  const owner: HubConnectionLeaseOwner = {
+    serverId: input.serverId,
+    hostname: input.hostname,
+    pid: process.pid,
+    leaseId: randomUUID(),
+    acquiredAt: new Date().toISOString(),
+  };
+  ensurePrivateDirectory(input.paseoHome);
+
+  await withReclaimLock(reclaimLockPath, async () => {
+    const existing = await readHubConnectionLease(filePath);
+    if (existing) {
+      const fileStat = await stat(filePath);
+      if (Date.now() - fileStat.mtimeMs <= staleAfterMs) {
+        throw new HubConnectionLeaseOwnedError(existing);
+      }
+      await unlink(filePath);
+    } else if (await hubConnectionLeaseFileIsCurrent(filePath, staleAfterMs)) {
+      throw new HubConnectionLeaseOwnedError(null);
+    } else {
+      await unlink(filePath).catch((error: unknown) => {
+        if (!isMissingFileError(error)) throw error;
+      });
+    }
+    await writeHubConnectionLease(filePath, owner);
+  });
+
+  let released = false;
+  let heartbeatPending = false;
+  let lost = false;
+  const markLost = (current: HubConnectionLeaseOwner | null): HubConnectionLeaseOwnedError => {
+    const error = new HubConnectionLeaseOwnedError(current);
+    if (!lost && !released) {
+      lost = true;
+      clearInterval(timer);
+      input.onLost(error);
+    }
+    return error;
+  };
+  const assertOwned = async (touch: boolean): Promise<void> => {
+    if (lost || released) throw new HubConnectionLeaseOwnedError(null);
+    await withReclaimLock(reclaimLockPath, async () => {
+      if (lost || released) throw new HubConnectionLeaseOwnedError(null);
+      const current = await readHubConnectionLease(filePath);
+      if (!sameHubConnectionLease(current, owner)) throw markLost(current);
+      if (touch) {
+        const now = new Date();
+        await utimes(filePath, now, now);
+      }
+      if (lost || released) throw new HubConnectionLeaseOwnedError(null);
+    });
+  };
+  const heartbeatIntervalMs =
+    input.heartbeatIntervalMs ?? HUB_CONNECTION_LEASE_HEARTBEAT_INTERVAL_MS;
+  const timer = setInterval(() => {
+    if (heartbeatPending || released || lost) return;
+    heartbeatPending = true;
+    void assertOwned(true)
+      .catch(() => {
+        if (!lost && !released) markLost(null);
+      })
+      .finally(() => {
+        heartbeatPending = false;
+      });
+  }, heartbeatIntervalMs);
+  timer.unref();
+
+  return {
+    assertOwned: () => assertOwned(false),
+    async release(): Promise<void> {
+      if (released) return;
+      released = true;
+      clearInterval(timer);
+      await withReclaimLock(reclaimLockPath, async () => {
+        const current = await readHubConnectionLease(filePath);
+        if (sameHubConnectionLease(current, owner)) await unlink(filePath);
+      });
+    },
+  };
+}
+
+async function readHubConnectionLease(filePath: string): Promise<HubConnectionLeaseOwner | null> {
+  try {
+    const parsed = HubConnectionLeaseOwnerSchema.safeParse(
+      JSON.parse(await readFile(filePath, "utf8")),
+    );
+    return parsed.success ? parsed.data : null;
+  } catch (error) {
+    if (isMissingFileError(error)) return null;
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
+}
+
+async function hubConnectionLeaseFileIsCurrent(
+  filePath: string,
+  staleAfterMs: number,
+): Promise<boolean> {
+  try {
+    return Date.now() - (await stat(filePath)).mtimeMs <= staleAfterMs;
+  } catch (error) {
+    if (isMissingFileError(error)) return false;
+    throw error;
+  }
+}
+
+async function writeHubConnectionLease(
+  filePath: string,
+  owner: HubConnectionLeaseOwner,
+): Promise<void> {
+  const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(owner, null, 2)}\n`, {
+      mode: PRIVATE_FILE_MODE,
+    });
+    await rename(temporaryPath, filePath);
+  } finally {
+    await unlink(temporaryPath).catch(() => undefined);
+  }
+}
+
+function sameHubConnectionLease(
+  actual: HubConnectionLeaseOwner | null,
+  expected: HubConnectionLeaseOwner,
+): boolean {
+  return actual?.leaseId === expected.leaseId;
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function hubPrincipalId(record: ActiveRecord): string {

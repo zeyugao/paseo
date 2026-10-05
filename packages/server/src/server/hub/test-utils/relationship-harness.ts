@@ -7,6 +7,7 @@ import { networkInterfaces, platform, tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { Writable } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 import pino from "pino";
 import { WebSocket } from "ws";
 import type {
@@ -920,6 +921,14 @@ export class HubRelationshipHarness {
     return existsSync(directory) ? readdir(directory) : [];
   }
 
+  async socketCloses(socketIndex: number): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (this.remote.sockets[socketIndex]?.socket.closed) return;
+      await delay(10);
+    }
+    throw new Error(`Hub socket ${socketIndex} did not close`);
+  }
+
   socketDeliveredResponse(socketIndex: number, requestId: string): boolean {
     const socket = this.remote.sockets[socketIndex];
     if (!socket) throw new Error(`Socket ${socketIndex} does not exist`);
@@ -1261,6 +1270,8 @@ export class HubRelationshipHarness {
   }
 
   async reconstructAndReplay(executionId = "execution-1") {
+    const serverId = this.daemon?.agentManager.serverId;
+    if (!serverId) throw new Error("Running test daemon has no serverId");
     const storage = new AgentStorage(
       path.join(this.paseoHome, "agents"),
       pino({ level: "silent" }),
@@ -1268,9 +1279,10 @@ export class HubRelationshipHarness {
     const manager = new AgentManager({
       clients: createTestAgentClients(),
       registry: storage,
+      serverId,
       logger: pino({ level: "silent" }),
     });
-    const executions = this.executionsForReconstruction(manager, storage);
+    const executions = this.executionsForReconstruction(manager, storage, serverId);
     const replay = await executions.create(this.ownedCreateInput(executionId));
     const durableAgentCount = (await storage.list()).filter(
       (record) => record.owner?.kind === "daemon",
@@ -1576,9 +1588,14 @@ export class HubRelationshipHarness {
     };
   }
 
-  private executionsForReconstruction(manager: AgentManager, storage: AgentStorage) {
+  private executionsForReconstruction(
+    manager: AgentManager,
+    storage: AgentStorage,
+    serverId: string,
+  ) {
     return new DaemonExecutions({
       daemonId: this.relationshipFile()!.relationship.daemonId,
+      serverId,
       agentManager: manager,
       agentStorage: storage,
       createAgent: (input) =>

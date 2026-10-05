@@ -2098,6 +2098,7 @@ describe("create_agent MCP tool", () => {
     );
   });
 
+
   it("auto-titles an agent-created directory workspace from the initial prompt", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
     const tempDir = await mkdtemp(join(tmpdir(), "paseo-mcp-agent-directory-auto-title-"));
@@ -2460,6 +2461,7 @@ describe("create_agent MCP tool", () => {
         >,
         findWorkspaceIdForCwd: vi.fn(async () => "ws-archive-tool-worktree"),
         listActiveWorkspaces,
+        listAllActiveWorkspaces: listActiveWorkspaces,
         archiveWorkspaceRecord,
         emitWorkspaceUpdatesForWorkspaceIds,
         markWorkspaceArchiving,
@@ -2573,6 +2575,7 @@ describe("create_agent MCP tool", () => {
         >,
         findWorkspaceIdForCwd: vi.fn(async () => "ws-mcp-A"),
         listActiveWorkspaces,
+        listAllActiveWorkspaces: listActiveWorkspaces,
         archiveWorkspaceRecord,
         emitWorkspaceUpdatesForWorkspaceIds: vi.fn(async () => undefined),
         markWorkspaceArchiving: vi.fn(),
@@ -4782,6 +4785,14 @@ describe("rename_workspace MCP tool", () => {
       providerSnapshotManager: createOpenCodeManager().manager,
       workspaceRegistry: {
         get: async (workspaceId) => workspaces.get(workspaceId) ?? null,
+        update: async (workspaceId, updater) => {
+          const existing = workspaces.get(workspaceId);
+          if (!existing) return null;
+          const updated = updater(existing);
+          upsertedWorkspaces.push(updated);
+          workspaces.set(workspaceId, updated);
+          return updated;
+        },
         upsert: async (record) => {
           upsertedWorkspaces.push(record);
           workspaces.set(record.workspaceId, record);
@@ -4853,6 +4864,14 @@ describe("rename_workspace MCP tool", () => {
       providerSnapshotManager: createOpenCodeManager().manager,
       workspaceRegistry: {
         get: async (workspaceId) => workspaces.get(workspaceId) ?? null,
+        update: async (workspaceId, updater) => {
+          const existing = workspaces.get(workspaceId);
+          if (!existing) return null;
+          const updated = updater(existing);
+          upsertedWorkspaces.push(updated);
+          workspaces.set(workspaceId, updated);
+          return updated;
+        },
         upsert: async (record) => {
           upsertedWorkspaces.push(record);
           workspaces.set(record.workspaceId, record);
@@ -4914,6 +4933,14 @@ describe("rename_workspace MCP tool", () => {
       providerSnapshotManager: createOpenCodeManager().manager,
       workspaceRegistry: {
         get: async (workspaceId) => workspaces.get(workspaceId) ?? null,
+        update: async (workspaceId, updater) => {
+          const existing = workspaces.get(workspaceId);
+          if (!existing) return null;
+          const updated = updater(existing);
+          upsertedWorkspaces.push(updated);
+          workspaces.set(workspaceId, updated);
+          return updated;
+        },
         upsert: async (record) => {
           upsertedWorkspaces.push(record);
           workspaces.set(record.workspaceId, record);

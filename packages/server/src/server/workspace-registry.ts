@@ -308,6 +308,8 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     });
   }
 
+  private diskStateUncertain = false;
+
   private async refreshCacheFromDisk(): Promise<void> {
     if (this.mutationsBlockedUntilRestart) {
       // Frozen after an uncertain label commit: reads keep serving the last
@@ -342,10 +344,15 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
       this.cache.clear();
       for (const [id, record] of nextCache) this.cache.set(id, record);
       this.fileMetadata = metadata;
+      this.diskStateUncertain = false;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") {
         this.logger.error({ err: error, filePath: this.filePath }, "Failed to load registry file");
+        // The file exists but cannot be read or parsed. Writing the stale
+        // cache back would silently destroy concurrent records from other
+        // daemons; block mutations until a successful refresh.
+        this.diskStateUncertain = true;
       }
       this.fileMetadata = null;
     }
@@ -390,6 +397,11 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
         await this.refreshCacheFromDisk();
         if (this.mutationsBlockedUntilRestart) {
           throw new Error("Workspace registry mutations are blocked until daemon restart");
+        }
+        if (this.diskStateUncertain) {
+          throw new Error(
+            "Workspace registry file is unreadable; mutations are blocked until it can be refreshed",
+          );
         }
         await hooks?.beforeUpdate?.();
         const staged = new Map(this.cache);

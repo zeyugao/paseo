@@ -330,22 +330,24 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
       return;
     }
 
-    this.cache.clear();
+    const nextCache = new Map<string, TRecord>();
     try {
       if (metadata) {
         const raw = await fs.readFile(this.filePath, "utf8");
         const parsed = z.array(this.schema).parse(JSON.parse(raw));
         for (const record of parsed) {
-          this.cache.set(this.getId(record), record);
+          nextCache.set(this.getId(record), record);
         }
       }
+      this.cache.clear();
+      for (const [id, record] of nextCache) this.cache.set(id, record);
       this.fileMetadata = metadata;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") {
         this.logger.error({ err: error, filePath: this.filePath }, "Failed to load registry file");
       }
-      this.fileMetadata = code === "ENOENT" ? null : metadata;
+      this.fileMetadata = null;
     }
     this.loaded = true;
   }

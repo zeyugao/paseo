@@ -304,7 +304,7 @@ export function createWorkspaceProvisioningService(deps: {
       ...(input.untrustedSource ? { untrustedSource: input.untrustedSource } : {}),
       background: await resolveBackground(input),
     });
-    await workspaceRegistry.upsert(workspace, {
+    await workspaceRegistry.upsertIfCwdOwnedByThisServer(workspace, serverId, {
       expectsInitialAgent: input.expectsInitialAgent,
     });
     emitWorkspaceCreated(workspace);

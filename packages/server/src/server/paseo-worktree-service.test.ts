@@ -1105,6 +1105,10 @@ function createDeps(options?: {
       events.push(`workspace:${record.workspaceId}`);
       workspaces.set(record.workspaceId, record);
     },
+    upsertIfCwdOwnedByThisServer: async (record) => {
+      events.push(`workspace:${record.workspaceId}`);
+      workspaces.set(record.workspaceId, record);
+    },
     archive: async (workspaceId, archivedAt) => {
       const workspace = workspaces.get(workspaceId);
       if (workspace) workspaces.set(workspaceId, { ...workspace, archivedAt });

@@ -252,8 +252,6 @@ export function createWorkspaceProvisioningService(deps: {
     },
   ): Promise<PersistedWorkspaceRecord> {
     const normalizedCwd = resolve(cwd);
-    const allWorkspaces = await workspaceRegistry.list();
-    assertCwdWorkspaceRecordsOwnedByThisServer(normalizedCwd, allWorkspaces, serverId);
     const checkout = await workspaceGitService.getCheckout(normalizedCwd);
     const project = projectId
       ? await refreshProjectKind(await requireActiveProject(projectId), normalizedCwd, checkout)
@@ -270,9 +268,7 @@ export function createWorkspaceProvisioningService(deps: {
       updatedAt: timestamp,
       background: await resolveBackground(context),
     });
-    await workspaceRegistry.upsert(workspace, {
-      expectsInitialAgent: context?.expectsInitialAgent,
-    });
+    await workspaceRegistry.upsertIfCwdOwnedByThisServer(workspace, serverId, context);
     emitWorkspaceCreated(workspace);
     return workspace;
   }

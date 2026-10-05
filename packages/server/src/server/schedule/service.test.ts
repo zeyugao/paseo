@@ -565,6 +565,42 @@ describe("ScheduleService", () => {
     });
   });
 
+  test("rejects schedules targeting an agent owned by another host", async () => {
+    const foreignAgentId = "00000000-0000-0000-0000-0000000000aa";
+    const timestamp = now.toISOString();
+    await agentStorage.upsert({
+      id: foreignAgentId,
+      provider: "claude",
+      cwd: tempDir,
+      hostId: "srv-foreign",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      lastStatus: "closed",
+      labels: {},
+    });
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "unexpected" }),
+    });
+    const input = {
+      prompt: "Foreign agent schedule",
+      cadence: { type: "every" as const, everyMs: 60_000 },
+      target: { type: "agent" as const, agentId: foreignAgentId },
+    };
+
+    await expect(service.create(input)).rejects.toThrow("agent is owned by host srv-foreign");
+    await expect(service.createOrReplace({ ...input, name: "Foreign" })).rejects.toThrow(
+      "agent is owned by host srv-foreign",
+    );
+    expect(await service.list()).toEqual([]);
+  });
+
   test("does not run or advance a schedule whose target agent is owned by another host", async () => {
     const foreignAgentId = "00000000-0000-0000-0000-0000000000aa";
     const legacyAgentId = "00000000-0000-0000-0000-0000000000bb";
@@ -599,7 +635,17 @@ describe("ScheduleService", () => {
       now: () => now,
       runner,
     });
-    const foreignSchedule = await service.create({
+    const ownerService = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-foreign",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "unused" }),
+    });
+    const foreignSchedule = await ownerService.create({
       prompt: "Foreign agent schedule",
       cadence: { type: "every", everyMs: 60_000 },
       target: { type: "agent", agentId: foreignAgentId },

@@ -144,6 +144,66 @@ test("fresh non-git directory creates a directory workspace at the exact path", 
 
   expect(workspace.cwd).toBe(dir);
 });
+test("serializes concurrent directory creation across hosts", async () => {
+  const repo = path.join(tmpDir, "shared-repo");
+  const workspaceRegistryB = new FileBackedWorkspaceRegistry(
+    path.join(tmpDir, "projects", "workspaces.json"),
+    logger,
+  );
+  const projectRegistryB = new FileBackedProjectRegistry(
+    path.join(tmpDir, "projects", "projects.json"),
+    logger,
+  );
+  await workspaceRegistryB.initialize();
+  await projectRegistryB.initialize();
+
+  let checkoutReads = 0;
+  let releaseInitialReads!: () => void;
+  const initialReadsComplete = new Promise<void>((resolve) => {
+    releaseInitialReads = resolve;
+  });
+  const baseGitService = gitService();
+  const racingGitService = {
+    ...baseGitService,
+    getCheckout: async (cwd: string) => {
+      if (checkoutReads < 2) {
+        checkoutReads += 1;
+        if (checkoutReads === 2) releaseInitialReads();
+        await initialReadsComplete;
+      }
+      return baseGitService.getCheckout(cwd);
+    },
+  };
+  const createProvisioning = (
+    serverId: string,
+    registry: FileBackedWorkspaceRegistry,
+    projects: FileBackedProjectRegistry,
+  ) =>
+    createWorkspaceProvisioningService({
+      serverId,
+      workspaceRegistry: registry,
+      projectRegistry: projects,
+      workspaceGitService: racingGitService,
+      isDirectory,
+      logger,
+    });
+  const provisioningA = createProvisioning("srv-a", workspaceRegistry, projectRegistry);
+  const provisioningB = createProvisioning("srv-b", workspaceRegistryB, projectRegistryB);
+
+  const results = await Promise.allSettled([
+    provisioningA.createWorkspaceForDirectory(repo),
+    provisioningB.createWorkspaceForDirectory(repo),
+  ]);
+
+  expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+  expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+  expect(String(results.find((result) => result.status === "rejected")?.reason)).toContain(
+    "owned by host",
+  );
+  const records = await workspaceRegistry.list();
+  expect(records).toHaveLength(1);
+  expect(["srv-a", "srv-b"]).toContain(records[0]?.hostId);
+});
 
 test("background workspace creation preserves hooks, inheritance and durable visibility", async () => {
   const dir = path.join(tmpDir, "plain");
@@ -424,6 +484,8 @@ test("uses one workspace snapshot when reopening an archived workspace", async (
     list: async () => (reads++ === 0 ? archived : []),
     get: (workspaceId) => workspaceRegistry.get(workspaceId),
     upsert: (workspace) => workspaceRegistry.upsert(workspace),
+    upsertIfCwdOwnedByThisServer: (workspace, serverId, context) =>
+      workspaceRegistry.upsertIfCwdOwnedByThisServer(workspace, serverId, context),
     archive: (workspaceId, archivedAt) => workspaceRegistry.archive(workspaceId, archivedAt),
     remove: (workspaceId) => workspaceRegistry.remove(workspaceId),
   };

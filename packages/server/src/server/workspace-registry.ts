@@ -168,6 +168,11 @@ export interface WorkspaceRegistry {
     updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
   ): Promise<PersistedWorkspaceRecord | null>;
   upsert(record: PersistedWorkspaceRecord, context?: WorkspaceMutationContext): Promise<void>;
+  upsertIfCwdOwnedByThisServer(
+    record: PersistedWorkspaceRecord,
+    serverId: string | undefined,
+    context?: WorkspaceMutationContext,
+  ): Promise<void>;
   archive(
     workspaceId: string,
     archivedAt: string,
@@ -630,6 +635,24 @@ export class FileBackedWorkspaceRegistry
       kind: "upsert",
       workspaceId: record.workspaceId,
       workspace: record,
+      ...(context?.expectsInitialAgent ? { expectsInitialAgent: true } : {}),
+    });
+  }
+
+  async upsertIfCwdOwnedByThisServer(
+    record: PersistedWorkspaceRecord,
+    serverId: string | undefined,
+    context?: WorkspaceMutationContext,
+  ): Promise<void> {
+    const parsed = PersistedWorkspaceRecordSchema.parse(record);
+    await this.mutateCache((records) => {
+      assertCwdWorkspaceRecordsOwnedByThisServer(parsed.cwd, records.values(), serverId);
+      records.set(parsed.workspaceId, parsed);
+    });
+    await this.notifyMutation({
+      kind: "upsert",
+      workspaceId: parsed.workspaceId,
+      workspace: parsed,
       ...(context?.expectsInitialAgent ? { expectsInitialAgent: true } : {}),
     });
   }

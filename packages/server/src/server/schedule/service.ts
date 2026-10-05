@@ -310,6 +310,7 @@ export class ScheduleService {
   async create(input: CreateScheduleInput): Promise<StoredSchedule> {
     const prompt = normalizePrompt(input.prompt);
     validateScheduleCadence(input.cadence);
+    await this.assertAgentTargetOwnedByThisHost(input.target);
     return this.createScheduleRecord(input, {
       name: trimOptionalName(input.name),
       prompt,
@@ -355,6 +356,7 @@ export class ScheduleService {
     const name = trimOptionalName(input.name);
     const prompt = normalizePrompt(input.prompt);
     validateScheduleCadence(input.cadence);
+    await this.assertAgentTargetOwnedByThisHost(input.target);
     if (name === null) {
       return this.createScheduleRecord(input, { name, prompt, target: input.target });
     }
@@ -551,10 +553,7 @@ export class ScheduleService {
     if (this.runningScheduleIds.has(id)) {
       throw new Error(`Schedule ${id} is already running`);
     }
-    const foreignHost = await this.foreignAgentTargetHost(schedule);
-    if (foreignHost !== null) {
-      throw new Error(`agent is owned by host ${foreignHost}`);
-    }
+    await this.assertAgentTargetOwnedByThisHost(schedule.target);
     const now = this.now();
     const runId = randomUUID();
     const claimPath = await this.tryClaimSchedule(schedule, runId, now, "manual");
@@ -602,11 +601,20 @@ export class ScheduleService {
   // A schedule targeting an agent is executed by the host that owns the agent; other
   // hosts sharing PASEO_HOME must not claim, run, or advance it. Legacy agents (no
   // hostId) remain runnable everywhere.
-  private async foreignAgentTargetHost(schedule: StoredSchedule): Promise<string | null> {
+  private async foreignAgentTargetHost(
+    schedule: Pick<StoredSchedule, "target">,
+  ): Promise<string | null> {
     if (schedule.target.type !== "agent") return null;
     const record = await this.agentStorage.getFresh(schedule.target.agentId);
     const hostId = record?.hostId ?? this.agentManager.getAgent(schedule.target.agentId)?.hostId;
     return hostId !== undefined && hostId !== this.serverId ? hostId : null;
+  }
+
+  private async assertAgentTargetOwnedByThisHost(target: ScheduleTarget): Promise<void> {
+    const foreignHost = await this.foreignAgentTargetHost({ target });
+    if (foreignHost !== null) {
+      throw new Error(`agent is owned by host ${foreignHost}`);
+    }
   }
 
   private async isAgentTargetOwnedByAnotherHost(schedule: StoredSchedule): Promise<boolean> {

@@ -300,9 +300,16 @@ async function main() {
       // it, the fresh mtime blocks restarts for up to 120 seconds.
       const serverId = daemon?.getServerId() ?? process.env.PASEO_SERVER_ID;
       if (serverId) {
+        // Hard deadline: the release spawns a flock child (tens of ms); if it
+        // hangs (broken NFS), exit anyway rather than delaying the tree-kill.
+        const exitDeadline = setTimeout(() => process.exit(0), 200);
+        exitDeadline.unref();
         void releaseDaemonInstanceForExitedWorker(paseoHome, serverId, process.pid)
           .catch(() => undefined)
-          .finally(() => process.exit(0));
+          .finally(() => {
+            clearTimeout(exitDeadline);
+            process.exit(0);
+          });
         return;
       }
       process.exit(0);

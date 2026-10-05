@@ -100,6 +100,9 @@ function createTestRegistries() {
     upsert: async (record: PersistedWorkspaceRecord) => {
       workspaces.set(record.workspaceId, record);
     },
+    upsertIfCwdOwnedByThisServer: async (record: PersistedWorkspaceRecord) => {
+      workspaces.set(record.workspaceId, record);
+    },
     archive: async (id: string, archivedAt: string) => {
       const gate = archiveGate;
       archiveGate = null;

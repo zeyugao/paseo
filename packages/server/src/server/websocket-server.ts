@@ -359,6 +359,7 @@ function createNoopWorkspaceRegistry(): WorkspaceRegistry {
     update: async () => null,
     upsert: async () => {},
     archive: async () => false,
+    upsertIfCwdOwnedByThisServer: async () => {},
     remove: async () => {},
   };
 }

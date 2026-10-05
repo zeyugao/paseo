@@ -352,6 +352,10 @@ function createPaseoWorktreeForTest(options: {
       options.events?.push(`workspace:${record.workspaceId}`);
       workspaces.set(record.workspaceId, record);
     },
+    upsertIfCwdOwnedByThisServer: async (record) => {
+      options.events?.push(`workspace:${record.workspaceId}`);
+      workspaces.set(record.workspaceId, record);
+    },
     archive: async (workspaceId, archivedAt) => {
       const workspace = workspaces.get(workspaceId);
       if (workspace) workspaces.set(workspaceId, { ...workspace, archivedAt });
@@ -1764,6 +1768,7 @@ describe("handlePaseoWorktreeArchiveRequest worktree scope", () => {
         findWorkspaceIdForCwd: vi.fn(async () => workspaceA),
         listActiveWorkspaces,
         listAllActiveWorkspaces,
+        assertCwdWorkspaceOwnedByThisServer: async () => {},
         archiveWorkspaceRecord: createArchiveWorkspaceRecordMutator(
           activeWorkspaces,
           archivedWorkspaceRecords,
@@ -1839,6 +1844,7 @@ describe("handlePaseoWorktreeArchiveRequest worktree scope", () => {
         ),
         listActiveWorkspaces: vi.fn(async () => activeWorkspaces),
         listAllActiveWorkspaces: vi.fn(async () => activeWorkspaces),
+        assertCwdWorkspaceOwnedByThisServer: async () => {},
         archiveWorkspaceRecord: vi.fn(async (id: string) => {
           archivedWorkspaceRecords.push(id);
           if (activeWorkspaces[0]?.workspaceId === id) {
@@ -1917,6 +1923,7 @@ describe("handlePaseoWorktreeArchiveRequest worktree scope", () => {
         ),
         listActiveWorkspaces: vi.fn(async () => activeWorkspaces),
         listAllActiveWorkspaces: vi.fn(async () => activeWorkspaces),
+        assertCwdWorkspaceOwnedByThisServer: async () => {},
         archiveWorkspaceRecord: vi.fn(async (id: string) => {
           archivedWorkspaceRecords.push(id);
           if (activeWorkspaces[0]?.workspaceId === id) {
@@ -1994,6 +2001,7 @@ describe("handlePaseoWorktreeArchiveRequest worktree scope", () => {
       findWorkspaceIdForCwd: vi.fn(async (cwd: string) => (cwd === sharedCwd ? workspaceA : null)),
       listActiveWorkspaces,
       listAllActiveWorkspaces,
+      assertCwdWorkspaceOwnedByThisServer: async () => {},
       archiveWorkspaceRecord: createArchiveWorkspaceRecordMutator(
         activeWorkspaces,
         archivedWorkspaceRecords,

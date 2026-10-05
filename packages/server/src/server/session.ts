@@ -944,10 +944,9 @@ export class Session {
           this.workspaceGitObserver.handleBranchSnapshot(cwd, branchName),
         assertMergeToBaseTargetOwned: async (cwd, baseRef) => {
           const baseWorktree = await getMergeToBaseWorktreePath(cwd, baseRef);
-          if (!baseWorktree) {
-            throw new Error(`Unable to resolve the merge target worktree for ${baseRef}`);
+          if (baseWorktree) {
+            await this.assertCwdWorkspaceOwnedByThisServer(baseWorktree);
           }
-          await this.assertCwdWorkspaceOwnedByThisServer(baseWorktree);
         },
         renameCurrentBranch: (cwd, branch) => this.renameCurrentBranch(cwd, branch),
       },
@@ -1103,6 +1102,7 @@ export class Session {
       isPathWithinRoot: (rootPath, candidatePath) => this.isPathWithinRoot(rootPath, candidatePath),
       sessionLogger: this.sessionLogger,
       listTerminalWorkspaceRefs: () => this.listActiveWorkspaceRefs(),
+      assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThisServer(cwd),
       clientSupportsWrapReflow: (source) =>
         this.supportsForSource(CLIENT_CAPS.terminalReflowableSnapshot, source),
       getClientBufferedAmount: (source) => this.getTransportBufferedAmount(source),
@@ -6029,6 +6029,10 @@ export class Session {
     const record = await this.agentStorage.get(agentId);
     if (!record?.workspaceId) {
       return;
+    }
+    const workspace = await this.workspaceRegistry.get(record.workspaceId);
+    if (workspace) {
+      this.assertWorkspaceOwnedByThisServer(workspace);
     }
     const recovery = await this.workspaceRecovery.inspect(record.workspaceId);
     if (recovery.kind !== "recoverable") {

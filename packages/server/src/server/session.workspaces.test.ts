@@ -5918,6 +5918,53 @@ test("legacy refresh_agent_request restores a real deleted worktree", async () =
   rmSync(tempDir, { recursive: true, force: true });
 });
 
+test("legacy refresh rejects a foreign workspace before recovery inspection", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = createSessionForWorkspaceTests({
+    appVersion: "0.1.104",
+    serverId: "srv-local",
+    onMessage: (message) => {
+      if (isSessionOutboundMessage(message)) emitted.push(message);
+    },
+  });
+  const workspace = createPersistedWorkspaceRecord({
+    workspaceId: "ws-foreign-refresh",
+    projectId: "proj-foreign-refresh",
+    cwd: "/tmp/foreign-refresh",
+    kind: "worktree",
+    displayName: "foreign",
+    hostId: "srv-other",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const agentId = "agent-foreign-refresh";
+  const internals = asSessionInternals<{
+    agentStorage: { get: (id: string) => Promise<StoredAgentRecord | null> };
+    workspaceRegistry: { get: (id: string) => Promise<PersistedWorkspaceRecord | null> };
+    workspaceRecovery: { inspect: (workspaceId: string) => Promise<unknown> };
+  }>(session);
+  internals.agentStorage.get = async (id) =>
+    id === agentId
+      ? ({
+          ...makeStoredAgent({ id: agentId, cwd: workspace.cwd }),
+          workspaceId: workspace.workspaceId,
+        } as StoredAgentRecord)
+      : null;
+  internals.workspaceRegistry.get = async (id) => (id === workspace.workspaceId ? workspace : null);
+  internals.workspaceRecovery.inspect = vi.fn();
+
+  await session.handleMessage({
+    type: "refresh_agent_request",
+    agentId,
+    requestId: "req-foreign-refresh",
+  });
+
+  expect(internals.workspaceRecovery.inspect).not.toHaveBeenCalled();
+  expect(findByType(emitted, "rpc_error")?.payload).toMatchObject({
+    error: "Workspace ws-foreign-refresh is owned by host srv-other",
+  });
+});
+
 test.skip("open_project_request collapses a git subdirectory onto the repo root workspace", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const session = createSessionForWorkspaceTests();

@@ -59,7 +59,7 @@ interface SupervisorOptions {
     env?: NodeJS.ProcessEnv;
   } | null;
   onWorkerReady?: (message: { listen: string; serverId: string }) => Promise<void> | void;
-  onWorkerExit?: () => Promise<void> | void;
+  onWorkerExit?: (worker: { pid: number | null; serverId: string | null }) => Promise<void> | void;
   restartOnCrash?: boolean;
   onSupervisorExit?: () => Promise<void> | void;
   // Closes every terminal the worker left. Runs after a kill-intent restart or stop once the
@@ -332,6 +332,7 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
 
     const currentChild = child;
     let reachedReady = false;
+    let serverId: string | null = null;
     // Serialize endpoint writes with exit/clear before allowing another worker to spawn.
     const heartbeat = setInterval(() => {
       const message: SupervisorHeartbeatMessage = { type: "paseo:supervisor-heartbeat" };
@@ -370,6 +371,7 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
       }
 
       if (lifecycleMessage.type === "paseo:ready") {
+        serverId = lifecycleMessage.serverId;
         reachedReady = true;
         writeLifecycleLog("Worker ready", { listen: lifecycleMessage.listen });
         publication = publication
@@ -417,7 +419,7 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
       clearForceKillTimer();
       child = null;
       publication = publication
-        .then(() => options.onWorkerExit?.())
+        .then(() => options.onWorkerExit?.({ pid: currentChild.pid ?? null, serverId }))
         .catch((error) => {
           lifecycleFailed = true;
           log(`Worker exit callback failed: ${String(error)}`);

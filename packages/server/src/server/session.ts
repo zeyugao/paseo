@@ -3296,6 +3296,10 @@ export class Session {
     // durable snapshot, otherwise an in-flight background write can recreate it.
     await this.agentManager.flush();
 
+    // The flush can take arbitrarily long on a busy daemon; another host may
+    // have legitimately taken over a closed foreign record in that window.
+    // Re-assert ownership before the irreversible remove and timeline delete.
+    await this.agentManager.assertAgentMutable(agentId);
     try {
       await this.agentStorage.remove(agentId);
       await this.agentManager.deleteAgentState(agentId);

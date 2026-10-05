@@ -3298,11 +3298,11 @@ export class Session {
 
     // The flush can take arbitrarily long on a busy daemon; another host may
     // have legitimately taken over a closed foreign record in that window.
-    // The delete fence makes getFresh return null, so read the record file
-    // directly: a takeover must still abort the irreversible remove.
-    const postFlushRecord = await this.agentStorage
-      .list()
-      .then((records) => records.find((record) => record.id === agentId));
+    // The delete fence makes normal getFresh return null, so bypass it:
+    // a takeover must still abort the irreversible remove.
+    const postFlushRecord = await this.agentStorage.getFresh(agentId, {
+      ignoreDeleteFence: true,
+    });
     if (postFlushRecord?.hostId !== undefined && postFlushRecord.hostId !== this.serverId) {
       throw new Error(`agent is owned by host ${postFlushRecord.hostId}`);
     }

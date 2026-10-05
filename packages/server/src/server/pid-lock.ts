@@ -55,12 +55,14 @@ const PID_LOCK_READ_RETRY_DELAY_MS = 50;
 export const PID_LOCK_STALE_AFTER_MS = 120_000;
 
 const RECLAIM_LOCK_HOLDER = 'printf "\\001"; cat >/dev/null';
+// The lock path is base64-encoded to survive PowerShell's -Command argument
+// parsing, which breaks on paths containing spaces.
 const WINDOWS_RECLAIM_LOCK_HOLDER =
-  "$stream = [System.IO.File]::Open($args[0], [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); [Console]::Out.Write([char]1); [Console]::Out.Flush(); [Console]::In.ReadToEnd() | Out-Null; $stream.Dispose()";
+  "$path = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($args[0])); $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); [Console]::Out.Write([char]1); [Console]::Out.Flush(); [Console]::In.ReadToEnd() | Out-Null; $stream.Dispose()";
 const SYNC_RECLAIM_LOCK_HOLDER =
   'printf "\\001" > "$1"; while [ ! -e "$3" ]; do sleep 0.01; done; printf "\\001" > "$2"';
 const WINDOWS_SYNC_RECLAIM_LOCK_HOLDER =
-  "$stream = [System.IO.File]::Open($args[0], [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); [System.IO.File]::WriteAllText($args[1], '1'); while (-not (Test-Path -LiteralPath $args[3])) { Start-Sleep -Milliseconds 10 }; $stream.Dispose(); [System.IO.File]::WriteAllText($args[2], '1')";
+  "$paths = @(); foreach ($b in $args[0..3]) { $paths += [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($b)) }; $stream = [System.IO.File]::Open($paths[0], [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); [System.IO.File]::WriteAllText($paths[1], '1'); while (-not (Test-Path -LiteralPath $paths[3])) { Start-Sleep -Milliseconds 10 }; $stream.Dispose(); [System.IO.File]::WriteAllText($paths[2], '1')";
 const SYNC_RECLAIM_LOCK_TIMEOUT_MS = 30_000;
 const SYNC_LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
 
@@ -94,15 +96,16 @@ export function withReclaimLockSync<T>(lockPath: string, action: () => T): T {
   ];
   if (process.platform === "win32") {
     command = "powershell.exe";
+    const encode = (p: string) => Buffer.from(p, "utf8").toString("base64");
     args = [
       "-NoProfile",
       "-NonInteractive",
       "-Command",
       WINDOWS_SYNC_RECLAIM_LOCK_HOLDER,
-      lockPath,
-      acquiredPath,
-      releasedPath,
-      releasePath,
+      encode(lockPath),
+      encode(acquiredPath),
+      encode(releasedPath),
+      encode(releasePath),
     ];
   } else if (process.platform === "darwin") {
     command = "lockf";
@@ -146,7 +149,14 @@ export async function withReclaimLock<T>(lockPath: string, action: () => Promise
   let args: string[] = ["--exclusive", lockPath, "/bin/sh", "-c", RECLAIM_LOCK_HOLDER];
   if (process.platform === "win32") {
     command = "powershell.exe";
-    args = ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_RECLAIM_LOCK_HOLDER, lockPath];
+    const encodedLockPath = Buffer.from(lockPath, "utf8").toString("base64");
+    args = [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      WINDOWS_RECLAIM_LOCK_HOLDER,
+      encodedLockPath,
+    ];
   } else if (process.platform === "darwin") {
     command = "lockf";
     args = [lockPath, "/bin/sh", "-c", RECLAIM_LOCK_HOLDER];

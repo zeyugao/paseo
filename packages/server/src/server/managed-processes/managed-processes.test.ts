@@ -56,6 +56,7 @@ describe("managed process registry", () => {
 
     const restartedRegistry = createManagedProcessRegistry({
       paseoHome: tempHome,
+      serverId: "srv-local",
       processTable,
       terminateProcess: terminator.terminate,
       logger: createTestLogger(),
@@ -72,6 +73,53 @@ describe("managed process registry", () => {
     });
     expect(terminator.terminatedPids).toEqual([4101]);
     expect(await restartedRegistry.list()).toEqual([]);
+  });
+
+  test("leaves foreign-host helper records untouched", async () => {
+    tempHome = await mkdtemp(path.join(tmpdir(), "paseo-managed-processes-"));
+    const ownerProcessTable = new FakeProcessTable([
+      {
+        pid: 4110,
+        commandLine: "opencode serve --port 4110",
+        startedAt: "process-start-token",
+      },
+    ]);
+    const ownerRegistry = createManagedProcessRegistry({
+      paseoHome: tempHome,
+      serverId: "srv-owner",
+      processTable: ownerProcessTable,
+      terminateProcess: new FakeProcessTerminator().terminate,
+      logger: createTestLogger(),
+    });
+    const record = await ownerRegistry.record({
+      owner: { provider: "opencode", kind: "helper-server" },
+      pid: 4110,
+      command: "opencode",
+      args: ["serve", "--port", "4110"],
+    });
+    expect(record.hostId).toBe("srv-owner");
+
+    const foreignProcessTable = new FakeProcessTable([]);
+    const terminator = new FakeProcessTerminator();
+    const foreignRegistry = createManagedProcessRegistry({
+      paseoHome: tempHome,
+      serverId: "srv-foreign",
+      processTable: foreignProcessTable,
+      terminateProcess: terminator.terminate,
+      logger: createTestLogger(),
+    });
+
+    expect(await foreignRegistry.reapStale()).toEqual({
+      checked: 0,
+      dead: 0,
+      mismatched: 0,
+      removed: 0,
+      terminated: 0,
+      errors: [],
+    });
+    expect(foreignProcessTable.inspectedPids).toEqual([]);
+    expect(terminator.terminatedPids).toEqual([]);
+    expect(await foreignRegistry.list()).toEqual([record]);
   });
 
   test("deletes a dead helper process record without terminating a PID", async () => {
@@ -346,6 +394,7 @@ describe("system managed process table", () => {
 });
 
 class FakeProcessTable implements ManagedProcessTable {
+  readonly inspectedPids: number[] = [];
   private readonly snapshots: Map<number, ManagedProcessSnapshot>;
   private readonly errorPids: Set<number>;
 
@@ -355,6 +404,7 @@ class FakeProcessTable implements ManagedProcessTable {
   }
 
   async inspect(pid: number): Promise<ManagedProcessInspection> {
+    this.inspectedPids.push(pid);
     if (this.errorPids.has(pid)) {
       return { status: "error", error: new Error("inspection failed") };
     }

@@ -182,7 +182,12 @@ export class WorkspaceLabelCatalogStore {
       this.blockUntilRestart();
     }
     try {
-      await this.recover(durable, transactionPath);
+      // The commit's lock is already released by the time this catch runs;
+      // recovery must re-acquire it to stay serialized against concurrent
+      // commits from other daemons sharing PASEO_HOME.
+      await withReclaimLock(this.lockPath, async () => {
+        await this.recover(durable, transactionPath);
+      });
     } catch {
       this.blockUntilRestart();
     }

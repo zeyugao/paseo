@@ -765,6 +765,15 @@ interface AcquireHubConnectionLeaseInput {
   onLost(error: HubConnectionLeaseOwnedError): void;
 }
 
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function acquireHubConnectionLease(
   input: AcquireHubConnectionLeaseInput,
 ): Promise<HubConnectionLeaseRegistration> {
@@ -784,7 +793,11 @@ async function acquireHubConnectionLease(
     const existing = await readHubConnectionLease(filePath);
     if (existing) {
       const fileStat = await stat(filePath);
-      if (Date.now() - fileStat.mtimeMs <= staleAfterMs) {
+      const ownerIsDead =
+        existing.hostname === input.hostname &&
+        existing.serverId === input.serverId &&
+        !isPidAlive(existing.pid);
+      if (Date.now() - fileStat.mtimeMs <= staleAfterMs && !ownerIsDead) {
         throw new HubConnectionLeaseOwnedError(existing);
       }
       await unlink(filePath);

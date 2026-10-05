@@ -1,4 +1,4 @@
-import { mkdir, rename, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, rename, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -94,7 +94,7 @@ describe("managed Git plugin sources", () => {
     let candidate = await sources.prepareInstall({ source: `git:${remote}` });
     expect(candidate.defaultId).toBe("managed-example");
     candidate = await sources.place("managed-example", candidate);
-    sources.commit("managed-example", candidate.record);
+    await sources.commit("managed-example", candidate.record);
     const metadataPath = path.join(home, "plugins", "sources.json");
     const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
     delete metadata["managed-example"].kind;
@@ -131,7 +131,7 @@ describe("managed Git plugin sources", () => {
     expect(preview.outcome).toBe("update");
     const prepared = await sources.prepareUpdate(preview.proposal!, candidate.directory);
     const updated = await sources.place("managed-example", prepared);
-    sources.commit("managed-example", updated.record);
+    await sources.commit("managed-example", updated.record);
     expect(await readFile(path.join(updated.directory, "index.server.ts"), "utf8")).toContain(
       "new Date",
     );
@@ -146,7 +146,7 @@ describe("managed Git plugin sources", () => {
     await runGitCommand(["tag", "v1", initial], { cwd: repository });
     let tagged = await sources.prepareInstall({ source: remote, ref: "v1" });
     tagged = await sources.place("tagged-example", tagged);
-    sources.commit("tagged-example", tagged.record);
+    await sources.commit("tagged-example", tagged.record);
     expect(await sources.status("tagged-example", tagged.directory)).toMatchObject({
       currentCommit: initial,
       latestCommit: latest,
@@ -168,7 +168,7 @@ describe("managed Git plugin sources", () => {
         id,
         await sources.prepareInstall({ source: remote, ref }),
       );
-      sources.commit(id, candidate.record);
+      await sources.commit(id, candidate.record);
       installations.push({ id, candidate });
     }
     await runGitCommand(["checkout", "-b", "new-default"], { cwd: repository });
@@ -246,7 +246,7 @@ describe("managed Git plugin sources", () => {
         "nested",
         await sources.prepareInstall({ source: remote, pluginPath: "plugins/review" }),
       );
-      sources.commit("nested", candidate.record);
+      await sources.commit("nested", candidate.record);
       expect(
         (
           await runGitCommand(["remote", "get-url", "origin"], { cwd: candidate.directory })
@@ -363,7 +363,7 @@ describe("registry plugin sources", () => {
             kind: "git",
             remote: "https://github.com/fixture/repository.git",
           });
-          sources.commit("managed-example", candidate.record);
+          await sources.commit("managed-example", candidate.record);
           const restarted = new ManagedPluginSources(home, {
             defaultUrl: `http://127.0.0.1:${address.port}/changed`,
           });
@@ -458,7 +458,7 @@ describe("registry plugin sources", () => {
         JSON.parse(await readFile(path.join(candidate.directory, "paseo-plugin.json"), "utf8")).id,
       ).toBe("managed-example");
       await sources.verifyCandidate("managed-example", candidate);
-      sources.commit("managed-example", candidate.record);
+      await sources.commit("managed-example", candidate.record);
       const restarted = new ManagedPluginSources(home, {
         defaultUrl: "http://127.0.0.1:1/changed",
         registries: { [host]: { authorization: "Bearer test" } },
@@ -534,7 +534,7 @@ it("installs and updates only the npm artifacts pinned by the plugin registry", 
       await sources.prepareInstall({ source: "acme/example" }),
     );
     await sources.verifyCandidate("example", candidate);
-    sources.commit("example", candidate.record);
+    await sources.commit("example", candidate.record);
     expect((await sources.describe("example", candidate.directory)).currentRevision).toBe("1.0.0");
     expect((await sources.preview("example", candidate.directory)).outcome).toBe("current");
     pin = await resolveNpm("paseo-fixture-plugin", "1.1.0", home);
@@ -560,4 +560,34 @@ it("installs and updates only the npm artifacts pinned by the plugin registry", 
     if (previous === undefined) delete process.env.npm_config_userconfig;
     else process.env.npm_config_userconfig = previous;
   }
+}, 30_000);
+
+it("keeps records committed by another instance sharing the home", async () => {
+  const repository = await createRepository();
+  const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-git-home-"));
+  roots.push(home);
+  const remote = pathToFileURL(repository).href;
+
+  const first = new ManagedPluginSources(home);
+  const second = new ManagedPluginSources(home);
+
+  let a = await first.prepareInstall({ source: `git:${remote}` });
+  a = await first.place("managed-example", a);
+  await first.commit("managed-example", a.record);
+
+  let b = await second.prepareInstall({ source: `git:${remote}` });
+  b = await second.place("second-instance", b);
+  await second.commit("second-instance", b.record);
+
+  const recordsPath = path.join(home, "plugins", "sources.json");
+  expect(Object.keys(JSON.parse(await readFile(recordsPath, "utf8"))).sort()).toEqual([
+    "managed-example",
+    "second-instance",
+  ]);
+
+  await second.remove("managed-example");
+  expect(Object.keys(JSON.parse(await readFile(recordsPath, "utf8")))).toEqual(["second-instance"]);
+  await expect(stat(path.join(home, "plugins", "managed-example"))).rejects.toMatchObject({
+    code: "ENOENT",
+  });
 }, 30_000);

@@ -26,6 +26,7 @@ interface CreateAgentLifecycleDispatchDependencies {
   archiveAgentForClose: (agentId: string) => Promise<unknown>;
   findWorkspaceIdForCwd: (cwd: string) => Promise<string | null>;
   listActiveWorkspaces: () => Promise<ActiveWorkspaceRef[]>;
+  listAllActiveWorkspaces: () => Promise<ActiveWorkspaceRef[]>;
   archiveWorkspaceRecord: (workspaceId: string) => Promise<void>;
   emit: (message: SessionOutboundMessage) => void;
   emitAgentRemove: (agentId: string) => Promise<void>;
@@ -33,6 +34,7 @@ interface CreateAgentLifecycleDispatchDependencies {
   markWorkspaceArchiving: (workspaceIds: Iterable<string>, archivingAt: string) => void;
   clearWorkspaceArchiving: (workspaceIds: Iterable<string>) => void;
   killTerminalsForWorkspace: (workspaceId: string) => Promise<void>;
+  assertCwdWorkspaceOwnedByThisServer: (cwd: string) => Promise<void>;
   logger: pino.Logger;
 }
 
@@ -181,11 +183,13 @@ export class CreateAgentLifecycleDispatch {
         agentStorage: this.dependencies.agentStorage,
         findWorkspaceIdForCwd: this.dependencies.findWorkspaceIdForCwd,
         listActiveWorkspaces: this.dependencies.listActiveWorkspaces,
+        listAllActiveWorkspaces: this.dependencies.listAllActiveWorkspaces,
         archiveWorkspaceRecord: this.dependencies.archiveWorkspaceRecord,
         emitWorkspaceUpdatesForWorkspaceIds: this.dependencies.emitWorkspaceUpdatesForWorkspaceIds,
         markWorkspaceArchiving: this.dependencies.markWorkspaceArchiving,
         clearWorkspaceArchiving: this.dependencies.clearWorkspaceArchiving,
         killTerminalsForWorkspace: this.dependencies.killTerminalsForWorkspace,
+        assertCwdWorkspaceOwnedByThisServer: this.dependencies.assertCwdWorkspaceOwnedByThisServer,
         sessionLogger: this.dependencies.logger,
       },
       {

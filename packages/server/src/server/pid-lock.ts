@@ -1,12 +1,21 @@
-import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { open, readFile, stat, unlink, utimes } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { ensurePrivateDirectory } from "./private-files.js";
-import { join } from "node:path";
+import { ensurePrivateDirectory, PRIVATE_FILE_MODE } from "./private-files.js";
+import { dirname, join } from "node:path";
 import { uptime } from "node:os";
 import { getHostName } from "./host-name.js";
 import { z } from "zod";
 
+function removeMarkerIfExists(markerPath: string): void {
+  try {
+    unlinkSync(markerPath);
+  } catch (error) {
+    if (!isErrnoException(error) || error.code !== "ENOENT") throw error;
+  }
+}
 export const pidLockInfoSchema = z.object({
   pid: z.number().int().positive(),
   startedAt: z.string(),
@@ -43,6 +52,188 @@ export class PidLockError extends Error {
 const PID_LOCK_HEARTBEAT_INTERVAL_MS = 30_000;
 const PID_LOCK_READ_RETRY_ATTEMPTS = 10;
 const PID_LOCK_READ_RETRY_DELAY_MS = 50;
+export const PID_LOCK_STALE_AFTER_MS = 120_000;
+
+const RECLAIM_LOCK_HOLDER = 'printf "\\001"; cat >/dev/null';
+const WINDOWS_RECLAIM_LOCK_HOLDER =
+  "$stream = [System.IO.File]::Open($args[0], [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); [Console]::Out.Write([char]1); [Console]::Out.Flush(); [Console]::In.ReadToEnd() | Out-Null; $stream.Dispose()";
+const SYNC_RECLAIM_LOCK_HOLDER =
+  'printf "\\001" > "$1"; while [ ! -e "$3" ]; do sleep 0.01; done; printf "\\001" > "$2"';
+const WINDOWS_SYNC_RECLAIM_LOCK_HOLDER =
+  "$stream = [System.IO.File]::Open($args[0], [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); [System.IO.File]::WriteAllText($args[1], '1'); while (-not (Test-Path -LiteralPath $args[3])) { Start-Sleep -Milliseconds 10 }; $stream.Dispose(); [System.IO.File]::WriteAllText($args[2], '1')";
+const SYNC_RECLAIM_LOCK_TIMEOUT_MS = 30_000;
+const SYNC_LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
+
+function waitForLockMarker(markerPath: string, deadline: number, description: string): void {
+  while (!existsSync(markerPath)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out ${description}`);
+    Atomics.wait(SYNC_LOCK_SLEEP, 0, 0, 10);
+  }
+}
+
+export function withReclaimLockSync<T>(lockPath: string, action: () => T): T {
+  ensurePrivateDirectory(dirname(lockPath));
+  const lockFd = openSync(lockPath, "a", PRIVATE_FILE_MODE);
+  closeSync(lockFd);
+  const markerId = `${process.pid}-${randomUUID()}`;
+  const acquiredPath = `${lockPath}.${markerId}.acquired`;
+  const releasedPath = `${lockPath}.${markerId}.released`;
+  const releasePath = `${lockPath}.${markerId}.release`;
+
+  let command = "flock";
+  let args = [
+    "--exclusive",
+    lockPath,
+    "/bin/sh",
+    "-c",
+    SYNC_RECLAIM_LOCK_HOLDER,
+    "sync-lock",
+    acquiredPath,
+    releasedPath,
+    releasePath,
+  ];
+  if (process.platform === "win32") {
+    command = "powershell.exe";
+    args = [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      WINDOWS_SYNC_RECLAIM_LOCK_HOLDER,
+      lockPath,
+      acquiredPath,
+      releasedPath,
+      releasePath,
+    ];
+  } else if (process.platform === "darwin") {
+    command = "lockf";
+    args = [
+      lockPath,
+      "/bin/sh",
+      "-c",
+      SYNC_RECLAIM_LOCK_HOLDER,
+      "sync-lock",
+      acquiredPath,
+      releasedPath,
+      releasePath,
+    ];
+  }
+
+  const holder = spawn(command, args, { stdio: "ignore" });
+  holder.on("error", () => {});
+  const deadline = Date.now() + SYNC_RECLAIM_LOCK_TIMEOUT_MS;
+  try {
+    waitForLockMarker(acquiredPath, deadline, `acquiring ${lockPath}`);
+    return action();
+  } finally {
+    writeFileSync(releasePath, "1", { mode: PRIVATE_FILE_MODE });
+    try {
+      waitForLockMarker(releasedPath, deadline, `releasing ${lockPath}`);
+    } finally {
+      if (!holder.killed && !existsSync(releasedPath)) holder.kill("SIGKILL");
+      for (const markerPath of [acquiredPath, releasedPath, releasePath]) {
+        removeMarkerIfExists(markerPath);
+      }
+    }
+  }
+}
+
+export async function withReclaimLock<T>(lockPath: string, action: () => Promise<T>): Promise<T> {
+  ensurePrivateDirectory(dirname(lockPath));
+  const lockFile = await open(lockPath, "a", PRIVATE_FILE_MODE);
+  await lockFile.close();
+
+  let command = "flock";
+  let args: string[] = ["--exclusive", lockPath, "/bin/sh", "-c", RECLAIM_LOCK_HOLDER];
+  if (process.platform === "win32") {
+    command = "powershell.exe";
+    args = ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_RECLAIM_LOCK_HOLDER, lockPath];
+  } else if (process.platform === "darwin") {
+    command = "lockf";
+    args = [lockPath, "/bin/sh", "-c", RECLAIM_LOCK_HOLDER];
+  }
+  const holder = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+  type HolderTermination =
+    | { kind: "error"; error: Error }
+    | { kind: "close"; code: number | null; signal: NodeJS.Signals | null };
+  let settleHolderTermination!: (termination: HolderTermination) => void;
+  const holderTermination = new Promise<HolderTermination>((resolve) => {
+    settleHolderTermination = resolve;
+  });
+  holder.once("error", (error) => settleHolderTermination({ kind: "error", error }));
+  holder.once("close", (code, signal) => settleHolderTermination({ kind: "close", code, signal }));
+  let stderr = "";
+  holder.stderr.setEncoding("utf8");
+  holder.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    let acquired = false;
+    void holderTermination.then((termination) => {
+      if (acquired) return;
+      if (termination.kind === "error") {
+        reject(termination.error);
+        return;
+      }
+      reject(
+        new Error(
+          `${command} exited before acquiring ${lockPath} (${termination.code ?? termination.signal}): ${stderr.trim()}`,
+        ),
+      );
+      return;
+    });
+    holder.stdout.once("data", () => {
+      acquired = true;
+      resolve();
+    });
+  });
+
+  let releasing = false;
+  let criticalSectionInvalidated = false;
+  void holderTermination.then((termination) => {
+    if (releasing) return;
+    criticalSectionInvalidated = true;
+    const reason =
+      termination.kind === "error"
+        ? termination.error.message
+        : String(termination.code ?? termination.signal);
+    console.warn(
+      `Reclaim lock holder for ${lockPath} exited during the action (${reason}); the critical section is no longer protected`,
+    );
+    return;
+  });
+
+  let releaseError: Error | undefined;
+  let result!: T;
+  try {
+    if (criticalSectionInvalidated || holder.exitCode !== null || holder.signalCode !== null) {
+      throw new Error(
+        `Reclaim lock holder for ${lockPath} exited before the action began; critical section is no longer protected`,
+      );
+    }
+    result = await action();
+    if (criticalSectionInvalidated || holder.exitCode !== null || holder.signalCode !== null) {
+      throw new Error(
+        `Reclaim lock holder for ${lockPath} exited during the action; critical section is no longer protected`,
+      );
+    }
+  } finally {
+    releasing = true;
+    if (!holder.stdin.destroyed) holder.stdin.end();
+    const termination = await holderTermination;
+    if (!criticalSectionInvalidated) {
+      if (termination.kind === "error") {
+        releaseError = termination.error;
+      } else if (termination.code !== 0) {
+        releaseError = new Error(
+          `${command} failed releasing ${lockPath} (${termination.code ?? termination.signal}): ${stderr.trim()}`,
+        );
+      }
+    }
+  }
+  if (releaseError) throw releaseError;
+  return result;
+}
 
 function isPidRunning(pid: number): boolean {
   try {
@@ -95,7 +286,7 @@ function writtenDuringThisBoot(lock: PidLockInfo): boolean {
  * however alive its PID looks.
  */
 export function isPidLockOwnerRunning(lock: PidLockInfo): boolean {
-  if (!writtenDuringThisBoot(lock)) return false;
+  if (lock.hostname !== getHostName() || !writtenDuringThisBoot(lock)) return false;
   return isPidRunning(lock.pid);
 }
 
@@ -148,13 +339,8 @@ interface AcquirePidLockOptions {
 }
 
 export function isSamePidLock(left: PidLockInfo, right: PidLockInfo): boolean {
-  return left.pid === right.pid && left.startedAt === right.startedAt;
-}
-
-function createLockHeldError(lock: PidLockInfo): PidLockError {
-  return new PidLockError(
-    `Another Paseo daemon is already running (PID ${lock.pid}, started ${lock.startedAt})`,
-    lock,
+  return (
+    left.hostname === right.hostname && left.pid === right.pid && left.startedAt === right.startedAt
   );
 }
 
@@ -162,24 +348,36 @@ async function clearExistingPidLock(
   pidPath: string,
   existingLock: PidLockInfo,
   lockOwnerPid: number,
-): Promise<"already_owned" | "cleared"> {
+): Promise<"already_owned" | "occupied" | "cleared"> {
+  const localHostname = getHostName();
+  const sameHost = existingLock.hostname === localHostname;
   const lockOwnerRunning = isPidLockOwnerRunning(existingLock);
-  if (existingLock.pid === lockOwnerPid && lockOwnerRunning) {
+  if (sameHost && existingLock.pid === lockOwnerPid && lockOwnerRunning) {
     await touchPidLockFile(pidPath);
     return "already_owned";
   }
+  const lockStat = await stat(pidPath);
+  const stale = Date.now() - lockStat.mtimeMs > PID_LOCK_STALE_AFTER_MS;
+  if (!stale && (lockOwnerRunning || !sameHost)) return "occupied";
 
-  if (lockOwnerRunning) throw createLockHeldError(existingLock);
   const confirmedLock = await readPidLock(pidPath);
+  if (!confirmedLock || !isSamePidLock(existingLock, confirmedLock)) {
+    return "occupied";
+  }
+  const confirmedStat = await stat(pidPath);
+  const confirmedStale = Date.now() - confirmedStat.mtimeMs > PID_LOCK_STALE_AFTER_MS;
   if (
-    !confirmedLock ||
-    !isSamePidLock(existingLock, confirmedLock) ||
-    isPidLockOwnerRunning(confirmedLock)
+    !confirmedStale &&
+    (isPidLockOwnerRunning(confirmedLock) || confirmedLock.hostname !== localHostname)
   ) {
-    throw new PidLockError("PID lock changed while checking whether it was abandoned");
+    return "occupied";
   }
 
-  await unlink(pidPath).catch(() => {});
+  try {
+    await unlink(pidPath);
+  } catch (error) {
+    if (!isErrnoException(error) || error.code !== "ENOENT") throw error;
+  }
   return "cleared";
 }
 
@@ -191,23 +389,19 @@ async function removeEmptyPidLock(pidPath: string): Promise<void> {
   }
 }
 
-async function writeNewPidLock(pidPath: string, lockInfo: PidLockInfo): Promise<void> {
+async function writeNewPidLock(pidPath: string, lockInfo: PidLockInfo): Promise<boolean> {
   let fd;
   try {
     fd = await open(pidPath, "wx");
     await fd.write(JSON.stringify(lockInfo));
+    return true;
   } catch (error) {
     if (!isErrnoException(error) || error.code !== "EEXIST") {
       throw error;
     }
 
     const raceLock = await readPidLock(pidPath);
-    if (raceLock) {
-      throw new PidLockError(
-        `Another Paseo daemon is already running (PID ${raceLock.pid})`,
-        raceLock,
-      );
-    }
+    if (raceLock) return false;
     throw new PidLockError("Failed to acquire PID lock due to race condition");
   } finally {
     await fd?.close();
@@ -218,39 +412,40 @@ export async function acquirePidLock(
   paseoHome: string,
   listen: string | null,
   options?: AcquirePidLockOptions,
-): Promise<void> {
+): Promise<boolean> {
   const pidPath = getPidFilePath(paseoHome);
+  const reclaimLockPath = join(paseoHome, ".reclaim.lock");
 
   ensurePrivateDirectory(paseoHome);
+  return withReclaimLock(reclaimLockPath, async () => {
+    const lockOwnerPid = resolveOwnerPid(options?.ownerPid);
+    const bootId = currentBootId();
+    const lockInfo: PidLockInfo = {
+      pid: lockOwnerPid,
+      startedAt: new Date().toISOString(),
+      hostname: getHostName(),
+      uid: process.getuid?.() ?? 0,
+      listen,
+      heartbeat: true,
+      ...(bootId ? { bootId } : {}),
+      ...(process.env.PASEO_DESKTOP_MANAGED === "1" ? { desktopManaged: true } : {}),
+    };
 
-  // Try to read existing lock
-  const existingLock = await readPidLock(pidPath);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const existingLock = await readPidLock(pidPath);
+      if (existingLock) {
+        const result = await clearExistingPidLock(pidPath, existingLock, lockOwnerPid);
+        if (result === "already_owned") return true;
+        if (result === "occupied") return false;
+      } else {
+        await removeEmptyPidLock(pidPath);
+      }
 
-  // Check if existing lock is stale
-  const lockOwnerPid = resolveOwnerPid(options?.ownerPid);
-  if (existingLock) {
-    const result = await clearExistingPidLock(pidPath, existingLock, lockOwnerPid);
-    if (result === "already_owned") {
-      return;
+      if (await writeNewPidLock(pidPath, lockInfo)) return true;
     }
-  } else {
-    await removeEmptyPidLock(pidPath);
-  }
 
-  // Create new lock with exclusive flag
-  const bootId = currentBootId();
-  const lockInfo: PidLockInfo = {
-    pid: lockOwnerPid,
-    startedAt: new Date().toISOString(),
-    hostname: getHostName(),
-    uid: process.getuid?.() ?? 0,
-    listen,
-    heartbeat: true,
-    ...(bootId ? { bootId } : {}),
-    ...(process.env.PASEO_DESKTOP_MANAGED === "1" ? { desktopManaged: true } : {}),
-  };
-
-  await writeNewPidLock(pidPath, lockInfo);
+    throw new PidLockError("PID lock changed repeatedly while reclaiming it");
+  });
 }
 
 export async function refreshPidLock(
@@ -258,30 +453,33 @@ export async function refreshPidLock(
   options?: { ownerPid?: number },
 ): Promise<void> {
   const pidPath = getPidFilePath(paseoHome);
+  const reclaimLockPath = join(paseoHome, ".reclaim.lock");
   const lockOwnerPid = resolveOwnerPid(options?.ownerPid);
-  let fd;
-  try {
-    fd = await open(pidPath, "r+");
-  } catch (error) {
-    if (isErrnoException(error) && error.code === "ENOENT") {
-      throw new PidLockError("Cannot refresh PID lock: lock file is missing");
+  await withReclaimLock(reclaimLockPath, async () => {
+    let fd;
+    try {
+      fd = await open(pidPath, "r+");
+    } catch (error) {
+      if (isErrnoException(error) && error.code === "ENOENT") {
+        throw new PidLockError("Cannot refresh PID lock: lock file is missing");
+      }
+      throw error;
     }
-    throw error;
-  }
 
-  try {
-    const lock = await readPidLockFromHandleWithRetry(fd);
-    if (!lock) {
-      throw new PidLockError("Cannot refresh PID lock: invalid lock file");
+    try {
+      const lock = await readPidLockFromHandleWithRetry(fd);
+      if (!lock) {
+        throw new PidLockError("Cannot refresh PID lock: invalid lock file");
+      }
+      if (lock.pid !== lockOwnerPid || lock.hostname !== getHostName()) {
+        throw new PidLockError(`Cannot refresh PID lock owned by PID ${lock.pid}`, lock);
+      }
+      const now = new Date();
+      await fd.utimes(now, now);
+    } finally {
+      await fd.close();
     }
-    if (lock.pid !== lockOwnerPid) {
-      throw new PidLockError(`Cannot refresh PID lock owned by PID ${lock.pid}`, lock);
-    }
-    const now = new Date();
-    await fd.utimes(now, now);
-  } finally {
-    await fd.close();
-  }
+  });
 }
 
 async function readPidLockFromHandle(fd: FileHandle): Promise<PidLockInfo | null> {
@@ -316,6 +514,7 @@ export function startPidLockHeartbeat(
   options?: {
     ownerPid?: number;
     intervalMs?: number;
+    onSuccess?: () => void;
     onError?: (error: unknown) => void;
   },
 ): () => void {
@@ -327,18 +526,21 @@ export function startPidLockHeartbeat(
       return;
     }
     refreshing = true;
-    refreshPidLock(paseoHome, { ownerPid: options?.ownerPid })
-      .catch((error) => {
+    void (async () => {
+      try {
+        await refreshPidLock(paseoHome, { ownerPid: options?.ownerPid });
+        options?.onSuccess?.();
+      } catch (error) {
         if (options?.onError) {
           options.onError(error);
-          return;
+        } else {
+          const message = error instanceof Error ? error.message : String(error);
+          process.stderr.write(`PID lock heartbeat failed: ${message}\n`);
         }
-        const message = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`PID lock heartbeat failed: ${message}\n`);
-      })
-      .finally(() => {
+      } finally {
         refreshing = false;
-      });
+      }
+    })();
   }, intervalMs);
   timer.unref();
 
@@ -358,11 +560,8 @@ export async function updatePidLock(
     if (!existingLock) {
       throw new PidLockError("Cannot update PID lock: invalid lock file");
     }
-    if (existingLock.pid !== lockOwnerPid) {
-      throw new PidLockError(
-        `Cannot update PID lock owned by PID ${existingLock.pid}`,
-        existingLock,
-      );
+    if (existingLock.pid !== lockOwnerPid || existingLock.hostname !== getHostName()) {
+      return;
     }
 
     const updatedLock: PidLockInfo = {
@@ -381,20 +580,23 @@ export async function releasePidLock(
   options?: { ownerPid?: number; startedAt?: string },
 ): Promise<void> {
   const pidPath = getPidFilePath(paseoHome);
+  const reclaimLockPath = join(paseoHome, ".reclaim.lock");
   const lockOwnerPid = resolveOwnerPid(options?.ownerPid);
-  try {
-    // Only remove if it's our lock
-    const content = await readFile(pidPath, "utf-8");
-    const lock = parsePidLockInfo(JSON.parse(content));
-    if (
-      lock?.pid === lockOwnerPid &&
-      (options?.startedAt === undefined || lock.startedAt === options.startedAt)
-    ) {
-      await unlink(pidPath);
+  await withReclaimLock(reclaimLockPath, async () => {
+    try {
+      const content = await readFile(pidPath, "utf-8");
+      const lock = parsePidLockInfo(JSON.parse(content));
+      if (
+        lock?.hostname === getHostName() &&
+        lock.pid === lockOwnerPid &&
+        (options?.startedAt === undefined || lock.startedAt === options.startedAt)
+      ) {
+        await unlink(pidPath);
+      }
+    } catch {
+      // The lock may already be gone or unreadable; release remains best-effort.
     }
-  } catch {
-    // Ignore errors - lock may already be gone
-  }
+  });
 }
 
 export async function getPidLockInfo(paseoHome: string): Promise<PidLockInfo | null> {
@@ -406,10 +608,15 @@ export async function isLocked(
   paseoHome: string,
 ): Promise<{ locked: boolean; info?: PidLockInfo }> {
   const info = await getPidLockInfo(paseoHome);
-  if (!info) {
-    return { locked: false };
-  }
-  if (!isPidLockOwnerRunning(info)) {
+  if (!info) return { locked: false };
+  // The pid owner may release between the read and this stat; a vanished
+  // file means the lock no longer exists, not an error.
+  const lockStat = await stat(getPidFilePath(paseoHome)).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  if (lockStat === null) return { locked: false, info };
+  if (Date.now() - lockStat.mtimeMs > PID_LOCK_STALE_AFTER_MS || !isPidLockOwnerRunning(info)) {
     return { locked: false, info };
   }
   return { locked: true, info };

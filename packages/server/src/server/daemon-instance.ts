@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
   getPidLockInfo,
   isPidLockOwnerRunning,
+  isLocked,
   isSamePidLock,
   releasePidLock,
   type PidLockInfo,
@@ -44,15 +45,17 @@ export class DaemonInstanceError extends Error {
 }
 
 export async function readDaemonInstance(home: string): Promise<PidLockInfo | null> {
-  const lock = await getPidLockInfo(home);
-  return lock && isPidLockOwnerRunning(lock) ? lock : null;
+  const state = await isLocked(home);
+  return state.locked ? (state.info ?? null) : null;
 }
 
-export function daemonLogPath(home: string): string {
+export function daemonLogPath(home: string, env: NodeJS.ProcessEnv = process.env): string {
+  const serverId = env.PASEO_SERVER_ID?.trim();
+  const defaultFilename = serverId ? `daemon.${serverId}.log` : "daemon.log";
   try {
-    return path.resolve(home, readPersistedConfig(home).log?.file?.path ?? "daemon.log");
+    return path.resolve(home, readPersistedConfig(home).log?.file?.path ?? defaultFilename);
   } catch {
-    return path.join(home, "daemon.log");
+    return path.join(home, defaultFilename);
   }
 }
 
@@ -161,7 +164,7 @@ export async function stopDaemonInstance(
       `Supervisor changed for ${home}; refusing to stop PID ${instance.pid}.`,
     );
   }
-  if (!instance || !isPidLockOwnerRunning(instance)) {
+  if (!instance || !(await isLocked(home)).locked) {
     if (instance)
       await releasePidLock(home, { ownerPid: instance.pid, startedAt: instance.startedAt });
     return {

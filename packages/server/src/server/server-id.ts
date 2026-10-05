@@ -1,8 +1,8 @@
 import path from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 
-import { ensurePrivateFile, writePrivateFileAtomicSync } from "./private-files.js";
+import { ensurePrivateDirectory, ensurePrivateFile, PRIVATE_FILE_MODE } from "./private-files.js";
 
 interface LoggerLike {
   child(bindings: Record<string, unknown>): LoggerLike;
@@ -20,10 +20,55 @@ function getServerIdPath(paseoHome: string): string {
   return path.join(paseoHome, SERVER_ID_FILENAME);
 }
 
+export function validateEnvironmentServerId(serverId: string): string {
+  if (/[\\/]/.test(serverId) || serverId.includes("..") || /\s/.test(serverId)) {
+    throw new Error(
+      "Invalid PASEO_SERVER_ID: it must not contain path separators, '..', or whitespace",
+    );
+  }
+  return serverId;
+}
+
 function generateServerId(): string {
   // 9 bytes -> 12 base64url chars; keep it short + URL-safe.
   const rand = randomBytes(9).toString("base64url");
   return `srv_${rand}`;
+}
+
+function createServerIdExclusive(serverIdPath: string, serverId: string): boolean {
+  ensurePrivateDirectory(path.dirname(serverIdPath));
+  try {
+    writeFileSync(serverIdPath, `${serverId}\n`, {
+      flag: "wx",
+      mode: PRIVATE_FILE_MODE,
+    });
+    ensurePrivateFile(serverIdPath);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EEXIST") return false;
+    throw error;
+  }
+}
+
+function readPersistedServerId(serverIdPath: string): string | null {
+  ensurePrivateFile(serverIdPath);
+  return readFileSync(serverIdPath, "utf8").trim() || null;
+}
+
+function readConcurrentServerIdWinner(serverIdPath: string): string {
+  const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      const winner = readPersistedServerId(serverIdPath);
+      if (winner) return validateEnvironmentServerId(winner);
+      lastError = new Error("Concurrently created server-id file was empty");
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < 9) Atomics.wait(waitBuffer, 0, 0, 10);
+  }
+  throw lastError;
 }
 
 /**
@@ -40,17 +85,19 @@ export function getOrCreateServerId(
   const log = getLogger(options?.logger);
   const serverIdPath = getServerIdPath(paseoHome);
 
+  const rawEnvOverride = env.PASEO_SERVER_ID;
   const envOverride =
-    typeof env.PASEO_SERVER_ID === "string" && env.PASEO_SERVER_ID.trim().length > 0
-      ? env.PASEO_SERVER_ID.trim()
+    typeof rawEnvOverride === "string" && rawEnvOverride.trim().length > 0
+      ? validateEnvironmentServerId(rawEnvOverride)
       : null;
 
   if (envOverride) {
     // Persist the override for consistent identity across restarts.
     if (!existsSync(serverIdPath)) {
       try {
-        writePrivateFileAtomicSync(serverIdPath, `${envOverride}\n`);
-        log?.info({ serverId: envOverride }, "Persisted PASEO_SERVER_ID override");
+        if (createServerIdExclusive(serverIdPath, envOverride)) {
+          log?.info({ serverId: envOverride }, "Persisted PASEO_SERVER_ID override");
+        }
       } catch (error) {
         log?.warn({ error }, "Failed to persist PASEO_SERVER_ID override");
       }
@@ -61,23 +108,22 @@ export function getOrCreateServerId(
   }
 
   if (existsSync(serverIdPath)) {
+    let parsed: string | null = null;
     try {
-      ensurePrivateFile(serverIdPath);
-      const raw = readFileSync(serverIdPath, "utf8");
-      const parsed = raw.trim();
-      if (parsed.length > 0) {
-        return parsed;
-      }
+      parsed = readPersistedServerId(serverIdPath);
     } catch (error) {
       log?.warn({ error }, "Failed to read server-id file, regenerating");
     }
+    if (parsed) return validateEnvironmentServerId(parsed);
   }
 
   const created = generateServerId();
+  let createdFile: boolean;
   try {
-    writePrivateFileAtomicSync(serverIdPath, `${created}\n`);
+    createdFile = createServerIdExclusive(serverIdPath, created);
   } catch (error) {
     log?.warn({ error }, "Failed to persist serverId (continuing with in-memory id)");
+    return created;
   }
-  return created;
+  return createdFile ? created : readConcurrentServerIdWinner(serverIdPath);
 }

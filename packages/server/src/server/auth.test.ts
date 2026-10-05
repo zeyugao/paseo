@@ -210,4 +210,77 @@ describe("hello admission", () => {
       await rm(home, { recursive: true, force: true });
     }
   });
+
+  test("mirrors only a PID-lock owner's per-server credential to the legacy path", async () => {
+    const home = await mkdtemp(join(tmpdir(), "paseo-local-instance-file-"));
+    const nonOwnerServerId = "srv_non_owner";
+    const ownerServerId = "srv_owner";
+    try {
+      const nonOwnerToken = await writeLocalCredential(home, {
+        serverId: nonOwnerServerId,
+        mirrorLegacy: false,
+      });
+      expect(
+        (
+          await readFile(join(home, "daemons", nonOwnerServerId, "local-credential"), "utf8")
+        ).trim(),
+      ).toBe(nonOwnerToken);
+      await expect(readFile(join(home, "local-credential"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      const ownerToken = await writeLocalCredential(home, {
+        serverId: ownerServerId,
+        mirrorLegacy: true,
+      });
+      expect(
+        (await readFile(join(home, "daemons", ownerServerId, "local-credential"), "utf8")).trim(),
+      ).toBe(ownerToken);
+      expect((await readFile(join(home, "local-credential"), "utf8")).trim()).toBe(ownerToken);
+
+      await deleteLocalCredential(home, {
+        serverId: ownerServerId,
+        token: ownerToken,
+        deleteLegacy: true,
+      });
+      await expect(
+        readFile(join(home, "daemons", ownerServerId, "local-credential"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(readFile(join(home, "local-credential"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("does not delete credentials replaced by a newer owner", async () => {
+    const home = await mkdtemp(join(tmpdir(), "paseo-local-owner-delete-"));
+    const serverId = "srv_rotating_owner";
+    try {
+      const oldToken = await writeLocalCredential(home, {
+        serverId,
+        mirrorLegacy: true,
+      });
+      const currentToken = await writeLocalCredential(home, {
+        serverId,
+        mirrorLegacy: true,
+      });
+
+      await deleteLocalCredential(home, {
+        serverId,
+        token: oldToken,
+        deleteLegacy: true,
+      });
+
+      await expect(
+        readFile(join(home, "daemons", serverId, "local-credential"), "utf8"),
+      ).resolves.toBe(`${currentToken}\n`);
+      await expect(readFile(join(home, "local-credential"), "utf8")).resolves.toBe(
+        `${currentToken}\n`,
+      );
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
 });

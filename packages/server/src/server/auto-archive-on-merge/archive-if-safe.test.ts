@@ -101,7 +101,9 @@ function createHarness(overrides?: {
     agentStorage: {} as AutoArchiveArchiveOptions["agentStorage"],
     terminalManager: {} as AutoArchiveArchiveOptions["terminalManager"],
     findWorkspaceIdForCwd: vi.fn(async () => "ws-auto-archive"),
+    assertCwdWorkspaceOwnedByThisServer: vi.fn(async () => undefined),
     listActiveWorkspaces: vi.fn(async () => []),
+    listAllActiveWorkspaces: vi.fn(async () => []),
     getAutoArchivedChangeRequestUrl: vi.fn(
       async () => overrides?.autoArchivedChangeRequestUrl ?? null,
     ),
@@ -310,7 +312,10 @@ function createRealOutcomeHarness(input: {
       const match = active.find((workspace) => workspace.cwd === cwd);
       return match?.workspaceId ?? null;
     },
+    assertCwdWorkspaceOwnedByThisServer: async () => undefined,
     listActiveWorkspaces: async () =>
+      active.filter((workspace) => !input.archivedWorkspaceIds.has(workspace.workspaceId)),
+    listAllActiveWorkspaces: async () =>
       active.filter((workspace) => !input.archivedWorkspaceIds.has(workspace.workspaceId)),
     getAutoArchivedChangeRequestUrl: async (workspaceId: string) =>
       autoArchivedChangeRequestUrls.get(workspaceId) ?? null,
@@ -444,6 +449,25 @@ describe("archiveIfSafe", () => {
       },
       "Auto-archived worktree after PR merge",
     );
+  });
+
+  test("passes the host ownership gate to workspace archiving", async () => {
+    const assertCwdWorkspaceOwnedByThisServer = vi.fn(async () => undefined);
+    const harness = createHarness({
+      archiveByScope: async (dependencies) => {
+        await dependencies.assertCwdWorkspaceOwnedByThisServer(CWD);
+        return {
+          archivedAgentIds: [],
+          archivedWorkspaceIds: ["ws-auto-archive"],
+          removedDirectory: false,
+        };
+      },
+    });
+    harness.options.assertCwdWorkspaceOwnedByThisServer = assertCwdWorkspaceOwnedByThisServer;
+
+    await runArchiveIfSafe(harness);
+
+    expect(assertCwdWorkspaceOwnedByThisServer).toHaveBeenCalledWith(CWD);
   });
 
   test("does not archive a merge event already consumed by this workspace", async () => {

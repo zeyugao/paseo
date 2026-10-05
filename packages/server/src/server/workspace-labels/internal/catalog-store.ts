@@ -1,8 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 import type { WorkspaceLabelDefinition } from "@getpaseo/protocol/workspace-labels";
 import { WorkspaceLabelDefinitionSchema } from "@getpaseo/protocol/messages";
 import { writeJsonFileAtomic } from "../../atomic-file.js";
+import { withReclaimLock } from "../../pid-lock.js";
 import type { PersistedWorkspaceRecord } from "../../workspace-registry.js";
 
 interface WorkspaceLabelCompoundRegistry {
@@ -13,10 +16,12 @@ interface WorkspaceLabelCompoundRegistry {
       result: TResult;
       forcePersist: boolean;
     };
+    beforeStage?: () => Promise<void>;
     beforeWorkspaceWrite: (records: readonly PersistedWorkspaceRecord[]) => Promise<void>;
     afterWorkspaceWrite: () => Promise<void>;
     afterCommit: () => void;
     publish?: boolean;
+    lockHeld?: boolean;
   }): Promise<TResult>;
 }
 
@@ -39,6 +44,8 @@ const WorkspaceLabelTransactionSchema = z.object({
   afterWorkspaces: z.array(WorkspaceLabelWorkspaceStateSchema),
 });
 
+const WORKSPACE_LABEL_TRANSACTION_FILE = /^workspace-labels\.transaction\..+\.json$/;
+
 type WorkspaceLabelTransaction = z.infer<typeof WorkspaceLabelTransactionSchema>;
 
 export class WorkspaceLabelStorageUncertainError extends Error {
@@ -54,11 +61,13 @@ export class WorkspaceLabelCatalogStore {
   private loaded = false;
   private initializing: Promise<void> | null = null;
   private labels: WorkspaceLabelDefinition[] = [];
+  private catalogMetadata: { mtimeMs: number; size: number } | null = null;
   private blocked = false;
+  private readonly lockPath: string;
 
   constructor(
     private readonly filePath: string,
-    private readonly transactionPath: string,
+    private readonly transactionDirectory: string,
     private readonly workspaces: WorkspaceLabelCompoundRegistry,
     private readonly writeCatalog: (
       filePath: string,
@@ -69,7 +78,9 @@ export class WorkspaceLabelCatalogStore {
       transaction: unknown,
     ) => Promise<void> = writeJsonFileAtomic,
     private readonly removeTransaction: (filePath: string) => Promise<void> = fs.rm,
-  ) {}
+  ) {
+    this.lockPath = join(transactionDirectory, ".labels.lock");
+  }
 
   async initialize(): Promise<void> {
     if (this.loaded) return;
@@ -83,6 +94,19 @@ export class WorkspaceLabelCatalogStore {
 
   async list(): Promise<WorkspaceLabelDefinition[]> {
     await this.initialize();
+    const metadata = await fs.stat(this.filePath).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (
+      (metadata === null && this.catalogMetadata !== null) ||
+      (metadata !== null &&
+        (!this.catalogMetadata ||
+          metadata.mtimeMs !== this.catalogMetadata.mtimeMs ||
+          metadata.size !== this.catalogMetadata.size))
+    ) {
+      this.labels = await this.readCatalog();
+    }
     return this.labels.map((label) => ({ ...label }));
   }
 
@@ -93,12 +117,27 @@ export class WorkspaceLabelCatalogStore {
     ) => WorkspaceLabelMutation<TResult>,
   ): Promise<TResult> {
     await this.initialize();
-    if (this.blocked) throw new WorkspaceLabelStorageUncertainError();
+    return this.commitLocked(planner);
+  }
 
+  private async commitLocked<TResult>(
+    planner: (
+      labels: readonly WorkspaceLabelDefinition[],
+      workspaces: ReadonlyMap<string, PersistedWorkspaceRecord>,
+    ) => WorkspaceLabelMutation<TResult>,
+  ): Promise<TResult> {
+    if (this.blocked) throw new WorkspaceLabelStorageUncertainError();
     let mutation!: WorkspaceLabelMutation<TResult>;
+    const transactionPath = join(
+      this.transactionDirectory,
+      `workspace-labels.transaction.${randomUUID()}.json`,
+    );
     let transaction: WorkspaceLabelTransaction | null = null;
     const result = await this.workspaces
       .commitWorkspaceLabelMutation({
+        beforeStage: async () => {
+          this.labels = await this.readCatalog();
+        },
         stage: (workspaces) => {
           mutation = planner(this.labels, workspaces);
           transaction = transactionFor(this.labels, mutation, workspaces);
@@ -111,30 +150,30 @@ export class WorkspaceLabelCatalogStore {
         },
         beforeWorkspaceWrite: async () => {
           if (!transaction) throw new Error("Workspace label transaction was not staged");
-          await this.writeTransaction(this.transactionPath, transaction);
+          await this.writeTransaction(transactionPath, transaction);
           await this.writeCatalog(this.filePath, transaction.afterLabels);
         },
         afterWorkspaceWrite: async () => {
           if (!transaction) throw new Error("Workspace label transaction was not staged");
           transaction = { ...transaction, phase: "committed" };
-          await this.writeTransaction(this.transactionPath, transaction);
+          await this.writeTransaction(transactionPath, transaction);
         },
         afterCommit: () => {
           this.labels = [...mutation.labels];
         },
       })
       .catch(async (error: unknown) => {
-        await this.resolveFailedCommit(error);
+        await this.resolveFailedCommit(error, transactionPath);
       });
 
-    await this.removeTransaction(this.transactionPath).catch(() => undefined);
+    await this.removeTransaction(transactionPath).catch(() => undefined);
     return result as TResult;
   }
 
-  private async resolveFailedCommit(error: unknown): Promise<never> {
+  private async resolveFailedCommit(error: unknown, transactionPath: string): Promise<never> {
     let durable: WorkspaceLabelTransaction | null;
     try {
-      durable = await this.readTransaction();
+      durable = await this.readTransaction(transactionPath);
     } catch {
       this.blockUntilRestart();
     }
@@ -143,7 +182,7 @@ export class WorkspaceLabelCatalogStore {
       this.blockUntilRestart();
     }
     try {
-      await this.recover(durable);
+      await this.recover(durable, transactionPath);
     } catch {
       this.blockUntilRestart();
     }
@@ -157,67 +196,206 @@ export class WorkspaceLabelCatalogStore {
   }
 
   private async loadAndRecover(): Promise<void> {
-    const transaction = await this.readTransaction();
-    if (transaction) {
-      await this.recover(transaction);
-      this.loaded = true;
-      return;
-    }
-    this.labels = await this.readCatalog();
+    // Recovery replays or rolls back prepared transactions; it must hold the same
+    // cross-daemon lock as commits so it never observes a half-written compound
+    // commit from another daemon sharing PASEO_HOME.
+    await withReclaimLock(this.lockPath, async () => {
+      for (const transactionPath of await this.listTransactionPaths()) {
+        await this.recover(await this.requireTransaction(transactionPath), transactionPath);
+      }
+      this.labels = await this.readCatalog();
+    });
     this.loaded = true;
   }
 
-  private async readCatalog(): Promise<WorkspaceLabelDefinition[]> {
+  private async listTransactionPaths(): Promise<string[]> {
     try {
-      const raw = await fs.readFile(this.filePath, "utf8");
-      return z.array(WorkspaceLabelDefinitionSchema).parse(JSON.parse(raw));
+      const entries = await fs.readdir(this.transactionDirectory, { withFileTypes: true });
+      return entries
+        .filter((entry) => entry.isFile() && WORKSPACE_LABEL_TRANSACTION_FILE.test(entry.name))
+        .map((entry) => join(this.transactionDirectory, entry.name))
+        .sort();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
     }
   }
 
-  private async readTransaction(): Promise<WorkspaceLabelTransaction | null> {
+  private async readCatalog(): Promise<WorkspaceLabelDefinition[]> {
     try {
-      return await this.requireTransaction();
+      const metadata = await fs.stat(this.filePath);
+      const raw = await fs.readFile(this.filePath, "utf8");
+      this.catalogMetadata = { mtimeMs: metadata.mtimeMs, size: metadata.size };
+      return z.array(WorkspaceLabelDefinitionSchema).parse(JSON.parse(raw));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        this.catalogMetadata = null;
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  private async readTransaction(
+    transactionPath: string,
+  ): Promise<WorkspaceLabelTransaction | null> {
+    try {
+      return await this.requireTransaction(transactionPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
   }
 
-  private async requireTransaction(): Promise<WorkspaceLabelTransaction> {
-    const raw = await fs.readFile(this.transactionPath, "utf8");
+  private async requireTransaction(transactionPath: string): Promise<WorkspaceLabelTransaction> {
+    const raw = await fs.readFile(transactionPath, "utf8");
     return WorkspaceLabelTransactionSchema.parse(JSON.parse(raw));
   }
 
-  private async recover(transaction: WorkspaceLabelTransaction): Promise<void> {
+  private async recover(
+    transaction: WorkspaceLabelTransaction,
+    transactionPath: string,
+  ): Promise<void> {
     if (transaction.phase === "committed") {
       // The marker exists only after both data files are durable. It is cleanup state, never an
       // instruction to replay stale after-images over newer workspace mutations.
       this.labels = await this.readCatalog();
-      await this.removeTransaction(this.transactionPath).catch(() => undefined);
+      await this.removeTransaction(transactionPath).catch(() => undefined);
       return;
     }
-    const labels = transaction.beforeLabels;
-    const workspaceStates = transaction.beforeWorkspaces;
+
+    const currentLabels = await this.readCatalog();
+    const labels = planCatalogRollback(currentLabels, transaction);
+    if (!labels) {
+      await this.abandonPreparedRecovery(transactionPath, "label catalog changed");
+      return;
+    }
+
+    let workspaceConflict = false;
     await this.workspaces.commitWorkspaceLabelMutation({
-      stage: (workspaces) => ({
-        updates: workspaceStates.flatMap((state) => {
-          const current = workspaces.get(state.workspaceId);
-          return current ? [{ ...current, labels: state.labels, updatedAt: state.updatedAt }] : [];
-        }),
-        result: undefined,
-        forcePersist: true,
-      }),
+      stage: (workspaces) => {
+        const updates: PersistedWorkspaceRecord[] = [];
+        for (const before of transaction.beforeWorkspaces) {
+          const current = workspaces.get(before.workspaceId);
+          if (!current) {
+            workspaceConflict = true;
+            break;
+          }
+          if (workspaceMatchesState(current, before)) {
+            updates.push({ ...current, labels: before.labels, updatedAt: before.updatedAt });
+            continue;
+          }
+          const after = transaction.afterWorkspaces.find(
+            (state) => state.workspaceId === before.workspaceId,
+          );
+          if (!after || !workspaceMatchesState(current, after)) {
+            workspaceConflict = true;
+            break;
+          }
+          updates.push({ ...current, labels: before.labels, updatedAt: before.updatedAt });
+        }
+        return {
+          updates: workspaceConflict ? [] : updates,
+          result: undefined,
+          forcePersist: !workspaceConflict && !catalogsEqual(currentLabels, labels),
+        };
+      },
       beforeWorkspaceWrite: () => this.writeCatalog(this.filePath, labels),
-      afterWorkspaceWrite: () => this.removeTransaction(this.transactionPath),
+      afterWorkspaceWrite: async () => undefined,
       afterCommit: () => {
         this.labels = [...labels];
       },
       publish: false,
+      lockHeld: true,
     });
+
+    if (workspaceConflict) {
+      await this.abandonPreparedRecovery(transactionPath, "workspace state changed");
+      return;
+    }
+    await this.removeTransaction(transactionPath);
   }
+
+  private async abandonPreparedRecovery(transactionPath: string, reason: string): Promise<void> {
+    console.warn(`Abandoning prepared workspace-label transaction (${reason}): ${transactionPath}`);
+    await this.removeTransaction(transactionPath);
+  }
+}
+
+function workspaceMatchesState(
+  workspace: PersistedWorkspaceRecord,
+  state: z.infer<typeof WorkspaceLabelWorkspaceStateSchema>,
+): boolean {
+  const labelsMatch =
+    workspace.labels === undefined || state.labels === undefined
+      ? workspace.labels === state.labels
+      : workspace.labels.length === state.labels.length &&
+        workspace.labels.every((value, index) => value === state.labels?.[index]);
+  return workspace.updatedAt === state.updatedAt && labelsMatch;
+}
+
+function planCatalogRollback(
+  current: readonly WorkspaceLabelDefinition[],
+  transaction: WorkspaceLabelTransaction,
+): WorkspaceLabelDefinition[] | null {
+  const before = transaction.beforeLabels;
+  const after = transaction.afterLabels;
+  if (catalogsEqual(current, before)) return before.map((label) => ({ ...label }));
+
+  let prefixLength = 0;
+  while (
+    prefixLength < before.length &&
+    prefixLength < after.length &&
+    labelsEqual(before[prefixLength], after[prefixLength])
+  ) {
+    prefixLength += 1;
+  }
+
+  let suffixLength = 0;
+  while (
+    suffixLength < before.length - prefixLength &&
+    suffixLength < after.length - prefixLength &&
+    labelsEqual(before[before.length - suffixLength - 1], after[after.length - suffixLength - 1])
+  ) {
+    suffixLength += 1;
+  }
+
+  const beforeChange = before.slice(prefixLength, before.length - suffixLength);
+  const afterChange = after.slice(prefixLength, after.length - suffixLength);
+  const currentMatchesBefore = beforeChange.every((label, index) =>
+    labelsEqual(current[prefixLength + index], label),
+  );
+  if (beforeChange.length > 0 && currentMatchesBefore) {
+    return current.map((label) => ({ ...label }));
+  }
+  const currentMatchesAfter = afterChange.every((label, index) =>
+    labelsEqual(current[prefixLength + index], label),
+  );
+  if (!currentMatchesAfter) {
+    // The transaction's after-image is not in the catalog, but an appended
+    // label (beforeChange empty) may still be present when another daemon
+    // concurrently changed a different region — removing just our addition
+    // is safe; otherwise the outcome is indeterminate.
+    if (beforeChange.length === 0 && afterChange.length > 0) {
+      return [
+        ...current.slice(0, prefixLength),
+        ...current.slice(prefixLength + afterChange.length),
+      ];
+    }
+    return beforeChange.length === 0 ? current.map((label) => ({ ...label })) : null;
+  }
+  return [
+    ...current.slice(0, prefixLength),
+    ...beforeChange,
+    ...current.slice(prefixLength + afterChange.length),
+  ];
+}
+
+function labelsEqual(
+  left: WorkspaceLabelDefinition | undefined,
+  right: WorkspaceLabelDefinition | undefined,
+): boolean {
+  return left?.name === right?.name && left?.color === right?.color;
 }
 
 function transactionFor<TResult>(

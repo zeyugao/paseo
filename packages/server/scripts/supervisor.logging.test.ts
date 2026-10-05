@@ -147,6 +147,22 @@ describe("supervisor durable logging", () => {
     });
   });
 
+  test("uses the env serverId in the default log filename", () => {
+    const paseoHome = path.join(path.sep, "tmp", "paseo-home");
+    const logFile = resolveSupervisorLogFile(
+      paseoHome,
+      {},
+      {
+        PASEO_SERVER_ID: "srv_machine_a",
+      },
+    );
+
+    expect(logFile).toEqual({
+      path: path.join(paseoHome, "daemon.srv_machine_a.log"),
+      rotate: { maxSize: "10m", maxFiles: 3 },
+    });
+  });
+
   test("lets persisted rotation override env rotation defaults", () => {
     const paseoHome = path.join(path.sep, "tmp", "paseo-home");
     const logFile = resolveSupervisorLogFile(

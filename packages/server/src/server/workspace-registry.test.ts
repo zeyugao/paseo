@@ -15,6 +15,7 @@ import { beforeEach, afterEach, describe, expect, test } from "vitest";
 import { createTestLogger } from "../test-utils/test-logger.js";
 import { writeJsonFileAtomic } from "./atomic-file.js";
 import {
+  assertCwdWorkspaceOwnedByThisServer,
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
   FileBackedProjectRegistry,
@@ -497,6 +498,7 @@ describe("workspace registries", () => {
         cwd: "/tmp/repo",
         kind: "local_checkout",
         displayName: "main",
+        hostId: "srv-a",
         createdAt: "2026-03-01T00:00:00.000Z",
         updatedAt: "2026-03-01T00:00:00.000Z",
       }),
@@ -509,19 +511,59 @@ describe("workspace registries", () => {
         cwd: "/tmp/repo",
         kind: "local_checkout",
         displayName: "feature/workspace",
+        hostId: "srv-a",
         createdAt: "2026-03-01T00:00:00.000Z",
         updatedAt: "2026-03-02T00:00:00.000Z",
       }),
     );
+    await workspaceRegistry.update("/tmp/repo", (record) => ({
+      ...record,
+      hostId: undefined,
+      displayName: "feature/workspace",
+    }));
     await workspaceRegistry.archive("/tmp/repo", "2026-03-03T00:00:00.000Z");
 
     const archived = await workspaceRegistry.get("/tmp/repo");
-    expect(archived?.displayName).toBe("feature/workspace");
-    expect(archived?.archivedAt).toBe("2026-03-03T00:00:00.000Z");
+    expect(archived).toMatchObject({
+      displayName: "feature/workspace",
+      archivedAt: "2026-03-03T00:00:00.000Z",
+      hostId: "srv-a",
+    });
 
     await workspaceRegistry.remove("/tmp/repo");
     expect(await workspaceRegistry.get("/tmp/repo")).toBeNull();
     expect(await workspaceRegistry.list()).toEqual([]);
+  });
+
+  test("reloads project and workspace records after an external file write", async () => {
+    await projectRegistry.initialize();
+    await workspaceRegistry.initialize();
+    const projectsPath = path.join(tmpDir, "projects", "projects.json");
+    const workspacesPath = path.join(tmpDir, "projects", "workspaces.json");
+    mkdirSync(path.dirname(projectsPath), { recursive: true });
+    const project = createPersistedProjectRecord({
+      projectId: "external-project",
+      rootPath: "/tmp/external-project",
+      kind: "non_git",
+      displayName: "external-project",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+    const workspace = createPersistedWorkspaceRecord({
+      workspaceId: "external-workspace",
+      projectId: project.projectId,
+      cwd: project.rootPath,
+      kind: "directory",
+      displayName: "external-workspace",
+      hostId: "srv-other",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+    writeFileSync(projectsPath, JSON.stringify([project]));
+    writeFileSync(workspacesPath, JSON.stringify([workspace]));
+
+    await expect(projectRegistry.get(project.projectId)).resolves.toEqual(project);
+    await expect(workspaceRegistry.list()).resolves.toEqual([workspace]);
   });
 
   test("refreshes workspace archive timestamps when an archive is repeated", async () => {
@@ -613,4 +655,59 @@ describe("workspace registries", () => {
       pinnedAt: "2026-03-03T00:00:00.000Z",
     });
   });
+  test.skipIf(process.platform === "win32")(
+    "rejects a symlinked path that resolves inside a foreign workspace",
+    async () => {
+      const foreignRoot = path.join(tmpDir, "foreign-root");
+      const symlinkRoot = path.join(tmpDir, "symlink-root");
+      const target = path.join(symlinkRoot, "nested");
+      mkdirSync(path.join(foreignRoot, "nested"), { recursive: true });
+      symlinkSync(foreignRoot, symlinkRoot, "dir");
+      const foreignWorkspace = createPersistedWorkspaceRecord({
+        workspaceId: "ws-foreign",
+        projectId: "proj-foreign",
+        cwd: foreignRoot,
+        kind: "local_checkout",
+        displayName: "foreign",
+        hostId: "srv-other",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      });
+
+      await expect(
+        assertCwdWorkspaceOwnedByThisServer(
+          target,
+          { list: async () => [foreignWorkspace] },
+          "srv-local",
+        ),
+      ).rejects.toThrow("owned by host srv-other");
+    },
+  );
+  test.skipIf(process.platform === "win32")(
+    "rejects a nonexistent path beneath a symlink into a foreign workspace",
+    async () => {
+      const foreignRoot = path.join(tmpDir, "foreign-nonexistent-root");
+      const symlinkRoot = path.join(tmpDir, "symlink-nonexistent-root");
+      mkdirSync(foreignRoot);
+      symlinkSync(foreignRoot, symlinkRoot, "dir");
+      const foreignWorkspace = createPersistedWorkspaceRecord({
+        workspaceId: "ws-foreign-nonexistent",
+        projectId: "proj-foreign",
+        cwd: foreignRoot,
+        kind: "local_checkout",
+        displayName: "foreign",
+        hostId: "srv-other",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      });
+
+      await expect(
+        assertCwdWorkspaceOwnedByThisServer(
+          path.join(symlinkRoot, "not-created", "child"),
+          { list: async () => [foreignWorkspace] },
+          "srv-local",
+        ),
+      ).rejects.toThrow("owned by host srv-other");
+    },
+  );
 });

@@ -152,6 +152,8 @@ import {
 } from "./workspace-registry-model.js";
 import { resolveWorkspaceIdForPath } from "./resolve-workspace-id-for-path.js";
 import {
+  assertCwdWorkspaceOwnedByThisServer as assertCwdWorkspaceOwnedByServer,
+  isWorkspaceVisibleToServer,
   resolveProjectDisplayName,
   resolveWorkspaceDisplayName,
   resolveWorkspaceName,
@@ -197,7 +199,10 @@ import {
   archiveWorkspaceContents,
 } from "./workspace-archive-service.js";
 import type { ServiceProxySubsystem } from "./service-proxy.js";
-import { renameCurrentBranch as renameCurrentBranchDefault } from "../utils/checkout-git.js";
+import {
+  getMergeToBaseWorktreePath,
+  renameCurrentBranch as renameCurrentBranchDefault,
+} from "../utils/checkout-git.js";
 import {
   createGitMutationService,
   type GitMutationService,
@@ -718,6 +723,7 @@ export class Session {
     | null;
   private readonly sessionLogger: pino.Logger;
   private readonly paseoHome: string;
+  private readonly serverId: string | undefined;
   private readonly projectIcons: ProjectIconReader;
   private readonly worktreesRoot: string | undefined;
   private readonly rewindInitiators = new Map<string, object | undefined>();
@@ -874,6 +880,7 @@ export class Session {
     this.onWorkspaceRecovered = onWorkspaceRecovered ?? null;
     this.pushNotifications = pushNotifications;
     this.paseoHome = paseoHome;
+    this.serverId = serverId;
     this.messageReceipts = options.messageReceipts;
     this.creationService = options.creationService;
     this.projectIcons = new ProjectIconReader(paseoHome);
@@ -935,6 +942,13 @@ export class Session {
         emitWorkspaceUpdateForCwd: (cwd) => this.emitWorkspaceUpdateForCwd(cwd),
         handleWorkspaceGitBranchSnapshot: (cwd, branchName) =>
           this.workspaceGitObserver.handleBranchSnapshot(cwd, branchName),
+        assertMergeToBaseTargetOwned: async (cwd, baseRef) => {
+          const baseWorktree = await getMergeToBaseWorktreePath(cwd, baseRef);
+          if (!baseWorktree) {
+            throw new Error(`Unable to resolve the merge target worktree for ${baseRef}`);
+          }
+          await this.assertCwdWorkspaceOwnedByThisServer(baseWorktree);
+        },
         renameCurrentBranch: (cwd, branch) => this.renameCurrentBranch(cwd, branch),
       },
       gitMutation: this.gitMutation,
@@ -1064,7 +1078,10 @@ export class Session {
       listProviderAvailability: () => this.agentManager.listProviderAvailability(),
       listAgents: () => this.agentManager.listAgents(),
       listProjects: () => this.projectRegistry.list(),
-      listWorkspaces: () => this.workspaceRegistry.list(),
+      listWorkspaces: async () =>
+        (await this.workspaceRegistry.list()).filter((workspace) =>
+          isWorkspaceVisibleToServer(workspace, this.serverId),
+        ),
       logger: this.sessionLogger,
       hubRelationships: options.hubRelationships,
       reloadConfig: () => daemonConfigStore.reload(),
@@ -1098,6 +1115,9 @@ export class Session {
       projectStored: (record) => this.buildStoredAgentPayload(record),
       isProviderVisible: (provider) => this.isProviderVisibleToClient(provider),
       isStoredProviderAvailable: (record) =>
+        // Foreign records are read-only views of another host's agent; their
+        // visibility must not require this host to have the provider installed.
+        (record.hostId !== undefined && record.hostId !== this.serverId) ||
         isStoredAgentProviderAvailable(
           record,
           new Set(this.providerSnapshotManager.listRegisteredProviderIds()),
@@ -1136,6 +1156,7 @@ export class Session {
       archiveAgentForClose: (agentId) => this.archiveAgentForClose(agentId),
       findWorkspaceIdForCwd: (cwd) => this.findWorkspaceIdForCwd(cwd),
       listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
+      listAllActiveWorkspaces: () => this.listAllActiveWorkspaceRefs(),
       archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
       emit: (message) => this.emit(message),
       emitAgentRemove: (agentId) => this.agentUpdates.removeAgent(agentId),
@@ -1146,6 +1167,7 @@ export class Session {
       clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
       killTerminalsForWorkspace: (workspaceId) =>
         this.terminalController.killTerminalsForWorkspace(workspaceId),
+      assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThisServer(cwd),
       logger: this.sessionLogger,
     });
     this.providerSnapshotManager = providerSnapshotManager;
@@ -1181,9 +1203,13 @@ export class Session {
     });
     this.workspaceDirectory = new WorkspaceDirectory({
       logger: this.sessionLogger,
+      serverId,
       projectRegistry: this.projectRegistry,
       workspaceRegistry: this.workspaceRegistry,
       listAgentPayloads: () => this.listAgentPayloads({ includeBackground: true }),
+      resolveAgentHostId: async (agentId) =>
+        this.agentManager.getAgent(agentId)?.hostId ??
+        (await this.agentStorage.get(agentId))?.hostId,
       listProviderSubagentActivity: async () => this.agentManager.listProviderSubagentActivity(),
       listTerminalActivityContributions: () => this.listTerminalActivityContributions(),
       isProviderVisibleToClient: (provider) => this.isProviderVisibleToClient(provider),
@@ -2836,7 +2862,9 @@ export class Session {
       case "read_project_config_request":
         return this.projectConfigSession.handleReadProjectConfigRequest(msg);
       case "write_project_config_request":
-        return this.projectConfigSession.handleWriteProjectConfigRequest(msg);
+        return this.dispatchCwdWorkspaceMutation(msg.repoRoot, () =>
+          this.projectConfigSession.handleWriteProjectConfigRequest(msg),
+        );
       default:
         return undefined;
     }
@@ -2864,30 +2892,52 @@ export class Session {
       case "unsubscribe_checkout_diff_request":
         return this.checkoutSession.handleUnsubscribeDiffRequest(msg, this.delivery);
       case "checkout_switch_branch_request":
-        return this.checkoutSession.handleCheckoutSwitchBranchRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleCheckoutSwitchBranchRequest(msg),
+        );
       case "checkout.rename_branch.request":
-        return this.checkoutSession.handleCheckoutRenameBranchRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleCheckoutRenameBranchRequest(msg),
+        );
       case "checkout_commit_request":
-        return this.checkoutSession.handleCheckoutCommitRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleCheckoutCommitRequest(msg),
+        );
       case "checkout_merge_request":
-        return this.checkoutSession.handleCheckoutMergeRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleCheckoutMergeRequest(msg),
+        );
       case "checkout_merge_from_base_request":
-        return this.checkoutSession.handleCheckoutMergeFromBaseRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleCheckoutMergeFromBaseRequest(msg),
+        );
       case "checkout_pull_request":
-        return this.checkoutSession.handleCheckoutPullRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleCheckoutPullRequest(msg),
+        );
       case "checkout_push_request":
-        return this.checkoutSession.handleCheckoutPushRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleCheckoutPushRequest(msg),
+        );
       case "checkout.refresh.request":
         return this.checkoutSession.handleRefreshRequest(msg);
       case "checkout.discard_changes.request":
-        return this.checkoutSession.handleCheckoutDiscardChangesRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleCheckoutDiscardChangesRequest(msg),
+        );
       case "checkout_pr_create_request":
-        return this.checkoutSession.handleCheckoutPrCreateRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleCheckoutPrCreateRequest(msg),
+        );
       case "checkout_pr_merge_request":
-        return this.checkoutSession.handleCheckoutPrMergeRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleCheckoutPrMergeRequest(msg),
+        );
       case "checkout.forge.set_auto_merge.request":
       case "checkout.github.set_auto_merge.request":
-        return this.checkoutSession.handleCheckoutForgeSetAutoMergeRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleCheckoutForgeSetAutoMergeRequest(msg),
+        );
       case "checkout.forge.get_check_details.request":
       case "checkout.github.get_check_details.request":
         return this.checkoutSession.handleCheckoutForgeGetCheckDetailsRequest(msg);
@@ -2899,14 +2949,36 @@ export class Session {
       case "github_search_request":
         return this.checkoutSession.handleForgeSearchRequest(msg);
       case "stash_save_request":
-        return this.checkoutSession.handleStashSaveRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleStashSaveRequest(msg),
+        );
       case "stash_pop_request":
-        return this.checkoutSession.handleStashPopRequest(msg);
+        return this.dispatchCheckoutMutation(msg.cwd, () =>
+          this.checkoutSession.handleStashPopRequest(msg),
+        );
       case "stash_list_request":
         return this.checkoutSession.handleStashListRequest(msg);
       default:
         return undefined;
     }
+  }
+
+  private async dispatchCwdWorkspaceMutation(
+    cwd: string,
+    mutate: () => Promise<void>,
+  ): Promise<void> {
+    await this.assertCwdWorkspaceOwnedByThisServer(cwd);
+    await mutate();
+  }
+
+  private dispatchCheckoutMutation(cwd: string, mutate: () => Promise<void>): Promise<void> {
+    return this.dispatchCwdWorkspaceMutation(cwd, mutate);
+  }
+
+  // Workspace-file mutations carry the workspace root as cwd. Reads,
+  // subscriptions, and staged uploads (no cwd) stay ungated.
+  private dispatchWorkspaceFileMutation(cwd: string, mutate: () => Promise<void>): Promise<void> {
+    return this.dispatchCwdWorkspaceMutation(cwd, mutate);
   }
 
   private dispatchWorkspaceAndProjectMessage(
@@ -2990,15 +3062,25 @@ export class Session {
       case "fs.file.unsubscribe.request":
         return this.workspaceFilesSession.handleFileUnsubscribeRequest(msg, this.delivery);
       case "fs.file.write.request":
-        return this.workspaceFilesSession.handleFileWriteRequest(msg);
+        return this.dispatchWorkspaceFileMutation(msg.cwd, () =>
+          this.workspaceFilesSession.handleFileWriteRequest(msg),
+        );
       case "fs.entry.create.request":
-        return this.workspaceFilesSession.handleFileEntryCreateRequest(msg);
+        return this.dispatchWorkspaceFileMutation(msg.cwd, () =>
+          this.workspaceFilesSession.handleFileEntryCreateRequest(msg),
+        );
       case "fs.entry.rename.request":
-        return this.workspaceFilesSession.handleFileEntryRenameRequest(msg);
+        return this.dispatchWorkspaceFileMutation(msg.cwd, () =>
+          this.workspaceFilesSession.handleFileEntryRenameRequest(msg),
+        );
       case "fs.entry.duplicate.request":
-        return this.workspaceFilesSession.handleFileEntryDuplicateRequest(msg);
+        return this.dispatchWorkspaceFileMutation(msg.cwd, () =>
+          this.workspaceFilesSession.handleFileEntryDuplicateRequest(msg),
+        );
       case "fs.entry.delete.request":
-        return this.workspaceFilesSession.handleFileEntryDeleteRequest(msg);
+        return this.dispatchWorkspaceFileMutation(msg.cwd, () =>
+          this.workspaceFilesSession.handleFileEntryDeleteRequest(msg),
+        );
       case "project_icon_request":
         return this.workspaceFilesSession.handleProjectIconRequest(msg);
       case "project.icon.get.request":
@@ -3190,6 +3272,7 @@ export class Session {
   }
 
   private async handleDeleteAgentRequest(agentId: string, requestId: string): Promise<void> {
+    await this.agentManager.assertAgentMutable(agentId);
     this.sessionLogger.info({ agentId }, `Deleting agent ${agentId} from registry`);
 
     const knownWorkspaceId =
@@ -3621,6 +3704,9 @@ export class Session {
       const projectWorkspaces = (await this.workspaceRegistry.list()).filter(
         (workspace) => workspace.projectId === resolvedProjectId,
       );
+      for (const workspace of projectWorkspaces) {
+        this.assertWorkspaceOwnedByThisServer(workspace);
+      }
       const activeWorkspaceIds = projectWorkspaces
         .filter((workspace) => !workspace.archivedAt)
         .map((workspace) => workspace.workspaceId);
@@ -3719,11 +3805,15 @@ export class Session {
     );
 
     try {
+      const existing = await this.workspaceRegistry.get(workspaceId);
+      if (existing) {
+        this.assertWorkspaceOwnedByThisServer(existing);
+      }
       const trimmed = title?.trim() ?? "";
       const nextTitle = trimmed.length === 0 ? null : trimmed;
       const updatedAt = new Date().toISOString();
-      const updated = await this.workspaceRegistry.update(workspaceId, (existing) => ({
-        ...existing,
+      const updated = await this.workspaceRegistry.update(workspaceId, (record) => ({
+        ...record,
         title: nextTitle,
         updatedAt,
       }));
@@ -3795,10 +3885,14 @@ export class Session {
     };
 
     try {
+      const existing = await this.workspaceRegistry.get(workspaceId);
+      if (existing) {
+        this.assertWorkspaceOwnedByThisServer(existing);
+      }
       const nextPinnedAt = pinned ? new Date().toISOString() : null;
       const updatedAt = new Date().toISOString();
-      const updated = await this.workspaceRegistry.update(workspaceId, (existing) => ({
-        ...existing,
+      const updated = await this.workspaceRegistry.update(workspaceId, (record) => ({
+        ...record,
         pinnedAt: nextPinnedAt,
         updatedAt,
       }));
@@ -3843,6 +3937,10 @@ export class Session {
     request: Extract<SessionInboundMessage, { type: "workspace.recovery.restore.request" }>,
   ): Promise<void> {
     try {
+      const existing = await this.workspaceRegistry.get(request.workspaceId);
+      if (existing) {
+        this.assertWorkspaceOwnedByThisServer(existing);
+      }
       await this.restoreWorkspaceAndEmit(request.workspaceId);
       this.emit({
         type: "workspace.recovery.restore.response",
@@ -4409,6 +4507,9 @@ export class Session {
     if (request.callerAgentId && !callerAgent) {
       throw new Error(`Caller agent ${request.callerAgentId} not found`);
     }
+    if (request.callerAgentId) {
+      await this.agentManager.assertAgentMutable(request.callerAgentId);
+    }
 
     let config = request.config;
 
@@ -4426,18 +4527,22 @@ export class Session {
         if (!workspace || workspace.archivedAt) {
           throw new Error(`Workspace ${workspaceId} not found`);
         }
+        this.assertWorkspaceOwnedByThisServer(workspace);
         return { workspaceId, cwd: workspace.cwd };
       },
-      createWorkspace: async () => ({
-        workspaceId: await this.workspaceProvisioning.resolveOrCreateWorkspaceIdForCreateAgent({
-          createdWorktree: null,
+      createWorkspace: async () => {
+        await this.assertCwdWorkspaceOwnedByThisServer(config.cwd);
+        return {
+          workspaceId: await this.workspaceProvisioning.resolveOrCreateWorkspaceIdForCreateAgent({
+            createdWorktree: null,
+            cwd: config.cwd,
+            initialTitle: input.workspacePromptTitle,
+            background: request.background,
+            callerWorkspaceId: callerAgent?.workspaceId,
+          }),
           cwd: config.cwd,
-          initialTitle: input.workspacePromptTitle,
-          background: request.background,
-          callerWorkspaceId: callerAgent?.workspaceId,
-        }),
-        cwd: config.cwd,
-      }),
+        };
+      },
     });
     config = { ...config, cwd: intent.cwd };
 
@@ -4482,12 +4587,19 @@ export class Session {
     );
     try {
       const matched = await this.unarchiveAgentByHandle(handle);
-      const effectiveOverrides = matched
-        ? { ...buildConfigOverrides(matched.record), ...overrides }
-        : overrides;
+      if (!matched) {
+        throw new Error(
+          `Unable to resume agent: no stored agent for persistence handle ${handle.sessionId}`,
+        );
+      }
+      const effectiveOverrides = { ...buildConfigOverrides(matched.record), ...overrides };
       let snapshot: ManagedAgent;
       try {
-        snapshot = await this.agentManager.resumeAgentFromPersistence(handle, effectiveOverrides);
+        snapshot = await this.agentManager.resumeAgentFromPersistence(
+          handle,
+          effectiveOverrides,
+          matched.record.id,
+        );
       } catch (error) {
         if (matched?.didUnarchive && matched.originalArchivedAt) {
           await this.agentManager.archiveSnapshot(matched.record.id, matched.originalArchivedAt);
@@ -4874,9 +4986,14 @@ export class Session {
             ...serviceOptions,
             setupContinuation: this.agentWorktreeSetupContinuation(),
           }),
-        checkoutExistingBranch: (cwd, branch) =>
-          this.gitMutation.checkoutExistingBranch(cwd, branch),
-        createBranchFromBase: (params) => this.gitMutation.createBranchFromBase(params),
+        checkoutExistingBranch: async (cwd, branch) => {
+          await this.assertCwdWorkspaceOwnedByThisServer(cwd);
+          return this.gitMutation.checkoutExistingBranch(cwd, branch);
+        },
+        createBranchFromBase: async (params) => {
+          await this.assertCwdWorkspaceOwnedByThisServer(params.cwd);
+          return this.gitMutation.createBranchFromBase(params);
+        },
       },
       config,
       gitOptions,
@@ -5193,12 +5310,14 @@ export class Session {
       {
         paseoHome: this.paseoHome,
         paseoWorktreesBaseRoot: this.worktreesRoot,
+        assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThisServer(cwd),
         github: this.github,
         workspaceGitService: this.workspaceGitService,
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         findWorkspaceIdForCwd: (cwd) => this.findWorkspaceIdForCwd(cwd),
         listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
+        listAllActiveWorkspaces: () => this.listAllActiveWorkspaceRefs(),
         archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
         emit: (message) => this.emit(message),
         emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
@@ -5944,9 +6063,8 @@ export class Session {
     return result;
   }
 
-  private async listActiveWorkspaceRefs(): Promise<ActiveWorkspaceRef[]> {
-    const workspaces = await this.workspaceRegistry.list();
-    return workspaces
+  private async listAllActiveWorkspaceRefs(): Promise<ActiveWorkspaceRef[]> {
+    return (await this.workspaceRegistry.list())
       .filter((workspace) => !workspace.archivedAt)
       .map((workspace) => ({
         workspaceId: workspace.workspaceId,
@@ -5956,6 +6074,33 @@ export class Session {
         isPaseoOwnedWorktree: workspace.isPaseoOwnedWorktree,
         mainRepoRoot: workspace.mainRepoRoot,
       }));
+  }
+
+  private async listActiveWorkspaceRefs(): Promise<ActiveWorkspaceRef[]> {
+    const workspaces = await this.workspaceRegistry.list();
+    return workspaces
+      .filter((workspace) => isWorkspaceVisibleToServer(workspace, this.serverId))
+      .filter((workspace) => !workspace.archivedAt)
+      .map((workspace) => ({
+        workspaceId: workspace.workspaceId,
+        cwd: workspace.cwd,
+        kind: workspace.kind,
+        worktreeRoot: workspace.worktreeRoot,
+        isPaseoOwnedWorktree: workspace.isPaseoOwnedWorktree,
+        mainRepoRoot: workspace.mainRepoRoot,
+      }));
+  }
+
+  private async assertCwdWorkspaceOwnedByThisServer(cwd: string): Promise<void> {
+    await assertCwdWorkspaceOwnedByServer(cwd, this.workspaceRegistry, this.serverId);
+  }
+
+  // Mutation requests addressed by workspaceId are rejected for workspaces owned by
+  // another host sharing PASEO_HOME; legacy workspaces (no hostId) stay mutable.
+  private assertWorkspaceOwnedByThisServer(workspace: PersistedWorkspaceRecord): void {
+    if (!isWorkspaceVisibleToServer(workspace, this.serverId)) {
+      throw new Error(`Workspace ${workspace.workspaceId} is owned by host ${workspace.hostId}`);
+    }
   }
 
   private async archiveWorkspaceRecord(workspaceId: string, archivedAt?: string): Promise<void> {
@@ -6535,6 +6680,10 @@ export class Session {
     request: Extract<SessionInboundMessage, { type: "workspace.label.assignment.set.request" }>,
   ): Promise<void> {
     try {
+      const workspace = await this.workspaceRegistry.get(request.workspaceId);
+      if (workspace) {
+        this.assertWorkspaceOwnedByThisServer(workspace);
+      }
       const result = await this.requireWorkspaceLabels().setAssignment(request);
       this.emit({
         type: "workspace.label.assignment.set.response",
@@ -7000,6 +7149,8 @@ export class Session {
     request: Extract<SessionInboundMessage, { type: "project.create_directory.request" }>,
   ): Promise<void> {
     try {
+      const targetPath = resolve(expandTilde(request.parentPath.trim()), request.name);
+      await this.assertCwdWorkspaceOwnedByThisServer(targetPath);
       const result = await createProjectDirectory(
         { parentPath: request.parentPath, name: request.name },
         {
@@ -7135,6 +7286,7 @@ export class Session {
       normalizedRepo = repo.displayName;
       const targetParent = resolve(expandTilde(request.targetDirectory.trim()));
       checkoutPath = resolve(targetParent, repo.name);
+      await this.assertCwdWorkspaceOwnedByThisServer(checkoutPath);
       if (!this.isPathWithinRoot(targetParent, checkoutPath)) {
         throw new Error("Resolved checkout path must stay inside the target directory");
       }
@@ -7209,14 +7361,24 @@ export class Session {
     return this.workspaceScripts.buildSnapshot(workspace, project);
   }
 
-  private handleStartWorkspaceScriptRequest(request: StartWorkspaceScriptRequest): Promise<void> {
-    return this.workspaceScripts.start(request);
+  private async handleStartWorkspaceScriptRequest(
+    request: StartWorkspaceScriptRequest,
+  ): Promise<void> {
+    const workspace = await this.workspaceRegistry.get(request.workspaceId);
+    if (workspace) {
+      this.assertWorkspaceOwnedByThisServer(workspace);
+    }
+    await this.workspaceScripts.start(request);
   }
 
   private async handleWorkspaceScriptListRequest(
     request: WorkspaceScriptListRequest,
   ): Promise<void> {
     try {
+      const workspace = await this.workspaceRegistry.get(request.workspaceId);
+      if (workspace) {
+        this.assertWorkspaceOwnedByThisServer(workspace);
+      }
       const scripts = await this.workspaceScripts.list(request.workspaceId);
       this.emit({
         type: "workspace.script.list.response",
@@ -7244,6 +7406,10 @@ export class Session {
     request: WorkspaceScriptStartRequest,
   ): Promise<void> {
     try {
+      const workspace = await this.workspaceRegistry.get(request.workspaceId);
+      if (workspace) {
+        this.assertWorkspaceOwnedByThisServer(workspace);
+      }
       const script = await this.workspaceScripts.launch(request);
       this.emit({
         type: "workspace.script.start.response",
@@ -7273,6 +7439,10 @@ export class Session {
     request: WorkspaceScriptStopRequest,
   ): Promise<void> {
     try {
+      const workspace = await this.workspaceRegistry.get(request.workspaceId);
+      if (workspace) {
+        this.assertWorkspaceOwnedByThisServer(workspace);
+      }
       const script = await this.workspaceScripts.stop(request);
       this.emit({
         type: "workspace.script.stop.response",
@@ -7335,6 +7505,7 @@ export class Session {
         emit: (message) => this.emit(message),
         sessionLogger: this.sessionLogger,
         createPaseoWorktreeWorkflow: (input) => this.createPaseoWorktreeWorkflow(input),
+        assertSourceWorkspaceOwned: (cwd) => this.assertCwdWorkspaceOwnedByThisServer(cwd),
       },
       request,
     );
@@ -7351,6 +7522,7 @@ export class Session {
       {
         paseoHome: this.paseoHome,
         worktreesRoot: this.worktreesRoot,
+        assertSourceWorkspaceOwned: (cwd) => this.assertCwdWorkspaceOwnedByThisServer(cwd),
         createPaseoWorktree: (workflowInput, serviceOptions) =>
           this.createPaseoWorktree(workflowInput, serviceOptions),
         warmWorkspaceGitData: (workspace) => this.warmWorkspaceGitDataForWorkspace(workspace),
@@ -7402,7 +7574,13 @@ export class Session {
   ): Promise<void> {
     return handleWorkspaceSetupRunRequestMessage(
       {
-        getWorkspace: (workspaceId) => this.workspaceRegistry.get(workspaceId),
+        getWorkspace: async (workspaceId) => {
+          const workspace = await this.workspaceRegistry.get(workspaceId);
+          if (workspace) {
+            this.assertWorkspaceOwnedByThisServer(workspace);
+          }
+          return workspace;
+        },
         clearAutomationBlock: (workspaceId) =>
           clearWorkspaceAutomationBlock(this.workspaceRegistry, workspaceId),
         startWorkspaceSetup: (workspaceId, operation) =>
@@ -7436,6 +7614,7 @@ export class Session {
       if (!existing) {
         throw new Error(`Workspace not found: ${request.workspaceId}`);
       }
+      this.assertWorkspaceOwnedByThisServer(existing);
 
       await archiveByScope(
         {
@@ -7448,6 +7627,7 @@ export class Session {
           findWorkspaceIdForCwd: (cwd) => this.findWorkspaceIdForCwd(cwd),
           getWorkspace: (workspaceId) => this.workspaceRegistry.get(workspaceId),
           listActiveWorkspaces: () => this.listActiveWorkspaceRefs(),
+          listAllActiveWorkspaces: () => this.listAllActiveWorkspaceRefs(),
           archiveWorkspaceRecord: (workspaceId) => this.archiveWorkspaceRecord(workspaceId),
           emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds) =>
             this.emitWorkspaceUpdatesForWorkspaceIds(workspaceIds),
@@ -7459,6 +7639,8 @@ export class Session {
           killTerminalsForWorkspace: (workspaceId) =>
             this.terminalController.killTerminalsForWorkspace(workspaceId),
           stopWorkspaceSetup: (workspaceId) => this.workspaceSetupRuntime.stop(workspaceId),
+          assertCwdWorkspaceOwnedByThisServer: (cwd) =>
+            this.assertCwdWorkspaceOwnedByThisServer(cwd),
           sessionLogger: this.sessionLogger,
         },
         {
@@ -7553,13 +7735,18 @@ export class Session {
 
         for (const agentId of clearableAgentIds) {
           const liveAgent = this.agentManager.getAgent(agentId);
+          const record = liveAgent ? null : await this.agentStorage.getFresh(agentId);
+          const hostId = liveAgent?.hostId ?? record?.hostId;
+          if (hostId !== undefined && hostId !== this.serverId) {
+            // Attention on a foreign agent is cleared by its owning host.
+            continue;
+          }
           if (liveAgent) {
             await this.agentManager.clearAgentAttention(agentId);
             clearedAgentIds.push(agentId);
             continue;
           }
 
-          const record = await this.agentStorage.get(agentId);
           if (
             !record ||
             record.internal ||

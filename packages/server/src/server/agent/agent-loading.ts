@@ -26,8 +26,9 @@ export type AgentLoaderManager = Pick<
   | "getRegisteredProviderIds"
   | "hydrateTimelineFromProvider"
   | "resumeAgentFromPersistence"
+  | "serverId"
 > &
-  Partial<Pick<AgentManager, "waitForAgentClose">>;
+  Partial<Pick<AgentManager, "waitForAgentClose" | "closeAgent">>;
 
 export interface EnsureAgentLoadedDeps {
   agentManager: AgentLoaderManager;
@@ -74,7 +75,29 @@ export async function ensureAgentLoaded(
 
   const existing = deps.agentManager.getAgent(agentId);
   if (existing) {
-    return existing;
+    const isForeignCopy =
+      deps.agentManager.serverId !== undefined &&
+      existing.hostId !== undefined &&
+      existing.hostId !== deps.agentManager.serverId;
+    if (!isForeignCopy) {
+      return existing;
+    }
+    // A resident foreign history copy may have become adoptable (the owner
+    // closed it) or stale (the record is gone) since it was loaded.
+    const fresh = await deps.agentStorage.getFresh(agentId);
+    const adoptable =
+      fresh !== null &&
+      fresh.hostId !== undefined &&
+      fresh.hostId !== deps.agentManager.serverId &&
+      fresh.archivedAt == null &&
+      fresh.lastStatus === "closed";
+    if ((fresh !== null && !adoptable) || !deps.agentManager.closeAgent) {
+      return existing;
+    }
+    await deps.agentManager.closeAgent(agentId);
+    if (fresh === null) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
   }
 
   // A close may have started after the first barrier observed no in-flight
@@ -96,6 +119,10 @@ export async function ensureAgentLoaded(
     if (!record) {
       throw new Error(`Agent not found: ${agentId}`);
     }
+    const isForeign =
+      deps.agentManager.serverId !== undefined &&
+      record.hostId !== undefined &&
+      record.hostId !== deps.agentManager.serverId;
 
     const validProviders = deps.validProviders ?? deps.agentManager.getRegisteredProviderIds();
     if (!isStoredAgentProviderAvailable(record, validProviders)) {
@@ -110,11 +137,20 @@ export async function ensureAgentLoaded(
         handle,
         buildConfigOverrides(record),
         agentId,
-        { ...extractTimestamps(record), attention: extractAttention(record) },
-        record.archivedAt ? { purpose: "history" } : undefined,
+        {
+          ...extractTimestamps(record),
+          attention: extractAttention(record),
+          labels: record.labels,
+          workspaceId: record.workspaceId,
+          owner: record.owner,
+        },
+        record.archivedAt || isForeign ? { purpose: "history" } : undefined,
       );
       deps.logger.info({ agentId, provider: record.provider }, "Agent resumed from persistence");
     } else {
+      if (isForeign) {
+        throw new Error(`agent is owned by host ${record.hostId}`);
+      }
       // No provider handle to resume: this starts the agent's first session rather than
       // bringing one back, so it stamps activity and carries no stored attention. Records
       // without a handle never got far enough to accumulate either.

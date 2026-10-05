@@ -46,6 +46,7 @@ export function attachAgentStoragePersistence(
   logger: LoggerLike,
   agentManager: AgentManagerStateSource,
   storage: AgentStoragePersistence,
+  serverId?: string,
 ): () => void {
   const log = getLogger(logger);
   const unsubscribe = agentManager.subscribe((event) => {
@@ -53,6 +54,9 @@ export function attachAgentStoragePersistence(
       return;
     }
     if (event.agent.lifecycle === "closed") {
+      return;
+    }
+    if (event.agent.hostId !== undefined && event.agent.hostId !== serverId) {
       return;
     }
     void storage.applySnapshot(event.agent).catch((error) => {

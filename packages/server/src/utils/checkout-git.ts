@@ -1615,6 +1615,13 @@ function resolveMergeTargetBranch(baseRef: string): string {
   return branchNameFromRef(baseRef);
 }
 
+export async function getMergeToBaseWorktreePath(
+  cwd: string,
+  baseRef: string,
+): Promise<string | null> {
+  return getWorktreePathForBranch(cwd, resolveMergeTargetBranch(baseRef));
+}
+
 async function doesGitRefExist(
   cwd: string,
   fullRef: string,
@@ -3672,7 +3679,7 @@ export async function mergeToBase(
     return currentWorktreeRoot;
   }
 
-  const baseWorktree = await getWorktreePathForBranch(cwd, normalizedBaseRef);
+  const baseWorktree = await getMergeToBaseWorktreePath(cwd, baseRef);
   const operationCwd = baseWorktree ?? currentWorktreeRoot;
   const isSameCheckout = resolve(operationCwd) === resolve(currentWorktreeRoot);
   const originalBranch = await getCurrentBranch(operationCwd);

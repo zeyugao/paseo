@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
-import { platform } from "node:os";
-import { afterEach, describe, expect, test } from "vitest";
+import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { platform, tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { getHostName } from "../host-name.js";
+import {
+  HubRelationshipController,
+  type HubRelationshipControllerOptions,
+} from "./relationship-controller.js";
+import type { HubRelationshipRemote } from "./relationship-remote.js";
 import { HubRelationshipHarness } from "./test-utils/relationship-harness.js";
 
 async function captureUnhandledRejections(action: () => Promise<void>): Promise<unknown[]> {
@@ -787,6 +794,7 @@ describe("Hub relationship", () => {
     await relationship.agentCreationAttempts(1);
 
     const shutdown = relationship.shutdownDaemon();
+    await relationship.socketCloses(0);
     relationship.finishAgentCreation();
     await shutdown;
 
@@ -923,4 +931,219 @@ describe("Hub relationship", () => {
 
     expect(await relationship.storedOwnedStatus(created.payload.agentId!)).toBe("closed");
   });
+  test("a non-owner daemon starts without Hub connectivity and rejects relationship mutations", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-owner-"));
+    const owner = createLeaseTestController(paseoHome, "server-owner");
+    const contender = createLeaseTestController(paseoHome, "server-contender");
+    try {
+      await owner.controller.start();
+      await contender.controller.start();
+
+      expect(contender.controller.status()).toMatchObject({
+        state: "not_connected",
+        lastError: expect.stringContaining("server-owner"),
+      });
+      expect(contender.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ owner: expect.objectContaining({ serverId: "server-owner" }) }),
+        expect.stringContaining("another daemon owns"),
+      );
+      await expect(
+        contender.controller.connect({
+          hubUrl: "https://hub.test",
+          token: "token",
+          permissions: [],
+        }),
+      ).rejects.toThrow("server-owner");
+      await expect(
+        contender.controller.updatePermissions({ grant: [], revoke: [] }),
+      ).rejects.toThrow("server-owner");
+      await expect(contender.controller.disconnect({ force: true })).rejects.toThrow(
+        "server-owner",
+      );
+      expect(contender.observations.enrollmentAttempts).toBe(0);
+    } finally {
+      await Promise.allSettled([owner.controller.stop(), contender.controller.stop()]);
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("a lost Hub lease stays fenced even if its old lease file is restored", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-lost-"));
+    const owner = createLeaseTestController(paseoHome, "server-owner");
+    const leasePath = path.join(paseoHome, "hub-connection.lock");
+    try {
+      await owner.controller.start();
+      await owner.controller.connect({
+        hubUrl: "https://hub.test",
+        token: "token",
+        permissions: [],
+      });
+      const originalLease = await readFile(leasePath, "utf8");
+      const replacementLease = {
+        ...JSON.parse(originalLease),
+        serverId: "server-successor",
+        hostname: "server-successor.test",
+        leaseId: "00000000-0000-4000-8000-000000000001",
+      };
+      await writeFile(leasePath, JSON.stringify(replacementLease));
+
+      await expect(
+        owner.controller.updatePermissions({ grant: ["hub.execute"], revoke: [] }),
+      ).rejects.toThrow("server-successor");
+      await writeFile(leasePath, originalLease);
+      await expect(
+        owner.controller.updatePermissions({ grant: ["hub.execute"], revoke: [] }),
+      ).rejects.toThrow("not owned by this daemon");
+      expect(owner.observations.permissionUpdates).toBe(0);
+    } finally {
+      await owner.controller.stop();
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("permission updates are fenced after the remote request returns", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-update-"));
+    const requestStarted = Promise.withResolvers<void>();
+    const remoteResult = Promise.withResolvers<{ permissions: string[] }>();
+    const owner = createLeaseTestController(paseoHome, "server-owner", 120_000, {
+      async updatePermissions(input) {
+        requestStarted.resolve();
+        return remoteResult.promise.then(() => ({ permissions: [...input.permissions] }));
+      },
+    });
+    const leasePath = path.join(paseoHome, "hub-connection.lock");
+    try {
+      await owner.controller.start();
+      await owner.controller.connect({
+        hubUrl: "https://hub.test",
+        token: "token",
+        permissions: [],
+      });
+      const updating = owner.controller.updatePermissions({ grant: ["hub.execute"], revoke: [] });
+      await requestStarted.promise;
+      const replacementLease = {
+        ...JSON.parse(await readFile(leasePath, "utf8")),
+        serverId: "server-successor",
+        hostname: "server-successor.test",
+        leaseId: "00000000-0000-4000-8000-000000000002",
+      };
+      await writeFile(leasePath, JSON.stringify(replacementLease));
+      remoteResult.resolve({ permissions: ["hub.execute"] });
+
+      await expect(updating).rejects.toThrow("server-successor");
+      expect(
+        JSON.parse(await readFile(path.join(paseoHome, "hub-relationship.json"), "utf8")),
+      ).toMatchObject({ relationship: { permissions: [] } });
+    } finally {
+      remoteResult.resolve({ permissions: ["hub.execute"] });
+      await owner.controller.stop();
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("startup failure releases the Hub connection lease", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-startup-failure-"));
+    const failing = createLeaseTestController(paseoHome, "server-failing");
+    const successor = createLeaseTestController(paseoHome, "server-successor");
+    const startupFailure = new Error("relationship load failed");
+    Reflect.set(failing.controller, "loadRelationshipForStartup", () => {
+      throw startupFailure;
+    });
+
+    try {
+      await expect(failing.controller.start()).rejects.toBe(startupFailure);
+      await successor.controller.start();
+      await expect(
+        successor.controller.connect({
+          hubUrl: "https://hub.test",
+          token: "token",
+          permissions: [],
+        }),
+      ).resolves.toMatchObject({ daemonId: "daemon-server-successor" });
+    } finally {
+      await Promise.allSettled([failing.controller.stop(), successor.controller.stop()]);
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("a stale Hub connection lease can be taken over", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-stale-"));
+    const staleOwner = createLeaseTestController(paseoHome, "server-stale", 10);
+    const successor = createLeaseTestController(paseoHome, "server-successor", 10);
+    try {
+      await staleOwner.controller.start();
+      const expired = new Date(Date.now() - 1_000);
+      await utimes(path.join(paseoHome, "hub-connection.lock"), expired, expired);
+
+      await successor.controller.start();
+      await expect(
+        successor.controller.connect({
+          hubUrl: "https://hub.test",
+          token: "token",
+          permissions: ["hub.execute"],
+        }),
+      ).resolves.toMatchObject({ daemonId: "daemon-server-successor" });
+      expect(successor.observations.enrollmentAttempts).toBe(1);
+      await expect(staleOwner.controller.disconnect({ force: true })).rejects.toThrow(
+        "server-successor",
+      );
+    } finally {
+      await Promise.allSettled([staleOwner.controller.stop(), successor.controller.stop()]);
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
 });
+
+function createLeaseTestController(
+  paseoHome: string,
+  serverId: string,
+  staleAfterMs = 120_000,
+  remoteOverrides: Partial<HubRelationshipRemote> = {},
+) {
+  const warn = vi.fn();
+  const observations = { enrollmentAttempts: 0, permissionUpdates: 0 };
+  const remote: HubRelationshipRemote = {
+    async enroll(input) {
+      observations.enrollmentAttempts += 1;
+      return {
+        daemonId: input.daemonId,
+        permissions: input.permissions,
+        webSocketUrl: "wss://hub.test/daemon",
+      };
+    },
+    async updatePermissions(input) {
+      observations.permissionUpdates += 1;
+      return { permissions: input.permissions };
+    },
+    async revoke() {},
+    openSocket() {
+      return { close() {} };
+    },
+    ...remoteOverrides,
+  };
+  const executionAgents = {
+    async create(): Promise<never> {
+      throw new Error("Unexpected execution create");
+    },
+    async control() {},
+    subscribe() {
+      return () => undefined;
+    },
+    async invalidateAuthority() {},
+  };
+  const logger = { warn, error: vi.fn() } as unknown as HubRelationshipControllerOptions["logger"];
+  const controller = new HubRelationshipController({
+    paseoHome,
+    hostname: `${serverId}.test`,
+    serverId,
+    daemonPublicKey: `key-${serverId}`,
+    logger,
+    remote,
+    createDaemonId: () => `daemon-${serverId}`,
+    connectionLease: { heartbeatIntervalMs: 60_000, staleAfterMs },
+    attachSocket: async () => undefined,
+    updateAttachedPermissions: () => undefined,
+    createExecutionAgents: () => executionAgents,
+  });
+  return { controller, warn, observations };
+}

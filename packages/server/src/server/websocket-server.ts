@@ -2619,7 +2619,7 @@ export class VoiceAssistantWebSocketServer {
       nowMs,
     });
 
-    if (plan.shouldPush) {
+    if (plan.shouldPush && (agent.hostId === undefined || agent.hostId === this.serverId)) {
       void this.pushNotificationSender.send(notification).catch((err) => {
         this.logger.warn({ err, agentId: params.agentId }, "Failed to send push notification");
       });

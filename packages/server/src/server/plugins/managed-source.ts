@@ -20,6 +20,7 @@ import {
   type PluginUpdateTarget,
 } from "@getpaseo/protocol/messages";
 import { runGitCommand } from "../../utils/run-git-command.js";
+import { withReclaimLock } from "../pid-lock.js";
 import { ensurePrivateDirectory, writePrivateFileAtomicSync } from "../private-files.js";
 import { readPluginManifest, type PluginManifest } from "./manifest.js";
 import { acquireNpm, isNpmSource, readNpmArtifact, resolveNpm } from "./managed-source/npm.js";
@@ -58,18 +59,25 @@ interface OwnedLocation {
 export class ManagedPluginSources {
   private readonly root: string;
   private readonly metadataPath: string;
-  private readonly records: Record<string, ManagedPluginRecord>;
+  private readonly lockPath: string;
+  // Cache of sources.json. Writers re-read the file under the cross-process
+  // lock so daemons sharing PASEO_HOME never drop each other's records.
+  private records: Record<string, ManagedPluginRecord>;
   constructor(
     paseoHome: string,
     private readonly registryOptions: RegistryOptions = {},
   ) {
     this.root = path.resolve(paseoHome, "plugins");
     this.metadataPath = path.join(this.root, "sources.json");
-    this.records = existsSync(this.metadataPath)
-      ? z
-          .record(PluginIdSchema, ManagedPluginRecordSchema)
-          .parse(JSON.parse(readFileSync(this.metadataPath, "utf8")))
-      : {};
+    this.lockPath = path.join(this.root, ".sources.lock");
+    this.records = this.readDiskRecords();
+  }
+
+  private readDiskRecords(): Record<string, ManagedPluginRecord> {
+    if (!existsSync(this.metadataPath)) return {};
+    return z
+      .record(PluginIdSchema, ManagedPluginRecordSchema)
+      .parse(JSON.parse(readFileSync(this.metadataPath, "utf8")));
   }
 
   private locate(
@@ -374,9 +382,15 @@ export class ManagedPluginSources {
     };
   }
 
-  commit(pluginId: string, record: ManagedPluginRecord): void {
-    this.records[pluginId] = ManagedPluginRecordSchema.parse(record);
-    this.writeRecords();
+  commit(pluginId: string, record: ManagedPluginRecord): Promise<void> {
+    return withReclaimLock(this.lockPath, async () => {
+      // Re-read within the lock so this commit keeps records written by
+      // another daemon sharing PASEO_HOME.
+      const records = this.readDiskRecords();
+      records[pluginId] = ManagedPluginRecordSchema.parse(record);
+      this.records = records;
+      this.writeRecords();
+    });
   }
   async discard(candidate: ManagedPluginCandidate): Promise<void> {
     await rm(candidate.versionRoot, { recursive: true, force: true });
@@ -387,14 +401,20 @@ export class ManagedPluginSources {
     await rm(location.versionRoot, { recursive: true, force: true });
   }
   async remove(pluginId: string): Promise<void> {
-    if (!this.records[pluginId]) return;
-    const pluginRoot = path.join(this.root, PluginIdSchema.parse(pluginId));
-    if (existsSync(pluginRoot)) {
-      await assertRealContainment(this.root, pluginRoot);
-      await rm(pluginRoot, { recursive: true, force: true });
-    }
-    delete this.records[pluginId];
-    this.writeRecords();
+    await withReclaimLock(this.lockPath, async () => {
+      // Re-read within the lock so this removal neither resurrects nor drops
+      // records written by another daemon sharing PASEO_HOME.
+      const records = this.readDiskRecords();
+      this.records = records;
+      if (!records[pluginId]) return;
+      const pluginRoot = path.join(this.root, PluginIdSchema.parse(pluginId));
+      if (existsSync(pluginRoot)) {
+        await assertRealContainment(this.root, pluginRoot);
+        await rm(pluginRoot, { recursive: true, force: true });
+      }
+      delete records[pluginId];
+      this.writeRecords();
+    });
   }
   private async createStagingRoot(): Promise<string> {
     const stagingRoot = path.join(this.root, ".staging", randomUUID());

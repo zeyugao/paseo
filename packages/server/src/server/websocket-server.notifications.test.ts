@@ -349,6 +349,37 @@ describe("VoiceAssistantWebSocketServer notification payloads", () => {
     expect(pushNotifications.sent).toHaveLength(1);
   });
 
+  it("sends attention push only for agents owned by this daemon", async () => {
+    const owner = createServer({
+      getAgent: vi.fn(() => ({
+        hostId: "srv-test",
+        workspaceId: WORKSPACE_ID,
+        pendingPermissions: new Map(),
+      })),
+    });
+    const foreign = createServer({
+      getAgent: vi.fn(() => ({
+        hostId: "srv-foreign",
+        workspaceId: WORKSPACE_ID,
+        pendingPermissions: new Map(),
+      })),
+    });
+
+    await asInternals<WebSocketServerInternals>(owner.server).broadcastAgentAttention({
+      agentId: "agent-owned",
+      provider: "claude",
+      reason: "finished",
+    });
+    await asInternals<WebSocketServerInternals>(foreign.server).broadcastAgentAttention({
+      agentId: "agent-foreign",
+      provider: "claude",
+      reason: "finished",
+    });
+
+    expect(owner.pushNotifications.sent).toHaveLength(1);
+    expect(foreign.pushNotifications.sent).toEqual([]);
+  });
+
   it("does not push error attention when the only connected client has never sent a heartbeat", async () => {
     const { server, pushNotifications } = createServer();
     const ws = connectClient(server, null);

@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -127,7 +127,9 @@ function createScheduleService(options: TestScheduleServiceOptions): ScheduleSer
           findWorkspaceIdForCwd: async (cwd) =>
             Array.from(workspaces.values()).find((workspace) => workspace.cwd === cwd)
               ?.workspaceId ?? null,
+          assertCwdWorkspaceOwnedByThisServer: async () => {},
           listActiveWorkspaces,
+          listAllActiveWorkspaces: listActiveWorkspaces,
           archiveWorkspaceRecord: async (id) => {
             const workspace = workspaces.get(id);
             if (workspace) {
@@ -227,7 +229,16 @@ async function createRegistryBackedScheduleWorkspaceDeps(rootDir: string): Promi
               agentStorage,
               findWorkspaceIdForCwd: async (cwd) =>
                 resolveWorkspaceIdForPath(cwd, await workspaceRegistry.list()),
+              assertCwdWorkspaceOwnedByThisServer: async () => {},
               listActiveWorkspaces: async () =>
+                (await workspaceRegistry.list())
+                  .filter((workspace) => !workspace.archivedAt)
+                  .map((workspace) => ({
+                    workspaceId: workspace.workspaceId,
+                    cwd: workspace.cwd,
+                    kind: workspace.kind,
+                  })),
+              listAllActiveWorkspaces: async () =>
                 (await workspaceRegistry.list())
                   .filter((workspace) => !workspace.archivedAt)
                   .map((workspace) => ({
@@ -343,6 +354,458 @@ describe("ScheduleService", () => {
       output: "ran:Review new PRs",
     });
     expect(inspected.nextRunAt).toBe("2026-01-01T00:02:00.000Z");
+  });
+
+  test("skips a due schedule when another daemon already holds its claim", async () => {
+    const runner = vi.fn(async () => ({ agentId: null, output: "unexpected" }));
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    const created = await service.create({
+      prompt: "Claimed elsewhere",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+    const schedulePath = join(tempDir, "schedules", `${created.id}.json`);
+    const originalScheduleJson = await readFile(schedulePath, "utf8");
+    const claimPath = join(tempDir, "schedules", `${created.id}.claim`);
+    await writeFile(
+      claimPath,
+      JSON.stringify({
+        runId: "foreign-run",
+        kind: "due",
+        scheduledFor: created.nextRunAt,
+        claimedAt: now.toISOString(),
+      }),
+      "utf8",
+    );
+
+    await service.tick();
+
+    expect(runner).not.toHaveBeenCalled();
+    expect(await readFile(schedulePath, "utf8")).toBe(originalScheduleJson);
+  });
+
+  test("executes a due schedule while holding its host claim", async () => {
+    const runner = vi.fn(async (schedule: StoredSchedule, runId: string) => {
+      const claimPath = join(tempDir, "schedules", `${schedule.id}.claim`);
+      expect(JSON.parse(await readFile(claimPath, "utf8"))).toEqual({
+        runId,
+        serverId: "srv-local",
+        kind: "due",
+        scheduledFor: schedule.nextRunAt,
+        claimedAt: now.toISOString(),
+      });
+      return { agentId: null, output: "claimed" };
+    });
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    const created = await service.create({
+      prompt: "Run with claim",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+
+    await service.tick();
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect((await service.inspect(created.id)).runs[0]).toMatchObject({
+      status: "succeeded",
+      output: "claimed",
+    });
+    expect(
+      (await readdir(join(tempDir, "schedules"))).filter((name) => name.endsWith(".claim")),
+    ).toEqual([]);
+  });
+
+  test("does not release a claim replaced by another run", async () => {
+    let replacementClaimPath = "";
+    const runner = vi.fn(async (schedule: StoredSchedule) => {
+      replacementClaimPath = join(tempDir, "schedules", `${schedule.id}.claim`);
+      await writeFile(
+        replacementClaimPath,
+        JSON.stringify({
+          runId: "foreign-run",
+          kind: "due",
+          scheduledFor: schedule.nextRunAt,
+          claimedAt: now.toISOString(),
+        }),
+        "utf8",
+      );
+      return { agentId: null, output: "claimed" };
+    });
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    await service.create({
+      prompt: "Replace claim during run",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+
+    await service.tick();
+
+    expect(JSON.parse(await readFile(replacementClaimPath, "utf8"))).toEqual({
+      runId: "foreign-run",
+      kind: "due",
+      scheduledFor: expect.any(String),
+      claimedAt: now.toISOString(),
+    });
+  });
+
+  test("rejects a manual run when another daemon holds its claim", async () => {
+    const runner = vi.fn(async () => ({ agentId: null, output: "unexpected" }));
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    const created = await service.create({
+      prompt: "Manual claim",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+    const claimPath = join(tempDir, "schedules", `${created.id}.claim`);
+    await writeFile(
+      claimPath,
+      JSON.stringify({
+        runId: "foreign-run",
+        kind: "manual",
+        scheduledFor: now.toISOString(),
+        claimedAt: now.toISOString(),
+      }),
+      "utf8",
+    );
+
+    await expect(service.runOnce(created.id)).rejects.toThrow("already running on another host");
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  test("rejects a concurrent manual run from another host even when clocks differ", async () => {
+    // Host B's clock is 30 minutes ahead of host A's: a wall-clock claim key would not
+    // collide, so this only stays mutually exclusive with a single manual claim key.
+    const nowA = now;
+    const nowB = new Date(now.getTime() + 30 * 60 * 1000);
+    let releaseRun!: () => void;
+    let signalRunStarted!: () => void;
+    const runStarted = new Promise<void>((resolve) => {
+      signalRunStarted = resolve;
+    });
+    const runnerA = vi.fn(async () => {
+      signalRunStarted();
+      await new Promise<void>((release) => {
+        releaseRun = release;
+      });
+      return { agentId: null, output: "ran-on-a" };
+    });
+    const serviceA = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => nowA,
+      runner: runnerA,
+    });
+    const runnerB = vi.fn(async () => ({ agentId: null, output: "unexpected" }));
+    const serviceB = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-b",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => nowB,
+      runner: runnerB,
+    });
+    const created = await serviceA.create({
+      prompt: "Manual run under clock skew",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+
+    const runA = serviceA.runOnce(created.id);
+    await runStarted;
+    await expect(serviceB.runOnce(created.id)).rejects.toThrow("already running on another host");
+    expect(runnerB).not.toHaveBeenCalled();
+
+    releaseRun();
+    await runA;
+    expect((await serviceA.inspect(created.id)).runs[0]).toMatchObject({
+      status: "succeeded",
+      output: "ran-on-a",
+    });
+  });
+
+  test("does not run or advance a schedule whose target agent is owned by another host", async () => {
+    const foreignAgentId = "00000000-0000-0000-0000-0000000000aa";
+    const legacyAgentId = "00000000-0000-0000-0000-0000000000bb";
+    const timestamp = now.toISOString();
+    await agentStorage.upsert({
+      id: foreignAgentId,
+      provider: "claude",
+      cwd: tempDir,
+      hostId: "srv-foreign",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      lastStatus: "closed",
+      labels: {},
+    });
+    await agentStorage.upsert({
+      id: legacyAgentId,
+      provider: "claude",
+      cwd: tempDir,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      lastStatus: "closed",
+      labels: {},
+    });
+    const runner = vi.fn(async () => ({ agentId: null, output: "ran" }));
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    const foreignSchedule = await service.create({
+      prompt: "Foreign agent schedule",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "agent", agentId: foreignAgentId },
+    });
+    const legacySchedule = await service.create({
+      prompt: "Legacy agent schedule",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "agent", agentId: legacyAgentId },
+    });
+    const foreignNextRunAt = foreignSchedule.nextRunAt;
+
+    now = new Date(now.getTime() + 60_000);
+    await service.tick();
+
+    // The legacy-target schedule ran; the foreign-target one was neither executed nor advanced.
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner.mock.calls[0]?.[0].id).toBe(legacySchedule.id);
+    const foreignAfter = await service.inspect(foreignSchedule.id);
+    expect(foreignAfter.runs).toHaveLength(0);
+    expect(foreignAfter.nextRunAt).toBe(foreignNextRunAt);
+    expect(foreignAfter.status).toBe("active");
+  });
+
+  test("renews a running claim so another host does not reclaim it as stale", async () => {
+    let releaseRun!: () => void;
+    let signalRunStarted!: () => void;
+    const runStarted = new Promise<void>((resolve) => {
+      signalRunStarted = resolve;
+    });
+    const runner = vi.fn(async () => {
+      signalRunStarted();
+      await new Promise<void>((release) => {
+        releaseRun = release;
+      });
+      return { agentId: null, output: "long-run" };
+    });
+    const serviceA = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    const created = await serviceA.create({
+      prompt: "Long running schedule",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+    const claimPath = join(tempDir, "schedules", `${created.id}.claim`);
+
+    const firstTick = serviceA.tick();
+    await runStarted;
+    // The claim was created with the real clock; pin its mtime to the test clock so the
+    // staleness window is exercised against the fake timeline.
+    await utimes(claimPath, now, now);
+
+    // Two hours pass while the run is still in flight; the next tick renews the claim.
+    now = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+    await serviceA.tick();
+
+    const runnerB = vi.fn(async () => ({ agentId: null, output: "unexpected" }));
+    const serviceB = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-b",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: runnerB,
+    });
+    await serviceB.tick();
+
+    expect(runnerB).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(claimPath, "utf8"))).toMatchObject({
+      serverId: "srv-local",
+      runId: expect.any(String),
+      kind: "due",
+      scheduledFor: created.nextRunAt,
+      claimedAt: expect.any(String),
+    });
+
+    releaseRun();
+    await firstTick;
+  });
+
+  test("removes stale schedule claims on start", async () => {
+    const schedulesDir = join(tempDir, "schedules");
+    await mkdir(schedulesDir, { recursive: true });
+    const staleClaimPath = join(schedulesDir, "stale.claim");
+    const freshClaimPath = join(schedulesDir, "fresh.claim");
+    await writeFile(staleClaimPath, "{}", "utf8");
+    await writeFile(freshClaimPath, "{}", "utf8");
+    const staleMtime = new Date(now.getTime() - 60 * 60 * 1000 - 1);
+    await utimes(staleClaimPath, staleMtime, staleMtime);
+    await utimes(freshClaimPath, now, now);
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "unused" }),
+    });
+
+    await service.start();
+    await service.stop();
+
+    await expect(readFile(staleClaimPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(freshClaimPath, "utf8")).resolves.toBe("{}");
+  });
+
+  test("start reclaims an empty claim file instead of failing startup", async () => {
+    const runner = vi.fn(async () => ({ agentId: null, output: "unexpected" }));
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    const created = await service.create({
+      prompt: "Corrupt claim",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+    const claimPath = join(tempDir, "schedules", `${created.id}.claim`);
+    await writeFile(claimPath, "", "utf8");
+
+    await expect(service.start()).resolves.toBeUndefined();
+    await service.stop();
+
+    expect(runner).not.toHaveBeenCalled();
+    await expect(readFile(claimPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("fails an abandoned running run when taking over its stale claim", async () => {
+    const runner = vi.fn(async () => ({ agentId: null, output: "retried" }));
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    const created = await service.create({
+      prompt: "Recover stale claim",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+    const abandonedRunId = "dead-run";
+    const store = new ScheduleStore(join(tempDir, "schedules"), createTestLogger());
+    await store.update(created.id, (schedule) => ({
+      ...schedule,
+      runs: [
+        ...schedule.runs,
+        {
+          id: abandonedRunId,
+          scheduledFor: schedule.nextRunAt!,
+          startedAt: now.toISOString(),
+          endedAt: null,
+          status: "running",
+          agentId: null,
+          output: null,
+          error: null,
+        },
+      ],
+    }));
+    const claimPath = join(tempDir, "schedules", `${created.id}.claim`);
+    await writeFile(
+      claimPath,
+      JSON.stringify({
+        runId: abandonedRunId,
+        kind: "due",
+        scheduledFor: created.nextRunAt,
+        claimedAt: now.toISOString(),
+      }),
+      "utf8",
+    );
+    const staleMtime = new Date(now.getTime() - 60 * 60 * 1000 - 1);
+    await utimes(claimPath, staleMtime, staleMtime);
+
+    await service.tick();
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    const inspected = await service.inspect(created.id);
+    expect(inspected.runs).toHaveLength(2);
+    expect(inspected.runs[0]).toMatchObject({
+      id: abandonedRunId,
+      status: "failed",
+      endedAt: now.toISOString(),
+      error: "Schedule claim became stale before the run completed",
+    });
+    expect(inspected.runs[1]).toMatchObject({ status: "succeeded", output: "retried" });
+    await expect(readFile(claimPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("pause and resume update persisted schedule state", async () => {
@@ -1938,6 +2401,7 @@ describe("ScheduleService", () => {
   test("startup recovery archives an interrupted run workspace with an associated agent", async () => {
     const service1 = createScheduleService({
       paseoHome: tempDir,
+      serverId: "srv-local",
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
@@ -1950,7 +2414,7 @@ describe("ScheduleService", () => {
       cadence: { type: "every", everyMs: 60_000 },
       target: {
         type: "new-agent",
-        config: { provider: "claude", cwd: tempDir },
+        config: { provider: "claude", cwd: tempDir, archiveOnFinish: false },
       },
       runOnCreate: false,
     });
@@ -1977,6 +2441,18 @@ describe("ScheduleService", () => {
         },
       ],
     }));
+    const claimPath = join(tempDir, "schedules", `${created.id}.claim`);
+    await writeFile(
+      claimPath,
+      JSON.stringify({
+        runId: "run-interrupted-with-agent",
+        kind: "due",
+        serverId: "srv-local",
+        scheduledFor: interruptedAt,
+        claimedAt: interruptedAt,
+      }),
+      "utf8",
+    );
 
     const archiveCalls: string[] = [];
     now = new Date("2026-01-01T00:10:00.000Z");
@@ -1988,6 +2464,7 @@ describe("ScheduleService", () => {
       providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
+      serverId: "srv-local",
       archiveWorkspace: async (archivedWorkspaceId) => {
         archiveCalls.push(archivedWorkspaceId);
       },
@@ -1995,6 +2472,7 @@ describe("ScheduleService", () => {
     await service2.start();
 
     expect(archiveCalls).toEqual([workspaceId]);
+    await expect(readFile(claimPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     const inspected = await service2.inspect(created.id);
     expect(inspected.runs[0]).toMatchObject({
       status: "failed",
@@ -2863,43 +3341,49 @@ describe("ScheduleService", () => {
     expect(inspected.runs[0]?.error).toBe("network blip");
   });
 
-  // chmod cannot make a directory unwritable on Windows or for root.
-  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
-    "fires again after a tick whose run could not be recorded",
-    async () => {
-      const service = createScheduleService({
-        paseoHome: tempDir,
-        logger: createTestLogger(),
-        agentManager: new AgentManager({ logger: createTestLogger() }),
-        agentStorage,
-        providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
-        now: () => now,
-        runner: async () => ({ agentId: null, output: "ran" }),
-      });
+  test("fires again after a tick whose run could not be recorded", async () => {
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "ran" }),
+    });
 
-      const created = await service.create({
-        prompt: "ping target",
-        cadence: { type: "every", everyMs: 60_000 },
-        target: { type: "agent", agentId: "88888888-8888-4888-8888-888888888888" },
-      });
+    const created = await service.create({
+      prompt: "ping target",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "agent", agentId: "88888888-8888-4888-8888-888888888888" },
+    });
 
-      const schedulesDir = join(tempDir, "schedules");
-      now = new Date("2026-01-01T00:01:00.000Z");
-      await chmod(schedulesDir, 0o555);
-      try {
-        await expect(service.tick()).rejects.toThrow();
-      } finally {
-        await chmod(schedulesDir, 0o755);
-      }
+    now = new Date("2026-01-01T00:01:00.000Z");
+    // A read-only schedules directory no longer fails the running-run write: the
+    // shared-home claim lock hardens that directory back to 0o700 on every tick.
+    // Fail the store write itself so the run still cannot be recorded.
+    const { store } = service as unknown as {
+      store: { write: (schedule: StoredSchedule) => Promise<void> };
+    };
+    const writeSchedule = store.write.bind(store);
+    let recordFails = true;
+    store.write = async (schedule) => {
+      if (recordFails) throw new Error("run record rejected");
+      await writeSchedule(schedule);
+    };
+    try {
+      await expect(service.tick()).rejects.toThrow("run record rejected");
+    } finally {
+      recordFails = false;
+    }
 
-      await service.tick();
+    await service.tick();
 
-      const inspected = await service.inspect(created.id);
-      expect(inspected.runs).toHaveLength(1);
-      expect(inspected.runs[0]?.status).toBe("succeeded");
-      expect(inspected.nextRunAt).toBe("2026-01-01T00:02:00.000Z");
-    },
-  );
+    const inspected = await service.inspect(created.id);
+    expect(inspected.runs).toHaveLength(1);
+    expect(inspected.runs[0]?.status).toBe("succeeded");
+    expect(inspected.nextRunAt).toBe("2026-01-01T00:02:00.000Z");
+  });
 
   test("completes the schedule when a scheduled run targets an archived agent", async () => {
     const service = createScheduleService({

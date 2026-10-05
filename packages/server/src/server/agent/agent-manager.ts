@@ -97,6 +97,11 @@ const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
 const IMPORTABLE_SESSION_LIST_TIMEOUT_MS = 90_000;
 const PROVIDER_USER_ECHO_TIMESTAMP_TOLERANCE_MS = 5_000;
+const READ_ONLY_HISTORY_PROVIDERS: Readonly<Record<string, true>> = {
+  claude: true,
+  codex: true,
+  omp: true,
+};
 const STORED_AGENT_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: false,
   supportsSessionPersistence: true,
@@ -325,6 +330,7 @@ export interface AgentManagerOptions {
   providerDefinitions?: ProviderEnabledMap;
   idFactory?: () => string;
   registry?: AgentStorage;
+  serverId?: string;
   onAgentAttention?: AgentAttentionCallback;
   onWorkspaceStateMayHaveChanged?: (params: { cwd: string }) => void;
   durableTimelineStore?: AgentTimelineStore;
@@ -410,6 +416,10 @@ interface ManagedAgentBase {
    */
   workspaceId?: string;
   owner?: AgentOwner;
+  /** Daemon that created the durable record. Undefined records are shared legacy state. */
+  hostId?: string;
+  /** Durable status shown while a foreign history runtime is temporarily resident. */
+  projectedLifecycle?: AgentLifecycleStatus;
   capabilities: AgentCapabilityFlags;
   config: AgentSessionConfig;
   runtimeInfo?: AgentRuntimeInfo;
@@ -749,6 +759,7 @@ export class AgentManager {
   private readonly runs = new AgentRunState();
   private readonly subscribers = new Set<SubscriptionRecord>();
   private readonly idFactory: () => string;
+  public readonly serverId: string | undefined;
   private readonly registry?: AgentStorage;
   private readonly durableTimelineStore?: AgentTimelineStore;
   private readonly previousStatuses = new Map<string, AgentLifecycleStatus>();
@@ -778,6 +789,7 @@ export class AgentManager {
   constructor(options: AgentManagerOptions) {
     this.pluginLifecycle = options.pluginLifecycle;
     this.idFactory = options?.idFactory ?? (() => randomUUID());
+    this.serverId = options.serverId;
     this.registry = options?.registry;
     this.durableTimelineStore = options?.durableTimelineStore;
     this.onAgentAttention = options?.onAgentAttention;
@@ -806,6 +818,13 @@ export class AgentManager {
     this.updateProviderRegistry({
       providerDefinitions: options.providerDefinitions ?? {},
       clients: options.clients ?? {},
+    });
+    this.subscribeToStorageRescan();
+  }
+
+  private subscribeToStorageRescan(): void {
+    this.registry?.onRescan(() => {
+      this.trackBackgroundTask(this.closeStaleForeignAgents());
     });
   }
 
@@ -1217,8 +1236,8 @@ export class AgentManager {
   }
 
   async getTimelineRows(id: string): Promise<AgentTimelineRow[]> {
-    this.requireAgent(id);
-    if (this.durableTimelineStore) {
+    const agent = this.requireAgent(id);
+    if (this.durableTimelineStore && !this.isForeignHost(agent.hostId)) {
       return projectTimelineRows({
         rows: await this.durableTimelineStore.getCommittedRows(id),
         mode: "projected",
@@ -1280,6 +1299,16 @@ export class AgentManager {
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
+    if (agentId !== undefined) {
+      const existingRecord = this.registry ? await this.registry.getFresh(resolvedAgentId) : null;
+      const existingAgent = this.agents.get(resolvedAgentId);
+      const foreignRecord = existingRecord && this.isForeignHost(existingRecord.hostId);
+      const foreignAgent = existingAgent && this.isForeignHost(existingAgent.hostId);
+      if (foreignRecord || foreignAgent) {
+        const owner = existingRecord?.hostId ?? existingAgent?.hostId;
+        throw new Error(`agent is owned by host ${owner}`);
+      }
+    }
     if (this.pluginLifecycle && !config.internal) {
       const request = await this.pluginLifecycle.before("agent.create", {
         config,
@@ -1363,6 +1392,7 @@ export class AgentManager {
           resolvedAgentId,
           options,
           resumeOptions,
+          agentId !== undefined,
         ),
       ),
     );
@@ -1382,6 +1412,7 @@ export class AgentManager {
       attention?: AttentionState;
     },
     resumeOptions?: AgentResumeSessionOptions,
+    explicitAgentId = false,
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(
@@ -1394,15 +1425,19 @@ export class AgentManager {
       ...overrides,
       provider: handle.provider,
     } as AgentSessionConfig;
-    // Decide residency from durable state inside the lifecycle lane. A loader may
-    // have read the record before a queued archive or restore completed. Residency is
-    // settled before the config is prepared, because a history load reads an archived
-    // agent whose working directory may be gone.
-    const record = this.registry ? await this.registry.get(resolvedAgentId) : null;
-    const currentResumeOptions = record
-      ? { purpose: record.archivedAt ? ("history" as const) : ("interactive" as const) }
-      : resumeOptions;
+    // Re-read ownership inside the lifecycle lane: another daemon may have updated
+    // the shared record after the loader selected a purpose.
+    const record = this.registry ? await this.registry.getFresh(resolvedAgentId) : null;
+    if (explicitAgentId && this.registry && record === null) {
+      throw new Error(`Agent not found: ${resolvedAgentId}`);
+    }
+    const {
+      foreign,
+      takingOverClosed,
+      resumeOptions: currentResumeOptions,
+    } = this.resolveOwnershipIntent(record, resumeOptions);
     const purpose = currentResumeOptions?.purpose ?? "interactive";
+    this.assertForeignHistoryProviderSupported(foreign, purpose, handle.provider);
 
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       mergedConfig,
@@ -1441,6 +1476,10 @@ export class AgentManager {
       ...options,
       persistence: handle,
       restoring: true,
+      // Only pass hostId when a record exists: without one, registerSession's
+      // default stamps this daemon as owner instead of leaving it legacy.
+      ...(record !== null ? { hostId: takingOverClosed ? this.serverId : record.hostId } : {}),
+      projectedLifecycle: foreign && !takingOverClosed ? record?.lastStatus : undefined,
     });
   }
 
@@ -1548,6 +1587,7 @@ export class AgentManager {
     overrides?: Partial<AgentSessionConfig>,
     options?: { rehydrateFromDisk?: boolean },
   ): Promise<ManagedAgent> {
+    await this.assertStoredAgentMutable(agentId);
     this.assertAcceptingAgentRegistrations();
     let existing = this.requireSessionAgent(agentId);
     if (this.hasInFlightRun(agentId)) {
@@ -1630,6 +1670,7 @@ export class AgentManager {
         lastUsage: preservedLastUsage,
         lastError: preservedLastError,
         attention: preservedAttention,
+        hostId: existing.hostId,
         restoring: true,
       });
     } catch (error) {
@@ -1764,7 +1805,10 @@ export class AgentManager {
     return close;
   }
 
-  private async closeAgentRuntime(agentId: string): Promise<void> {
+  private async closeAgentRuntime(
+    agentId: string,
+    options?: { emit?: boolean },
+  ): Promise<ManagedAgentClosed> {
     const agent = this.requireAgent(agentId);
     this.logger.trace(
       {
@@ -1791,7 +1835,9 @@ export class AgentManager {
     } catch (error) {
       persistError = error;
     }
-    this.emitClosedAgent(closedAgent, { persist: false });
+    if (options?.emit !== false) {
+      this.emitClosedAgent(closedAgent, { persist: false });
+    }
     this.logger.trace(
       {
         agentId,
@@ -1804,6 +1850,7 @@ export class AgentManager {
     if (persistError !== undefined) {
       throw persistError;
     }
+    return closedAgent;
   }
 
   private cancelRunningProviderSubagents(parentAgentId: string): void {
@@ -1827,8 +1874,11 @@ export class AgentManager {
   private async archiveAgentUnlocked(
     agentId: string,
     requestedArchivedAt?: string,
+    freshRecord?: StoredAgentRecord | null,
   ): Promise<{ archivedAt: string }> {
+    const ownershipRecord = freshRecord ?? (await this.assertStoredAgentMutable(agentId));
     const agent = this.requireAgent(agentId);
+    if (ownershipRecord) agent.hostId = ownershipRecord.hostId;
     if (agent.internal) {
       // Nothing about an internal agent is on disk, and archiving must not put
       // it there. Its final snapshot is kept in memory for a while (see
@@ -1902,6 +1952,9 @@ export class AgentManager {
         ) {
           return;
         }
+        if (this.isForeignHost(currentChild.hostId)) {
+          return;
+        }
         if (shouldDetachFromArchivedParent(parent, currentChild)) {
           await this.detachAgentUnlocked(currentChild.id);
         } else if (this.agents.has(currentChild.id)) {
@@ -1952,6 +2005,7 @@ export class AgentManager {
     record: StoredAgentRecord,
     options: { archivedAt: string; updatedAt?: string },
   ): Promise<ArchivedStoredAgentRecord> {
+    this.assertRecordMutable(record);
     const archivedRecord = buildArchivedAgentRecord(record, options);
     await this.requireRegistry().upsert(archivedRecord);
     if (!record.archivedAt && !record.internal) {
@@ -1985,6 +2039,8 @@ export class AgentManager {
         provider: record.provider,
         cwd: record.cwd,
         workspaceId: record.workspaceId,
+        hostId: record.hostId,
+        projectedLifecycle: this.isForeignHost(record.hostId) ? record.lastStatus : undefined,
         owner: record.owner,
         session: null,
         capabilities: STORED_AGENT_CAPABILITIES,
@@ -2019,7 +2075,7 @@ export class AgentManager {
   }
 
   async setAgentMode(agentId: string, modeId: string): Promise<AgentProviderNotice | null> {
-    const agent = this.requireSessionAgent(agentId);
+    const agent = this.requireMutableSessionAgent(agentId);
     const notice = (await agent.session.setMode(modeId)) ?? null;
     await this.drainSessionEvents(agentId);
     const currentMode = (await agent.session.getCurrentMode()) ?? modeId;
@@ -2035,7 +2091,7 @@ export class AgentManager {
   }
 
   async setAgentModel(agentId: string, modelId: string | null): Promise<void> {
-    const agent = this.requireSessionAgent(agentId);
+    const agent = this.requireMutableSessionAgent(agentId);
     const normalizedModelId =
       typeof modelId === "string" && modelId.trim().length > 0 ? modelId : null;
 
@@ -2057,7 +2113,7 @@ export class AgentManager {
     agentId: string,
     thinkingOptionId: string | null,
   ): Promise<AgentProviderNotice | null> {
-    const agent = this.requireSessionAgent(agentId);
+    const agent = this.requireMutableSessionAgent(agentId);
     const normalizedThinkingOptionId =
       typeof thinkingOptionId === "string" && thinkingOptionId.trim().length > 0
         ? thinkingOptionId
@@ -2088,7 +2144,7 @@ export class AgentManager {
   }
 
   async setAgentFeature(agentId: string, featureId: string, value: unknown): Promise<void> {
-    const agent = this.requireAgent(agentId);
+    const agent = this.requireMutableAgent(agentId);
 
     if (!agent.session.setFeature) {
       throw new Error("Agent session does not support setting features");
@@ -2102,7 +2158,9 @@ export class AgentManager {
   }
 
   async setTitle(agentId: string, title: string): Promise<void> {
+    const freshRecord = await this.assertStoredAgentMutable(agentId);
     const agent = this.requireAgent(agentId);
+    if (freshRecord) agent.hostId = freshRecord.hostId;
     const normalizedTitle = title.trim();
     if (!normalizedTitle) {
       return;
@@ -2110,7 +2168,7 @@ export class AgentManager {
     if (
       this.agentsAwaitingInitialSnapshotPersist.has(agent.id) &&
       this.registry &&
-      (await this.registry.get(agent.id)) === null
+      freshRecord === null
     ) {
       return;
     }
@@ -2121,32 +2179,47 @@ export class AgentManager {
 
   async setLabels(agentId: string, labels: Record<string, string>): Promise<void> {
     await this.runLifecycleMutation(agentId, async () => {
+      const freshRecord = await this.assertStoredAgentMutable(agentId);
       const agent = this.requireAgent(agentId);
-      await this.writeLabels(agent.id, labels);
+      await this.writeLabels(agent.id, labels, freshRecord);
     });
   }
 
-  private async writeLabels(agentId: string, patch: AgentLabelPatch): Promise<WriteLabelsResult> {
+  private async writeLabels(
+    agentId: string,
+    patch: AgentLabelPatch,
+    freshRecord?: StoredAgentRecord | null,
+  ): Promise<WriteLabelsResult> {
     const liveAgent = this.agents.get(agentId);
     if (liveAgent) {
+      if (freshRecord) liveAgent.hostId = freshRecord.hostId;
+      else if (this.registry) return { record: null, live: true };
+      this.assertLiveAgentMutable(liveAgent);
       liveAgent.labels = applyLabelPatch(liveAgent.labels, patch);
       this.touchUpdatedAt(liveAgent);
       await this.persistSnapshot(liveAgent);
       this.emitState(liveAgent, { persist: false });
-      const record = this.registry ? await this.registry.get(agentId) : null;
+      const record = freshRecord
+        ? {
+            ...freshRecord,
+            labels: liveAgent.labels,
+            updatedAt: liveAgent.updatedAt.toISOString(),
+          }
+        : null;
       return { record, live: true };
     }
 
-    const nextRecord = await this.writeStoredMetadata(agentId, { labels: patch });
+    const nextRecord = await this.writeStoredMetadata(agentId, { labels: patch }, freshRecord);
     return { record: nextRecord, live: false };
   }
 
   private async writeStoredMetadata(
     agentId: string,
     patch: AgentMetadataPatch,
+    freshRecord?: StoredAgentRecord | null,
   ): Promise<StoredAgentRecord> {
+    const record = freshRecord ?? (await this.assertStoredAgentMutable(agentId));
     const registry = this.requireRegistry();
-    const record = await registry.get(agentId);
     if (!record) {
       throw new Error(`Agent not found: ${agentId}`);
     }
@@ -2174,27 +2247,35 @@ export class AgentManager {
     live: boolean;
     previousParentAgentId: string | null;
   }> {
-    const registry = this.requireRegistry();
+    const freshRecord = await this.assertStoredAgentMutable(agentId);
     const liveAgent = this.agents.get(agentId);
     if (liveAgent) {
+      if (freshRecord) liveAgent.hostId = freshRecord.hostId;
       const previousParentAgentId = getParentAgentIdFromLabels(liveAgent.labels);
       if (!previousParentAgentId) {
         await this.persistSnapshot(liveAgent);
-        const record = await registry.get(agentId);
-        if (!record) {
+        if (!freshRecord) {
           throw new Error(`Agent not found in storage after detach: ${agentId}`);
         }
-        return { record, live: true, previousParentAgentId: null };
+        return {
+          record: { ...freshRecord, updatedAt: liveAgent.updatedAt.toISOString() },
+          live: true,
+          previousParentAgentId: null,
+        };
       }
 
-      const { record } = await this.writeLabels(agentId, detachedAgentLabelPatch(liveAgent.labels));
+      const { record } = await this.writeLabels(
+        agentId,
+        detachedAgentLabelPatch(liveAgent.labels),
+        freshRecord,
+      );
       if (!record) {
         throw new Error(`Agent not found in storage after detach: ${agentId}`);
       }
       return { record, live: true, previousParentAgentId };
     }
 
-    const record = await registry.get(agentId);
+    const record = freshRecord;
     if (!record) {
       throw new Error(`Agent not found: ${agentId}`);
     }
@@ -2203,7 +2284,7 @@ export class AgentManager {
       return { record, live: false, previousParentAgentId: null };
     }
 
-    const result = await this.writeLabels(agentId, detachedAgentLabelPatch(record.labels));
+    const result = await this.writeLabels(agentId, detachedAgentLabelPatch(record.labels), record);
     if (!result.record) {
       throw new Error(`Agent not found in storage after detach: ${agentId}`);
     }
@@ -2215,12 +2296,13 @@ export class AgentManager {
     if (!agent || agent.internal) {
       return;
     }
+    this.assertLiveAgentMutable(agent);
     this.touchUpdatedAt(agent);
     this.emitState(agent);
   }
 
   async clearAgentAttention(agentId: string): Promise<void> {
-    const agent = this.requireAgent(agentId);
+    const agent = this.requireMutableAgent(agentId);
     if (agent.attention.requiresAttention) {
       agent.attention = { requiresAttention: false };
       await this.persistSnapshot(agent);
@@ -2229,6 +2311,7 @@ export class AgentManager {
   }
 
   async markAgentUnread(agentId: string): Promise<void> {
+    const record = await this.assertStoredAgentMutable(agentId);
     const liveAgent = this.agents.get(agentId);
     if (liveAgent) {
       const isFinished = liveAgent.lifecycle === "idle";
@@ -2249,7 +2332,6 @@ export class AgentManager {
     }
 
     const registry = this.requireRegistry();
-    const record = await registry.get(agentId);
     const hasFinishedStatus = record?.lastStatus === "idle" || record?.lastStatus === "closed";
     const canMarkUnread =
       record && !record.internal && !record.archivedAt && !record.requiresAttention;
@@ -2278,17 +2360,17 @@ export class AgentManager {
     agentId: string,
     archivedAt: string,
   ): Promise<StoredAgentRecord> {
+    const record = await this.assertStoredAgentMutable(agentId);
     const registry = this.requireRegistry();
     // A stored-only archive can have waited behind a persisted resume. Reuse the
     // live archive transition so its newly acquired runtime is closed as well.
     if (this.agents.has(agentId)) {
-      await this.archiveAgentUnlocked(agentId, archivedAt);
+      await this.archiveAgentUnlocked(agentId, archivedAt, record);
       const archivedRecord = await registry.get(agentId);
       if (!archivedRecord) throw new Error(`Agent not found: ${agentId}`);
       return archivedRecord;
     }
 
-    const record = await registry.get(agentId);
     if (!record) {
       throw new Error(`Agent not found: ${agentId}`);
     }
@@ -2319,8 +2401,8 @@ export class AgentManager {
     agentId: string,
     updates?: { workspaceId?: string; labels?: AgentLabelPatch },
   ): Promise<boolean> {
+    const record = await this.assertStoredAgentMutable(agentId);
     const registry = this.requireRegistry();
-    const record = await registry.get(agentId);
     if (!record || !record.archivedAt) {
       return false;
     }
@@ -2384,7 +2466,8 @@ export class AgentManager {
         await this.setTitle(agentId, updates.title);
       }
       if (updates.labels) {
-        await this.writeLabels(agentId, updates.labels);
+        const freshRecord = await this.assertStoredAgentMutable(agentId);
+        await this.writeLabels(agentId, updates.labels, freshRecord);
       }
       return;
     }
@@ -2457,7 +2540,7 @@ export class AgentManager {
    * broadcast like normal timeline events.
    */
   tryRunOutOfBand(agentId: string, prompt: AgentPromptInput, options?: AgentRunOptions): boolean {
-    const agent = this.requireSessionAgent(agentId);
+    const agent = this.requireMutableSessionAgent(agentId);
     const handler = agent.session.tryHandleOutOfBand?.(prompt);
     if (!handler) {
       return false;
@@ -2500,7 +2583,7 @@ export class AgentManager {
     agentId: string,
     item: AgentTimelineItem,
   ): Promise<{ seq: number; epoch: string }> {
-    const agent = this.requireAgent(agentId);
+    const agent = this.requireMutableAgent(agentId);
     item = limitAgentTimelineItemContent(item);
     this.touchUpdatedAt(agent);
     const row = this.recordTimeline(agentId, item);
@@ -2522,7 +2605,7 @@ export class AgentManager {
   }
 
   async emitLiveTimelineItem(agentId: string, item: AgentTimelineItem): Promise<void> {
-    const agent = this.requireAgent(agentId);
+    const agent = this.requireMutableAgent(agentId);
     this.touchUpdatedAt(agent);
     this.dispatchStream(agentId, {
       type: "timeline",
@@ -2581,7 +2664,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): AsyncGenerator<AgentStreamEvent> {
-    const existingAgent = this.requireSessionAgent(agentId);
+    const existingAgent = this.requireMutableSessionAgent(agentId);
     this.logger.trace(
       {
         agentId,
@@ -2778,7 +2861,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): Promise<AsyncGenerator<AgentStreamEvent>> {
-    const snapshot = this.requireAgent(agentId);
+    const snapshot = this.requireMutableAgent(agentId);
     if (
       snapshot.lifecycle !== "running" &&
       !snapshot.activeForegroundTurnId &&
@@ -2810,7 +2893,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentSteerOptions,
   ): Promise<SteerResult> {
-    const agent = this.requireSessionAgent(agentId);
+    const agent = this.requireMutableSessionAgent(agentId);
     const expectedTurnId = agent.activeForegroundTurnId ?? agent.activeTurnId;
     if (!expectedTurnId || !agent.session.steerActiveTurn) {
       return { status: "unavailable" };
@@ -2838,7 +2921,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentSteerOptions,
   ): Promise<ActiveTurnSteerDispatchResult> {
-    const agent = this.requireSessionAgent(agentId);
+    const agent = this.requireMutableSessionAgent(agentId);
     const expectedTurnId = agent.activeForegroundTurnId ?? agent.activeTurnId;
     if (!expectedTurnId) {
       return { status: "inactive" };
@@ -3086,7 +3169,7 @@ export class AgentManager {
     requestId: string,
     response: AgentPermissionResponse,
   ): Promise<AgentPermissionResult | void> {
-    const agent = this.requireAgent(agentId);
+    const agent = this.requireMutableAgent(agentId);
     if (agent.inFlightPermissionResponses.has(requestId)) {
       throw new Error("A response to this permission request is already being submitted");
     }
@@ -3124,7 +3207,7 @@ export class AgentManager {
   }
 
   private async cancelAgentRunNow(agentId: string): Promise<AgentRunCancellationResult> {
-    const agent = this.requireSessionAgent(agentId);
+    const agent = this.requireMutableSessionAgent(agentId);
     const run =
       this.runs.getRun(agentId) ??
       (agent.lifecycle === "running" ? this.runs.trackAutonomousRun(agentId, null) : null);
@@ -3247,7 +3330,7 @@ export class AgentManager {
   }
 
   async rewind(agentId: string, messageId: string, mode: RewindMode): Promise<void> {
-    const agent = this.requireSessionAgent(agentId);
+    const agent = this.requireMutableSessionAgent(agentId);
     const submittedRow = this.timelineStore
       .getRows(agentId)
       .find(
@@ -3310,6 +3393,10 @@ export class AgentManager {
   }
 
   async deleteCommittedTimeline(agentId: string): Promise<void> {
+    const agent = this.agents.get(agentId);
+    if (agent && this.isForeignHost(agent.hostId)) {
+      return;
+    }
     await this.durableTimelineStore?.deleteAgent(agentId);
   }
 
@@ -3569,6 +3656,8 @@ export class AgentManager {
       publishWhenReady?: boolean;
       workspaceId?: string;
       owner?: AgentOwner;
+      hostId?: string;
+      projectedLifecycle?: AgentLifecycleStatus;
     },
   ): Promise<ManagedAgent> {
     let registered = false;
@@ -3609,6 +3698,8 @@ export class AgentManager {
         }
       }
 
+      // Install ownership before replaying timeline rows below: durable timeline gates
+      // resolve foreign residency through this.agents.
       this.assertAcceptingAgentRegistrations();
       this.agents.set(resolvedAgentId, managed);
       registered = true;
@@ -3745,6 +3836,8 @@ export class AgentManager {
           persistence?: AgentPersistenceHandle;
           workspaceId?: string;
           owner?: AgentOwner;
+          hostId?: string;
+          projectedLifecycle?: AgentLifecycleStatus;
         }
       | undefined;
   }): ActiveManagedAgent {
@@ -3755,6 +3848,8 @@ export class AgentManager {
       cwd: config.cwd,
       workspaceId: options?.workspaceId,
       owner: options?.owner,
+      hostId: this.resolveRegistrationHostId(options),
+      projectedLifecycle: options?.projectedLifecycle,
       session,
       capabilities: session.capabilities,
       config,
@@ -4008,6 +4103,9 @@ export class AgentManager {
     agent: ManagedAgent,
     options?: { title?: string | null; internal?: boolean },
   ): Promise<void> {
+    if (this.isForeignHost(agent.hostId)) {
+      return;
+    }
     if (!this.registry) {
       return;
     }
@@ -5080,7 +5178,7 @@ export class AgentManager {
   }
 
   private enqueueDurableTimelineAppend(agentId: string, row: AgentTimelineRow): void {
-    if (!this.durableTimelineStore) {
+    if (!this.durableTimelineStore || this.isForeignAgentResident(agentId)) {
       return;
     }
     const task = this.durableTimelineStore.bulkInsert(agentId, [row]).catch((err) => {
@@ -5096,7 +5194,7 @@ export class AgentManager {
     agentId: string,
     rows: readonly AgentTimelineRow[],
   ): void {
-    if (!this.durableTimelineStore || rows.length === 0) {
+    if (!this.durableTimelineStore || rows.length === 0 || this.isForeignAgentResident(agentId)) {
       return;
     }
     const task = this.durableTimelineStore.bulkInsert(agentId, rows).catch((err) => {
@@ -5109,14 +5207,16 @@ export class AgentManager {
   }
 
   private enqueueDurableTimelineUpdate(agentId: string, row: AgentTimelineRow): void {
-    if (!this.durableTimelineStore) return;
+    if (!this.durableTimelineStore || this.isForeignAgentResident(agentId)) return;
     const task = this.durableTimelineStore.updateCommittedRow(agentId, row).catch((err) => {
-      this.logger.error(
-        { err, agentId, seq: row.seq, itemType: row.item.type },
-        "Failed to enrich durable timeline row",
-      );
+      this.logger.error({ err, agentId, seq: row.seq }, "Failed to update durable timeline row");
     });
     this.trackBackgroundTask(task);
+  }
+
+  private isForeignAgentResident(agentId: string): boolean {
+    const agent = this.agents.get(agentId);
+    return agent !== undefined && this.isForeignHost(agent.hostId);
   }
 
   private trackBackgroundTask(task: Promise<void>): void {
@@ -5511,6 +5611,165 @@ export class AgentManager {
         "Failed to archive native session (best-effort)",
       );
     }
+  }
+
+  /**
+   * A foreign history load must not start a writable provider runtime. Only
+   * providers whose resume can run read-only are allowed; the rest reject so
+   * the owning host stays the sole writer of that session.
+   */
+  private assertForeignHistoryProviderSupported(
+    foreign: boolean,
+    purpose: "history" | "interactive",
+    provider: string,
+  ): void {
+    if (foreign && purpose === "history" && !READ_ONLY_HISTORY_PROVIDERS[provider]) {
+      throw new Error(`provider ${provider} does not support read-only history on this host`);
+    }
+  }
+
+  /**
+   * Registered agents default to this host. An explicitly passed `hostId` key
+   * wins even when undefined: undefined preserves a foreign record's owner
+   * across a read-only history load.
+   */
+  private resolveRegistrationHostId(options: { hostId?: string } | undefined): string | undefined {
+    return options && Object.prototype.hasOwnProperty.call(options, "hostId")
+      ? options.hostId
+      : this.serverId;
+  }
+
+  /**
+   * Ownership re-read inside the lifecycle lane. A foreign record resumes
+   * read-only (history purpose) unless it is closed, in which case this host
+   * may take it over interactively.
+   */
+  private resolveOwnershipIntent(
+    record: StoredAgentRecord | null,
+    resumeOptions: AgentResumeSessionOptions | undefined,
+  ): {
+    foreign: boolean;
+    takingOverClosed: boolean;
+    resumeOptions: AgentResumeSessionOptions | undefined;
+  } {
+    if (record === null) {
+      return { foreign: false, takingOverClosed: false, resumeOptions };
+    }
+    const foreign = this.isForeignHost(record.hostId);
+    const takingOverClosed = foreign && record.archivedAt == null && record.lastStatus === "closed";
+    return {
+      foreign,
+      takingOverClosed,
+      resumeOptions: {
+        purpose: record.archivedAt || (foreign && !takingOverClosed) ? "history" : "interactive",
+      },
+    };
+  }
+
+  private isForeignHost(hostId: string | undefined): boolean {
+    return this.serverId !== undefined && hostId !== undefined && hostId !== this.serverId;
+  }
+
+  private assertRecordMutable(record: StoredAgentRecord): void {
+    if (this.isForeignHost(record.hostId)) {
+      throw new Error(`agent is owned by host ${record.hostId}`);
+    }
+  }
+
+  private assertLiveAgentMutable(agent: ManagedAgent): void {
+    if (this.isForeignHost(agent.hostId)) {
+      throw new Error(`agent is owned by host ${agent.hostId}`);
+    }
+  }
+
+  private async assertStoredAgentMutable(agentId: string): Promise<StoredAgentRecord | null> {
+    const record = this.registry ? await this.registry.getFresh(agentId) : null;
+    if (record) {
+      this.assertRecordMutable(record);
+      const liveAgent = this.agents.get(agentId);
+      if (liveAgent) {
+        // Keep the resident projection aligned with the authoritative ownership
+        // observed by this mutation. Do not consult the stale cached record again.
+        liveAgent.hostId = record.hostId;
+      }
+      return record;
+    }
+    const liveAgent = this.agents.get(agentId);
+    if (liveAgent) {
+      this.assertLiveAgentMutable(liveAgent);
+    }
+    return null;
+  }
+
+  /** Ownership gate for external lifecycle commands. */
+  async assertAgentMutable(agentId: string): Promise<void> {
+    await this.assertStoredAgentMutable(agentId);
+  }
+
+  /**
+   * Rescan callback: drop a resident foreign history copy once its record
+   * shows the owner closed it (making it adoptable) or is gone entirely.
+   */
+  private async closeStaleForeignAgents(): Promise<void> {
+    if (this.serverId === undefined || !this.registry) {
+      return;
+    }
+    const registry = this.registry;
+    for (const agent of this.agents.values()) {
+      if (!this.isForeignHost(agent.hostId)) {
+        continue;
+      }
+      try {
+        const record = await registry.getFresh(agent.id);
+        const adoptable =
+          record !== null &&
+          this.isForeignHost(record.hostId) &&
+          record.archivedAt == null &&
+          record.lastStatus === "closed";
+        if (record !== null && !adoptable) {
+          if (this.isForeignHost(record.hostId)) {
+            agent.hostId = record.hostId;
+            agent.projectedLifecycle = record.lastStatus;
+            this.dispatch({ type: "agent_state", agent: { ...agent } });
+          }
+          continue;
+        }
+        await this.runLifecycleMutation(agent.id, async () => {
+          if (!this.agents.has(agent.id)) return;
+          // The durable record is authoritative for a resident foreign view.
+          // Close the runtime silently so it cannot overwrite this projection.
+          if (record) {
+            this.dispatchStoredAgentState(record);
+          }
+          const closed = await this.closeAgentRuntime(agent.id, { emit: false });
+          if (!record) {
+            // The record disappeared; expose a canonical closed state instead
+            // of replaying the stale running/idle projection.
+            this.dispatch({
+              type: "agent_state",
+              agent: { ...closed, lifecycle: "closed", projectedLifecycle: undefined },
+            });
+          }
+        });
+      } catch (error) {
+        this.logger.warn(
+          { err: error, agentId: agent.id },
+          "Failed to reconcile resident foreign agent after rescan",
+        );
+      }
+    }
+  }
+
+  private requireMutableAgent(id: string): LiveManagedAgent {
+    const agent = this.requireAgent(id);
+    this.assertLiveAgentMutable(agent);
+    return agent;
+  }
+
+  private requireMutableSessionAgent(id: string): ActiveManagedAgent {
+    const agent = this.requireSessionAgent(id);
+    this.assertLiveAgentMutable(agent);
+    return agent;
   }
 
   private requireAgent(id: string): LiveManagedAgent {

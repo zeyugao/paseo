@@ -40,11 +40,14 @@ export interface ArchiveDependencies {
   // the archive target, not status/ownership.
   findWorkspaceIdForCwd: (cwd: string) => Promise<string | null>;
   getWorkspace?: (workspaceId: string) => Promise<PersistedWorkspaceRecord | null>;
-  // Active (non-archived) workspaces, used to decide whether the workspace being
-  // archived is the last reference to its backing worktree directory, and to
-  // break a same-cwd tie in favor of the worktree-kind record when archiving by
-  // path (no explicit workspaceId).
+  // Active (non-archived) workspaces visible to the caller. Used for archive
+  // target lookup and to break a same-cwd tie in favor of the worktree-kind
+  // record when archiving by path (no explicit workspaceId).
   listActiveWorkspaces: () => Promise<ActiveWorkspaceRef[]>;
+  // Unfiltered active registry view used only for destructive disk safety checks.
+  // Target discovery and mutation authorization continue to use listActiveWorkspaces.
+  // Required: a safety check must never silently degrade to a visibility-filtered view.
+  listAllActiveWorkspaces: () => Promise<ActiveWorkspaceRef[]>;
   archiveWorkspaceRecord: (workspaceId: string) => Promise<void>;
   emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds: Iterable<string>) => Promise<void>;
   markWorkspaceArchiving: (workspaceIds: Iterable<string>, archivingAt: string) => void;
@@ -52,6 +55,10 @@ export interface ArchiveDependencies {
   killTerminalsForWorkspace: (workspaceId: string) => Promise<void>;
   stopWorkspaceSetup?: (workspaceId: string) => Promise<void>;
   assertWorkspaceAutomationAllowed?: (workspaceId: string) => Promise<void>;
+  // Archive teardown runs lifecycle commands and deletes directories; callers
+  // wire this to reject targets inside a foreign (other-host) workspace
+  // sharing PASEO_HOME before any teardown side effect happens.
+  assertCwdWorkspaceOwnedByThisServer: (cwd: string) => Promise<void>;
   sessionLogger?: Logger;
 }
 
@@ -132,6 +139,16 @@ async function archiveByScopeWithPriority(
   request: ArchiveByScopeRequest,
 ): Promise<ArchiveResult> {
   const target = await resolveArchiveTarget(dependencies, request.scope);
+  // A backing directory can outlive its active workspace record. Gate the
+  // resolved backing path as well as teardown cwd values so an archived
+  // foreign record still prevents this host from deleting its worktree.
+  const ownershipTargets = [
+    ...(target.backing ? [target.backing.path] : []),
+    ...target.teardownTargets.map((teardownTarget) => teardownTarget.cwd),
+  ];
+  for (const cwd of uniqueCwds(ownershipTargets)) {
+    await dependencies.assertCwdWorkspaceOwnedByThisServer(cwd);
+  }
   const targetWorkspaceIds = target.workspaceIds;
 
   await stopWorkspaceSetups(dependencies, target.setupWorkspaceIds, request.requestId);
@@ -387,7 +404,7 @@ async function maybeRemoveDirectory(
     throw error;
   }
 
-  const remainingActive = await dependencies.listActiveWorkspaces();
+  const remainingActive = await dependencies.listAllActiveWorkspaces();
   if (
     !(await isDirectoryUnreferenced(
       remainingActive,
@@ -444,6 +461,16 @@ function uniqueTeardownTargets<T extends { cwd: string }>(targets: T[]): T[] {
   const unique: T[] = [];
   for (const candidate of targets) {
     if (!unique.some((existing) => createRealpathAwarePathMatcher(existing.cwd)(candidate.cwd))) {
+      unique.push(candidate);
+    }
+  }
+  return unique;
+}
+
+function uniqueCwds(cwds: string[]): string[] {
+  const unique: string[] = [];
+  for (const candidate of cwds) {
+    if (!unique.some((existing) => createRealpathAwarePathMatcher(existing)(candidate))) {
       unique.push(candidate);
     }
   }

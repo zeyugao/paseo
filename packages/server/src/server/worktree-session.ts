@@ -125,6 +125,9 @@ interface CreatePaseoWorktreeWorkflowDependencies extends CreatePaseoWorktreeInB
     },
   ) => Promise<CreatePaseoWorktreeResult>;
   warmWorkspaceGitData: (workspace: PersistedWorkspaceRecord) => Promise<void>;
+  // Rejects worktree creation whose source checkout belongs to another host
+  // sharing PASEO_HOME; legacy (hostId-less) workspaces stay allowed.
+  assertSourceWorkspaceOwned?: (cwd: string) => Promise<void>;
   autoNameWorkspaceBranchForFirstAgent: (input: {
     workspace: PersistedWorkspaceRecord;
     firstAgentContext: FirstAgentContext;
@@ -185,6 +188,7 @@ interface HandleCreatePaseoWorktreeRequestDependencies {
   createPaseoWorktreeWorkflow: (
     input: CreatePaseoWorktreeInput,
   ) => Promise<CreatePaseoWorktreeWorkflowResult>;
+  assertSourceWorkspaceOwned?: (cwd: string) => Promise<void>;
 }
 
 function normalizeFirstAgentContext(
@@ -560,6 +564,7 @@ export async function handleCreatePaseoWorktreeRequest(
   request: Extract<SessionInboundMessage, { type: "create_paseo_worktree_request" }>,
 ): Promise<void> {
   try {
+    await dependencies.assertSourceWorkspaceOwned?.(request.cwd);
     const commandResult = await createPaseoWorktreeCommand(
       {
         paseoHome: dependencies.paseoHome,
@@ -648,6 +653,7 @@ export async function createPaseoWorktreeWorkflow(
     setupContinuation?: CreatePaseoWorktreeSetupContinuationInput;
   },
 ): Promise<CreatePaseoWorktreeWorkflowResult> {
+  await dependencies.assertSourceWorkspaceOwned?.(input.cwd);
   const createdWorktree = await dependencies.createPaseoWorktree(
     {
       ...input,

@@ -1,11 +1,12 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AgentManager } from "./agent-manager.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
+import { toAgentPayload } from "./agent-projections.js";
 import { startAgentRun } from "./agent-prompt.js";
 import { AgentStorage } from "./agent-storage.js";
 import type {
@@ -16,7 +17,36 @@ import type {
   AgentSession,
   AgentSessionConfig,
 } from "./agent-sdk-types.js";
-import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
+import { createTestAgentClient, createTestAgentClients } from "../test-utils/fake-agent-client.js";
+import { attachAgentStoragePersistence } from "../persistence-hooks.js";
+
+function createPurposeCapturingClient(
+  resumeOptions: Array<AgentResumeSessionOptions | undefined>,
+): AgentClient {
+  const baseClient = createTestAgentClients().codex;
+  if (!baseClient) {
+    throw new Error("expected Codex test client");
+  }
+  return {
+    provider: baseClient.provider,
+    capabilities: baseClient.capabilities,
+    createSession: async (
+      config: AgentSessionConfig,
+      launchContext?: AgentLaunchContext,
+    ): Promise<AgentSession> => await baseClient.createSession(config, launchContext),
+    resumeSession: async (
+      handle: AgentPersistenceHandle,
+      overrides?: Partial<AgentSessionConfig>,
+      launchContext?: AgentLaunchContext,
+      options?: AgentResumeSessionOptions,
+    ): Promise<AgentSession> => {
+      resumeOptions.push(options);
+      return await baseClient.resumeSession(handle, overrides, launchContext);
+    },
+    fetchCatalog: async (options) => await baseClient.fetchCatalog(options),
+    isAvailable: async () => await baseClient.isAvailable(),
+  };
+}
 
 test("loads archived records for history and active records with the interactive default", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-loading-purpose-"));
@@ -77,6 +107,442 @@ test("loads archived records for history and active records with the interactive
       manager.closeAgent(activeId).catch(() => undefined),
     ]);
     await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("loads a foreign active agent as read-only history without rewriting its record", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-foreign-history-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(path.join(root, "agents"), logger);
+  const resumeOptions: Array<AgentResumeSessionOptions | undefined> = [];
+  const client = createPurposeCapturingClient(resumeOptions);
+  const owner = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-a",
+    logger,
+  });
+  const reader = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-b",
+    logger,
+  });
+  const agentId = "00000000-0000-4000-8000-000000000303";
+  let detachPersistence: (() => void) | null = null;
+
+  try {
+    await owner.createAgent({ provider: "codex", cwd: root }, agentId, {
+      workspaceId: "workspace-foreign",
+    });
+    await owner.closeAgent(agentId);
+    const stored = await storage.get(agentId);
+    if (!stored) {
+      throw new Error("expected stored foreign agent");
+    }
+    await storage.upsert({ ...stored, lastStatus: "running" });
+
+    const applySnapshot = vi.spyOn(storage, "applySnapshot");
+    const upsert = vi.spyOn(storage, "upsert");
+    detachPersistence = attachAgentStoragePersistence(logger, reader, storage, "host-b");
+    const loaded = await ensureAgentLoaded(agentId, {
+      agentManager: reader,
+      agentStorage: storage,
+      logger,
+    });
+    await reader.flush();
+
+    expect(resumeOptions).toEqual([{ purpose: "history" }]);
+    expect(loaded.hostId).toBe("host-a");
+    expect(loaded.lifecycle).toBe("idle");
+    expect(toAgentPayload(loaded).status).toBe("running");
+    expect(applySnapshot).not.toHaveBeenCalled();
+    expect(upsert).not.toHaveBeenCalled();
+    await expect(reader.runAgent(agentId, "do not run")).rejects.toThrow(
+      "agent is owned by host host-a",
+    );
+    await expect(reader.cancelAgentRun(agentId)).rejects.toThrow("agent is owned by host host-a");
+    await reader.closeAgent(agentId);
+    await reader.flush();
+    expect(applySnapshot).not.toHaveBeenCalled();
+    expect(upsert).not.toHaveBeenCalled();
+  } finally {
+    detachPersistence?.();
+    await Promise.all([
+      owner.closeAgent(agentId).catch(() => undefined),
+      reader.closeAgent(agentId).catch(() => undefined),
+    ]);
+    await owner.flush().catch(() => undefined);
+    await reader.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("takes over a closed foreign agent after an interactive resume", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-foreign-takeover-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(path.join(root, "agents"), logger);
+  const resumeOptions: Array<AgentResumeSessionOptions | undefined> = [];
+  const client = createPurposeCapturingClient(resumeOptions);
+  const owner = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-a",
+    logger,
+  });
+  const adopter = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-b",
+    logger,
+  });
+  const agentId = "00000000-0000-4000-8000-000000000304";
+
+  try {
+    await owner.createAgent({ provider: "codex", cwd: root }, agentId, {
+      workspaceId: "workspace-adopted",
+    });
+    await owner.closeAgent(agentId);
+    expect(await storage.get(agentId)).toMatchObject({ hostId: "host-a", lastStatus: "closed" });
+
+    const loaded = await ensureAgentLoaded(agentId, {
+      agentManager: adopter,
+      agentStorage: storage,
+      logger,
+    });
+    await adopter.flush();
+    await storage.flush();
+
+    expect(resumeOptions).toEqual([{ purpose: "interactive" }]);
+    expect(loaded.hostId).toBe("host-b");
+    expect(await storage.get(agentId)).toMatchObject({ hostId: "host-b", lastStatus: "idle" });
+  } finally {
+    await Promise.all([
+      owner.closeAgent(agentId).catch(() => undefined),
+      adopter.closeAgent(agentId).catch(() => undefined),
+    ]);
+    await owner.flush().catch(() => undefined);
+    await adopter.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("drops a resident foreign history copy on rescan after the owner closes it", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-foreign-rescan-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(path.join(root, "agents"), logger);
+  const resumeOptions: Array<AgentResumeSessionOptions | undefined> = [];
+  const client = createPurposeCapturingClient(resumeOptions);
+  const owner = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-a",
+    logger,
+  });
+  const reader = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-b",
+    logger,
+  });
+  const agentId = "00000000-0000-4000-8000-000000000305";
+  const now = vi.spyOn(Date, "now").mockReturnValue(10_000);
+
+  try {
+    await owner.createAgent({ provider: "codex", cwd: root }, agentId, {
+      workspaceId: "workspace-foreign",
+    });
+    await owner.closeAgent(agentId);
+    const stored = await storage.get(agentId);
+    if (!stored) {
+      throw new Error("expected stored foreign agent");
+    }
+    await storage.upsert({ ...stored, lastStatus: "running" });
+
+    const loaded = await ensureAgentLoaded(agentId, {
+      agentManager: reader,
+      agentStorage: storage,
+      logger,
+    });
+    expect(loaded.hostId).toBe("host-a");
+    expect(resumeOptions).toEqual([{ purpose: "history" }]);
+
+    // The owner closes the agent; the shared record now says closed.
+    await storage.upsert({ ...stored, lastStatus: "closed" });
+
+    // The rescan notifies the reader, which drops its resident copy.
+    now.mockReturnValue(20_000);
+    await storage.list();
+    await reader.flush();
+    expect(reader.getAgent(agentId)).toBeNull();
+
+    // The next load takes the closed foreign agent over interactively.
+    const adopted = await ensureAgentLoaded(agentId, {
+      agentManager: reader,
+      agentStorage: storage,
+      logger,
+    });
+    await reader.flush();
+    await storage.flush();
+
+    expect(resumeOptions).toEqual([{ purpose: "history" }, { purpose: "interactive" }]);
+    expect(adopted.hostId).toBe("host-b");
+    expect(await storage.get(agentId)).toMatchObject({ hostId: "host-b" });
+  } finally {
+    now.mockRestore();
+    await Promise.all([
+      owner.closeAgent(agentId).catch(() => undefined),
+      reader.closeAgent(agentId).catch(() => undefined),
+    ]);
+    await owner.flush().catch(() => undefined);
+    await reader.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("refreshes a resident foreign lifecycle projection without persisting it", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-foreign-projection-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(path.join(root, "agents"), logger);
+  const client = createPurposeCapturingClient([]);
+  const owner = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-a",
+    logger,
+  });
+  const reader = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-b",
+    logger,
+  });
+  const agentId = "00000000-0000-4000-8000-000000000307";
+  const now = vi.spyOn(Date, "now").mockReturnValue(10_000);
+
+  try {
+    await owner.createAgent({ provider: "codex", cwd: root }, agentId, {
+      workspaceId: "workspace-foreign",
+    });
+    await owner.closeAgent(agentId);
+    const stored = await storage.get(agentId);
+    if (!stored) throw new Error("expected stored foreign agent");
+    await storage.upsert({ ...stored, lastStatus: "running" });
+
+    const loaded = await ensureAgentLoaded(agentId, {
+      agentManager: reader,
+      agentStorage: storage,
+      logger,
+    });
+    expect(toAgentPayload(loaded).status).toBe("running");
+
+    await storage.upsert({ ...stored, lastStatus: "idle" });
+    const applySnapshot = vi.spyOn(storage, "applySnapshot");
+    const upsert = vi.spyOn(storage, "upsert");
+    const projectedStatuses: string[] = [];
+    const unsubscribe = reader.subscribe((event) => {
+      if (event.type === "agent_state" && event.agent.id === agentId) {
+        projectedStatuses.push(toAgentPayload(event.agent).status);
+      }
+    });
+
+    now.mockReturnValue(20_000);
+    await storage.list();
+    await reader.flush();
+    unsubscribe();
+
+    const resident = reader.getAgent(agentId);
+    expect(resident).not.toBeNull();
+    expect(resident && toAgentPayload(resident).status).toBe("idle");
+    expect(projectedStatuses).toContain("idle");
+    expect(applySnapshot).not.toHaveBeenCalled();
+    expect(upsert).not.toHaveBeenCalled();
+  } finally {
+    now.mockRestore();
+    await Promise.all([
+      owner.closeAgent(agentId).catch(() => undefined),
+      reader.closeAgent(agentId).catch(() => undefined),
+    ]);
+    await owner.flush().catch(() => undefined);
+    await reader.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects foreign history for a provider without read-only history support", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-foreign-provider-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(path.join(root, "agents"), logger);
+  const client = createTestAgentClient("opencode");
+  const owner = new AgentManager({
+    clients: { opencode: client },
+    registry: storage,
+    serverId: "host-a",
+    logger,
+  });
+  const reader = new AgentManager({
+    clients: { opencode: client },
+    registry: storage,
+    serverId: "host-b",
+    logger,
+  });
+  const agentId = "00000000-0000-4000-8000-000000000308";
+
+  try {
+    await owner.createAgent({ provider: "opencode", cwd: root }, agentId, {
+      workspaceId: "workspace-foreign",
+    });
+    await owner.closeAgent(agentId);
+    const stored = await storage.get(agentId);
+    if (!stored) throw new Error("expected stored foreign agent");
+    await storage.upsert({ ...stored, lastStatus: "running" });
+
+    await expect(
+      ensureAgentLoaded(agentId, {
+        agentManager: reader,
+        agentStorage: storage,
+        logger,
+      }),
+    ).rejects.toThrow("provider opencode does not support read-only history on this host");
+    expect(reader.getAgent(agentId)).toBeNull();
+  } finally {
+    await Promise.all([
+      owner.closeAgent(agentId).catch(() => undefined),
+      reader.closeAgent(agentId).catch(() => undefined),
+    ]);
+    await owner.flush().catch(() => undefined);
+    await reader.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reloads a resident foreign history copy interactively once the record shows closed", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-foreign-reload-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(path.join(root, "agents"), logger);
+  const resumeOptions: Array<AgentResumeSessionOptions | undefined> = [];
+  const client = createPurposeCapturingClient(resumeOptions);
+  const owner = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-a",
+    logger,
+  });
+  const reader = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-b",
+    logger,
+  });
+  const agentId = "00000000-0000-4000-8000-000000000306";
+
+  try {
+    await owner.createAgent({ provider: "codex", cwd: root }, agentId, {
+      workspaceId: "workspace-foreign",
+    });
+    await owner.closeAgent(agentId);
+    const stored = await storage.get(agentId);
+    if (!stored) {
+      throw new Error("expected stored foreign agent");
+    }
+    await storage.upsert({ ...stored, lastStatus: "running" });
+
+    const loaded = await ensureAgentLoaded(agentId, {
+      agentManager: reader,
+      agentStorage: storage,
+      logger,
+    });
+    expect(loaded.hostId).toBe("host-a");
+    expect(resumeOptions).toEqual([{ purpose: "history" }]);
+
+    // The owner closes the agent while the reader's copy stays resident and
+    // no rescan runs: the loader itself must re-read the record.
+    await storage.upsert({ ...stored, lastStatus: "closed" });
+
+    const adopted = await ensureAgentLoaded(agentId, {
+      agentManager: reader,
+      agentStorage: storage,
+      logger,
+    });
+    await reader.flush();
+    await storage.flush();
+
+    expect(resumeOptions).toEqual([{ purpose: "history" }, { purpose: "interactive" }]);
+    expect(adopted.hostId).toBe("host-b");
+    expect(await storage.get(agentId)).toMatchObject({ hostId: "host-b" });
+  } finally {
+    await Promise.all([
+      owner.closeAgent(agentId).catch(() => undefined),
+      reader.closeAgent(agentId).catch(() => undefined),
+    ]);
+    await owner.flush().catch(() => undefined);
+    await reader.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects label writes for a resident foreign agent", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-foreign-labels-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(path.join(root, "agents"), logger);
+  const client = createTestAgentClients().codex;
+  if (!client) {
+    throw new Error("expected Codex test client");
+  }
+  const owner = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-a",
+    logger,
+  });
+  const reader = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-b",
+    logger,
+  });
+  const agentId = "00000000-0000-4000-8000-000000000307";
+
+  try {
+    await owner.createAgent({ provider: "codex", cwd: root }, agentId, {
+      workspaceId: "workspace-foreign",
+    });
+    await owner.closeAgent(agentId);
+    const stored = await storage.get(agentId);
+    if (!stored) {
+      throw new Error("expected stored foreign agent");
+    }
+    await storage.upsert({ ...stored, lastStatus: "running" });
+
+    const loaded = await ensureAgentLoaded(agentId, {
+      agentManager: reader,
+      agentStorage: storage,
+      logger,
+    });
+    expect(loaded.hostId).toBe("host-a");
+
+    await expect(reader.setLabels(agentId, { surface: "mobile" })).rejects.toThrow(
+      "agent is owned by host host-a",
+    );
+    await expect(
+      reader.updateAgentMetadata(agentId, { labels: { surface: "mobile" } }),
+    ).rejects.toThrow("agent is owned by host host-a");
+    expect((await storage.get(agentId))?.labels).toEqual(stored.labels);
+  } finally {
+    await Promise.all([
+      owner.closeAgent(agentId).catch(() => undefined),
+      reader.closeAgent(agentId).catch(() => undefined),
+    ]);
+    await owner.flush().catch(() => undefined);
+    await reader.flush().catch(() => undefined);
     await storage.flush().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }

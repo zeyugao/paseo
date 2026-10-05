@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   cp,
@@ -10,6 +11,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -47,6 +49,9 @@ function createStore(
   home: string,
   plugins: Record<string, { source: "directory"; path: string; enabled?: boolean }> = {},
 ): DaemonConfigStore {
+  // Production builds the store from the persisted config; initial plugins
+  // must exist in config.json for plugin mutations that re-read it on disk.
+  writeFileSync(path.join(home, "config.json"), `${JSON.stringify({ plugins }, null, 2)}\n`);
   return new DaemonConfigStore(home, {
     mcp: { injectIntoAgents: true },
     browserTools: { enabled: false },
@@ -105,6 +110,23 @@ function catalogIds(service: PluginService): string[] {
     .catalog()
     .map(({ id }) => id)
     .sort();
+}
+
+// Plugin config writes run under a cross-process lock, so concurrent tests
+// wait for the write to land before resuming a paused start.
+function waitForPluginsPatch(
+  store: DaemonConfigStore,
+  pluginId: string,
+  enabled: boolean,
+): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const unsubscribe = store.onChange((config) => {
+    if (config.plugins?.[pluginId]?.enabled === enabled) {
+      unsubscribe();
+      resolve();
+    }
+  });
+  return promise;
 }
 
 afterEach(async () => {
@@ -745,7 +767,7 @@ export default function contribute(server: PluginServerContext) {
         expect(await stat(repository)).toBeDefined();
         const sources = new ManagedPluginSources(home);
         // A record cannot confer ownership on another plugin's tree or a malformed version name.
-        sources.commit(id, { kind: "git", remote });
+        await sources.commit(id, { kind: "git", remote });
         for (const outside of [
           path.join(home, "plugins", "other", path.basename(legacyRoot), "checkout"),
           path.join(home, "plugins", id, "f".repeat(36), "checkout"),
@@ -932,7 +954,7 @@ export default function contribute(server: PluginServerContext) {
       source: pathToFileURL(repository).href,
     });
     initial = await managedSources.place("failed-update", initial);
-    managedSources.commit("failed-update", initial.record);
+    await managedSources.commit("failed-update", initial.record);
 
     const running = new Set<string>();
     const starts: string[] = [];
@@ -1164,6 +1186,7 @@ export default function contribute(plugin: unknown) {
     );
     await paused.started;
     const disabling = service.disablePlugin("slow");
+    await waitForPluginsPatch(store, "slow", false);
     paused.releaseStart();
 
     await enabling;
@@ -1188,6 +1211,7 @@ export default function contribute(plugin: unknown) {
     await paused.started;
     const enabling = service.enablePlugin("slow");
     const disabling = service.disablePlugin("slow");
+    await waitForPluginsPatch(store, "slow", false);
     paused.releaseStart();
 
     await occupying;
@@ -1304,6 +1328,192 @@ export default function contribute(plugin: unknown) {
     await service.stopAllPlugins();
 
     expect((await readFile(cleanupFile, "utf8")).trim().split("\n")).toHaveLength(4);
+  }, 30_000);
+
+  it("keeps plugins configured by another daemon sharing the home", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-shared-home-"));
+    roots.push(home);
+    const first = await createPlugin(
+      "shared-first",
+      `export default function contribute(plugin: unknown) { void plugin; return () => undefined; }`,
+    );
+    const second = await createPlugin(
+      "shared-second",
+      `export default function contribute(plugin: unknown) { void plugin; return () => undefined; }`,
+    );
+
+    const daemonA = createService(home);
+    const daemonB = createService(home);
+    await daemonA.start();
+    await daemonB.start();
+    await daemonA.installDirectory({ path: first });
+
+    // daemonB cached its config before daemonA's install; its plugin
+    // lifecycle writes must not drop daemonA's entry from the shared
+    // config.json.
+    await daemonB.installDirectory({ path: second });
+    await daemonB.disablePlugin("shared-first");
+
+    const config = JSON.parse(await readFile(path.join(home, "config.json"), "utf8"));
+    expect(config.plugins).toEqual({
+      "shared-first": { source: "directory", path: first, enabled: false },
+      "shared-second": { source: "directory", path: second, enabled: true },
+    });
+
+    await daemonB.removePlugin("shared-second");
+    const afterRemoval = JSON.parse(await readFile(path.join(home, "config.json"), "utf8"));
+    expect(afterRemoval.plugins).toEqual({
+      "shared-first": { source: "directory", path: first, enabled: false },
+    });
+
+    await daemonA.stopAllPlugins();
+    await daemonB.stopAllPlugins();
+  });
+
+  it("serializes ordinary plugins config patches with plugin lifecycle writes", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-config-lock-"));
+    roots.push(home);
+    const store = createStore(home);
+    const service = new PluginService(pino({ level: "silent" }), store, "0.8.0");
+    const lockPath = path.join(home, ".plugins.lock");
+    const acquiredPath = path.join(home, "plugins-lock-acquired");
+    const holder = spawn(
+      "flock",
+      [
+        "--exclusive",
+        lockPath,
+        "/bin/sh",
+        "-c",
+        'printf "1" > "$1"; sleep 0.35',
+        "plugin-lock-test",
+        acquiredPath,
+      ],
+      { stdio: "ignore" },
+    );
+    const readAcquired = async (): Promise<string | null> => {
+      try {
+        return await readFile(acquiredPath, "utf8");
+      } catch {
+        return null;
+      }
+    };
+    try {
+      await expect.poll(readAcquired, { timeout: 5_000 }).toBe("1");
+      const startedAt = Date.now();
+      store.patch({
+        plugins: {
+          locked: { source: "directory", path: path.join(home, "locked"), enabled: true },
+        },
+      });
+
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(200);
+      expect(store.get().plugins).toHaveProperty("locked");
+    } finally {
+      if (holder.exitCode === null) {
+        await new Promise<void>((resolve) => holder.once("close", () => resolve()));
+      }
+      await service.stopAllPlugins();
+    }
+  });
+
+  it("keeps plugin records of another daemon sharing the home", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-shared-git-"));
+    roots.push(home);
+    const repository = await mkdtemp(path.join(tmpdir(), "paseo-plugin-shared-repository-"));
+    roots.push(repository);
+    await runGitCommand(["init", "-b", "main"], { cwd: repository });
+    await runGitCommand(["config", "user.name", "Paseo Tests"], { cwd: repository });
+    await runGitCommand(["config", "user.email", "paseo@example.test"], { cwd: repository });
+    await writeFile(
+      path.join(repository, "paseo-plugin.json"),
+      JSON.stringify({ id: "shared-git", requirements: { paseo: ">=0.8.0" } }),
+    );
+    await writeFile(
+      path.join(repository, "index.server.ts"),
+      `export default function contribute(plugin: unknown) { void plugin; return () => undefined; }`,
+    );
+    for (const args of [
+      ["add", "-A"],
+      ["commit", "-m", "initial"],
+    ])
+      await runGitCommand(args, { cwd: repository });
+    const remote = pathToFileURL(repository).href;
+
+    const open = (store = createStore(home)) =>
+      bindTestSessionHost(
+        new PluginService(pino({ level: "silent" }), store, "0.8.0", {
+          managedSources: new ManagedPluginSources(home),
+        }),
+      );
+    const daemonAStore = createStore(home);
+    let sourceRecordPresentAtConfigPublication = false;
+    daemonAStore.onFieldChange("plugins", (plugins) => {
+      if (!(plugins as Record<string, unknown> | undefined)?.["shared-git"]) return;
+      try {
+        const records = JSON.parse(
+          readFileSync(path.join(home, "plugins", "sources.json"), "utf8"),
+        );
+        sourceRecordPresentAtConfigPublication = Boolean(records["shared-git"]);
+      } catch {
+        sourceRecordPresentAtConfigPublication = false;
+      }
+    });
+    const daemonA = open(daemonAStore);
+    const daemonB = open();
+    await daemonA.start();
+    await daemonB.start();
+
+    await daemonA.installSource({ source: remote });
+    expect(sourceRecordPresentAtConfigPublication).toBe(true);
+    // daemonB's config cache and source records predate daemonA's install;
+    // installing and removing on daemonB must preserve daemonA's config
+    // entry and sources.json record.
+    await daemonB.installSource({ source: remote, id: "shared-git-second" });
+
+    const config = JSON.parse(await readFile(path.join(home, "config.json"), "utf8"));
+    expect(Object.keys(config.plugins).sort()).toEqual(["shared-git", "shared-git-second"]);
+    const records = JSON.parse(await readFile(path.join(home, "plugins", "sources.json"), "utf8"));
+    expect(Object.keys(records).sort()).toEqual(["shared-git", "shared-git-second"]);
+
+    await daemonB.removePlugin("shared-git-second");
+    const configAfterRemoval = JSON.parse(await readFile(path.join(home, "config.json"), "utf8"));
+    expect(Object.keys(configAfterRemoval.plugins)).toEqual(["shared-git"]);
+    const recordsAfterRemoval = JSON.parse(
+      await readFile(path.join(home, "plugins", "sources.json"), "utf8"),
+    );
+    expect(Object.keys(recordsAfterRemoval)).toEqual(["shared-git"]);
+    expect(await daemonA.listPlugins()).toMatchObject([{ id: "shared-git", status: "running" }]);
+
+    await daemonA.stopAllPlugins();
+    await daemonB.stopAllPlugins();
+  }, 60_000);
+
+  it("adopts the persisted source path on reload after another daemon moved it", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-shared-adopt-"));
+    roots.push(home);
+    const source = `export default function contribute(plugin: unknown) { void plugin; return () => undefined; }`;
+    const oldDirectory = await createPlugin("adopt-me", source);
+    const newDirectory = await createPlugin("adopt-me", source);
+    const store = createStore(home, {
+      "adopt-me": { source: "directory", path: oldDirectory, enabled: true },
+    });
+    const service = bindTestSessionHost(
+      new PluginService(pino({ level: "silent" }), store, "0.4.0"),
+    );
+    await service.start();
+
+    // Another daemon sharing PASEO_HOME updated the plugin and removed the
+    // directory this daemon still points at.
+    const config = JSON.parse(await readFile(path.join(home, "config.json"), "utf8"));
+    config.plugins["adopt-me"].path = newDirectory;
+    await writeFile(path.join(home, "config.json"), JSON.stringify(config, null, 2));
+    await rm(oldDirectory, { recursive: true, force: true });
+
+    expect(await service.reloadPlugin("adopt-me")).toMatchObject({
+      path: newDirectory,
+      status: "running",
+    });
+    await service.stopAllPlugins();
   });
 });
 
@@ -1562,6 +1772,9 @@ export default function contribute() {
         error: expect.stringContaining("Installed revision is unavailable"),
       });
       expect(await service.reloadPlugin("npm-review")).toMatchObject({ status: "running" });
+      // The stripped PATH only proves reloads work without npm; plugin
+      // removal needs the platform lock helper back on PATH.
+      process.env.PATH = previousPath;
       await writeFile(packagePath, packageJson);
       await service.removePlugin("npm-review");
       await expect(stat(installRoot)).rejects.toMatchObject({ code: "ENOENT" });

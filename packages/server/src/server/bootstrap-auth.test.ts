@@ -189,6 +189,30 @@ describe("daemon bearer auth", () => {
       const token = (
         await readFile(join(daemonHandle.paseoHome, "local-credential"), "utf8")
       ).trim();
+      expect(
+        (
+          await readFile(
+            join(
+              daemonHandle.paseoHome,
+              "daemons",
+              daemonHandle.daemon.getServerId(),
+              "local-credential",
+            ),
+            "utf8",
+          )
+        ).trim(),
+      ).toBe(token);
+      await expect(
+        readFile(
+          join(
+            daemonHandle.paseoHome,
+            "daemons",
+            daemonHandle.daemon.getServerId(),
+            "instance.json",
+          ),
+          "utf8",
+        ),
+      ).resolves.toContain(`"serverId": "${daemonHandle.daemon.getServerId()}"`);
       if (process.platform !== "win32") {
         expect((await stat(join(daemonHandle.paseoHome, "local-credential"))).mode & 0o777).toBe(
           0o600,
@@ -225,6 +249,23 @@ describe("daemon bearer auth", () => {
     }
     await expect(
       readFile(join(daemonHandle.paseoHome, "local-credential"), "utf8"),
+    ).rejects.toThrow();
+    await expect(
+      readFile(
+        join(
+          daemonHandle.paseoHome,
+          "daemons",
+          daemonHandle.daemon.getServerId(),
+          "local-credential",
+        ),
+        "utf8",
+      ),
+    ).rejects.toThrow();
+    await expect(
+      readFile(
+        join(daemonHandle.paseoHome, "daemons", daemonHandle.daemon.getServerId(), "instance.json"),
+        "utf8",
+      ),
     ).rejects.toThrow();
   });
 

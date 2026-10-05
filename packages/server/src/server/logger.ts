@@ -31,6 +31,7 @@ type LoggerConfigInput = PersistedConfig | LegacyLogConfig | undefined;
 interface ResolveLogConfigOptions {
   paseoHome?: string;
   file?: boolean;
+  env?: NodeJS.ProcessEnv;
 }
 
 const LOG_LEVEL_PRIORITIES: Record<LogLevel, number> = {
@@ -61,16 +62,16 @@ const REDACT_PATHS = [
   "req.headers.Sec-WebSocket-Protocol",
 ];
 
-function resolveFilePath(paseoHome: string, configuredPath: string | undefined): string {
-  const fallback = path.join(paseoHome, DEFAULT_DAEMON_LOG_FILENAME);
-  if (!configuredPath) {
-    return fallback;
-  }
-
-  if (path.isAbsolute(configuredPath)) {
-    return configuredPath;
-  }
-
+function resolveFilePath(
+  paseoHome: string,
+  configuredPath: string | undefined,
+  env: NodeJS.ProcessEnv,
+): string {
+  const serverId = env.PASEO_SERVER_ID?.trim();
+  const defaultFilename = serverId ? `daemon.${serverId}.log` : DEFAULT_DAEMON_LOG_FILENAME;
+  const fallback = path.join(paseoHome, defaultFilename);
+  if (!configuredPath) return fallback;
+  if (path.isAbsolute(configuredPath)) return configuredPath;
   return path.resolve(paseoHome, configuredPath);
 }
 
@@ -148,7 +149,7 @@ export function resolveLogConfig(
     options?.file !== false && persistedLog?.file
       ? {
           level: fileLevel ?? DEFAULT_FILE_LEVEL,
-          path: resolveFilePath(paseoHome, persistedLog.file.path),
+          path: resolveFilePath(paseoHome, persistedLog.file.path, options?.env ?? process.env),
         }
       : undefined;
 

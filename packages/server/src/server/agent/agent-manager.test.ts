@@ -3211,21 +3211,41 @@ test("resumeAgentFromPersistence closes and rejects a session that cannot honor 
 
   try {
     await expect(
-      manager.resumeAgentFromPersistence(
-        handle,
-        {
-          cwd: workdir,
-          mcpServers: {
-            hub: { type: "http", url: "https://hub.test/mcp/executions/resume" },
-          },
+      manager.resumeAgentFromPersistence(handle, {
+        cwd: workdir,
+        mcpServers: {
+          hub: { type: "http", url: "https://hub.test/mcp/executions/resume" },
         },
-        agentId,
-      ),
+      }),
     ).rejects.toThrow("Provider 'codex' does not support MCP servers");
 
     expect(replacement.closed).toBe(true);
     expect(manager.getAgent(agentId)).toBeNull();
     expect(await storage.get(agentId)).toBeNull();
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("resumeAgentFromPersistence aborts when an explicit agent record disappears", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-resume-fresh-miss-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+  const agentId = "00000000-0000-4000-8000-000000000109";
+
+  try {
+    await expect(
+      manager.resumeAgentFromPersistence(
+        { provider: "codex", sessionId: "deleted-before-resume" },
+        { cwd: workdir },
+        agentId,
+      ),
+    ).rejects.toThrow(`Agent not found: ${agentId}`);
+    expect(manager.getAgent(agentId)).toBeNull();
   } finally {
     rmSync(workdir, { recursive: true, force: true });
   }
@@ -11944,6 +11964,70 @@ test("commits startup notices once on create and after restored history", async 
     expect(store.writes.flat()).toContainEqual(expect.objectContaining({ item: notice }));
   } finally {
     for (const id of ids) await manager.closeAgent(id);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("foreign initial timeline replay stays out of the durable timeline store", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-foreign-initial-timeline-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const agentId = "00000000-0000-4000-8000-000000000305";
+  const notice: AgentTimelineItem = {
+    type: "notification",
+    level: "info",
+    message: "Remote runtime notice",
+  };
+  const owner = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    serverId: "host-a",
+    logger,
+  });
+  const client = new (class extends TestAgentClient {
+    override async resumeSession(
+      _handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+    ): Promise<AgentSession> {
+      return new (class extends TestAgentSession {
+        readonly initialTimeline = [{ item: notice, timestamp: "2026-09-22T00:00:00.000Z" }];
+      })({ provider: "codex", cwd: config?.cwd ?? workdir });
+    }
+  })();
+  const store = new RecordingTimelineStore();
+  vi.spyOn(store, "getLatestCommittedSeq").mockResolvedValue(1);
+  const reader = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    serverId: "host-b",
+    durableTimelineStore: store,
+    logger,
+  });
+
+  try {
+    await owner.createAgent({ provider: "codex", cwd: workdir }, agentId, {});
+    await owner.closeAgent(agentId);
+    const stored = await storage.get(agentId);
+    if (!stored?.persistence) throw new Error("expected persisted foreign agent");
+    await storage.upsert({ ...stored, lastStatus: "running" });
+
+    const loaded = await reader.resumeAgentFromPersistence(
+      stored.persistence,
+      { cwd: workdir },
+      agentId,
+      undefined,
+      { purpose: "history" },
+    );
+    await reader.flush();
+
+    expect(loaded.hostId).toBe("host-a");
+    expect((await reader.getTimelineRows(agentId)).map((row) => row.item)).toEqual([notice]);
+    expect(store.writes).toEqual([]);
+  } finally {
+    await Promise.all([
+      owner.closeAgent(agentId).catch(() => undefined),
+      reader.closeAgent(agentId).catch(() => undefined),
+    ]);
+    await storage.flush();
     rmSync(workdir, { recursive: true, force: true });
   }
 });

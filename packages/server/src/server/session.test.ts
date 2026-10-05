@@ -30,7 +30,10 @@ import type { StoredAgentRecord } from "./agent/agent-storage.js";
 import type { AgentManagerEvent } from "./agent/agent-manager.js";
 import type { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
 import { WorkspaceLabelError, type WorkspaceLabelService } from "./workspace-labels/index.js";
-import { createPersistedProjectRecord } from "./workspace-registry.js";
+import {
+  createPersistedProjectRecord,
+  createPersistedWorkspaceRecord,
+} from "./workspace-registry.js";
 import { deriveProjectKey } from "./project-key.js";
 import type { SessionOptions } from "./session.js";
 import type { SessionInboundMessage, SessionOutboundMessage } from "./messages.js";
@@ -2362,6 +2365,18 @@ describe("session checkout merge handling", () => {
       workspaceGitService,
       messages,
     });
+    gitCommandMocks.runGitCommand.mockResolvedValue({
+      stdout: [
+        "worktree /tmp/request-worktree",
+        "branch refs/heads/feature",
+        "",
+        "worktree /tmp/base-worktree",
+        "branch refs/heads/main",
+        "",
+      ].join("\n"),
+      stderr: "",
+      exitCode: 0,
+    });
 
     checkoutGitMocks.mergeToBase.mockResolvedValue("/tmp/base-worktree");
 
@@ -2396,6 +2411,104 @@ describe("session checkout merge handling", () => {
         success: true,
         error: null,
         requestId: "request-1",
+      },
+    });
+  });
+
+  test("rejects merge-to-base when the base worktree belongs to another host", async () => {
+    const messages: unknown[] = [];
+    const foreignBase = createPersistedWorkspaceRecord({
+      workspaceId: "ws-foreign-base",
+      projectId: "project-repo",
+      cwd: "/tmp/foreign-base-worktree",
+      kind: "worktree",
+      displayName: "foreign-base",
+      hostId: "srv-other",
+      branch: "main",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const workspaceGitService = {
+      getSnapshot: vi.fn().mockResolvedValue(
+        createWorkspaceGitSnapshot("/tmp/request-worktree", {
+          git: { isGit: true, baseRef: "main", isDirty: false },
+        }),
+      ),
+    };
+    gitCommandMocks.runGitCommand.mockResolvedValue({
+      stdout: [
+        "worktree /tmp/request-worktree",
+        "branch refs/heads/feature",
+        "",
+        "worktree /tmp/foreign-base-worktree",
+        "branch refs/heads/main",
+        "",
+      ].join("\n"),
+      stderr: "",
+      exitCode: 0,
+    });
+    const session = createSessionForTest({
+      serverId: "srv-local",
+      workspaceRegistry: {
+        get: vi.fn(),
+        list: vi.fn().mockResolvedValue([foreignBase]),
+      },
+      workspaceGitService,
+      messages,
+    });
+
+    await session.handleMessage({
+      type: "checkout_merge_request",
+      cwd: "/tmp/request-worktree",
+      baseRef: "main",
+      requestId: "foreign-base",
+    });
+
+    expect(checkoutGitMocks.mergeToBase).not.toHaveBeenCalled();
+    expect(messages).toContainEqual({
+      type: "checkout_merge_response",
+      payload: {
+        cwd: "/tmp/request-worktree",
+        success: false,
+        error: {
+          code: "UNKNOWN",
+          message: "Workspace ws-foreign-base is owned by host srv-other",
+        },
+        requestId: "foreign-base",
+      },
+    });
+  });
+
+  test("rejects merge-to-base when the target worktree cannot be resolved", async () => {
+    const messages: unknown[] = [];
+    const workspaceGitService = {
+      getSnapshot: vi.fn().mockResolvedValue(
+        createWorkspaceGitSnapshot("/tmp/request-worktree", {
+          git: { isGit: true, baseRef: "main", isDirty: false },
+        }),
+      ),
+    };
+    gitCommandMocks.runGitCommand.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+    const session = createSessionForTest({ workspaceGitService, messages });
+
+    await session.handleMessage({
+      type: "checkout_merge_request",
+      cwd: "/tmp/request-worktree",
+      baseRef: "main",
+      requestId: "unresolved-base-worktree",
+    });
+
+    expect(checkoutGitMocks.mergeToBase).not.toHaveBeenCalled();
+    expect(messages).toContainEqual({
+      type: "checkout_merge_response",
+      payload: {
+        cwd: "/tmp/request-worktree",
+        success: false,
+        error: {
+          code: "UNKNOWN",
+          message: "Unable to resolve the merge target worktree for main",
+        },
+        requestId: "unresolved-base-worktree",
       },
     });
   });

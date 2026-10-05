@@ -13,8 +13,12 @@ import {
 } from "@getpaseo/protocol/agent-state-bucket";
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import { SortablePager } from "./pagination/sortable-pager.js";
-import type { PersistedProjectRecord, PersistedWorkspaceRecord } from "./workspace-registry.js";
-import { resolveProjectDisplayName } from "./workspace-registry.js";
+import {
+  isWorkspaceVisibleToServer,
+  resolveProjectDisplayName,
+  type PersistedProjectRecord,
+  type PersistedWorkspaceRecord,
+} from "./workspace-registry.js";
 import {
   deriveTerminalActivityStatusBucket,
   type TerminalActivity,
@@ -69,6 +73,7 @@ export type ProviderSubagentWorkspaceActivity = Pick<
 >;
 
 export interface WorkspaceDirectoryDeps {
+  serverId?: string;
   logger: pino.Logger;
   projectRegistry: {
     list(): Promise<PersistedProjectRecord[]>;
@@ -78,6 +83,7 @@ export interface WorkspaceDirectoryDeps {
   };
   listAgentPayloads(): Promise<AgentSnapshotPayload[]>;
   listProviderSubagentActivity(): Promise<ProviderSubagentWorkspaceActivity[]>;
+  resolveAgentHostId?: (agentId: string) => Promise<string | undefined>;
   listTerminalActivityContributions(): Promise<
     Array<{ cwd: string; workspaceId?: string; activity: TerminalActivity | null }>
   >;
@@ -156,12 +162,16 @@ export function workspaceIdsForProjects(
 function activeWorkspaceRecords(
   workspaces: PersistedWorkspaceRecord[],
   projects: PersistedProjectRecord[],
+  serverId: string | undefined,
 ): PersistedWorkspaceRecord[] {
   const archivedProjects = new Set(
     projects.filter((project) => project.archivedAt).map((project) => project.projectId),
   );
   return workspaces.filter(
-    (workspace) => !workspace.archivedAt && !archivedProjects.has(workspace.projectId),
+    (workspace) =>
+      isWorkspaceVisibleToServer(workspace, serverId) &&
+      !workspace.archivedAt &&
+      !archivedProjects.has(workspace.projectId),
   );
 }
 
@@ -235,7 +245,11 @@ export class WorkspaceDirectory {
         .filter((project) => !project.archivedAt)
         .map((project) => [project.projectId, project] as const),
     );
-    const activeRecords = activeWorkspaceRecords(persistedWorkspaces, persistedProjects);
+    const activeRecords = activeWorkspaceRecords(
+      persistedWorkspaces,
+      persistedProjects,
+      this.deps.serverId,
+    );
     const descriptorsByWorkspaceId = new Map<string, WorkspaceDescriptorPayload>();
     const workspaceIds = options.workspaceIds ? new Set(options.workspaceIds) : null;
     const activeWorkspaceIds = new Set(activeRecords.map((workspace) => workspace.workspaceId));
@@ -262,9 +276,26 @@ export class WorkspaceDirectory {
       });
     }
 
-    const activeAgents = agents.filter(
+    const visibleAgents = agents.filter(
       (agent) => !agent.archivedAt && this.deps.isProviderVisibleToClient(agent.provider),
     );
+    const activeAgents = this.deps.resolveAgentHostId
+      ? (
+          await Promise.all(
+            visibleAgents.map(async (agent) => ({
+              agent,
+              hostId: await this.deps.resolveAgentHostId?.(agent.id),
+            })),
+          )
+        )
+          .filter(
+            ({ hostId }) =>
+              hostId === undefined ||
+              this.deps.serverId === undefined ||
+              hostId === this.deps.serverId,
+          )
+          .map(({ agent }) => agent)
+      : visibleAgents;
     this.applyAgentBucketContributions({
       activeAgents,
       descriptorsByWorkspaceId,
@@ -564,9 +595,12 @@ export class WorkspaceDirectory {
       this.deps.workspaceRegistry.list(),
       this.deps.projectRegistry.list(),
     ]);
+    const visibleWorkspaces = persistedWorkspaces.filter((workspace) =>
+      isWorkspaceVisibleToServer(workspace, this.deps.serverId),
+    );
     // A project whose only workspaces are hidden reads as empty to that caller.
     const projectIdsWithActiveWorkspaces = new Set(
-      persistedWorkspaces
+      visibleWorkspaces
         .filter(
           (workspace) =>
             !workspace.archivedAt && (options?.includeBackground === true || !workspace.background),
@@ -595,7 +629,7 @@ export class WorkspaceDirectory {
       this.deps.workspaceRegistry.list(),
       this.deps.projectRegistry.list(),
     ]);
-    return activeWorkspaceRecords(workspaces, projects).map((workspace) => ({
+    return activeWorkspaceRecords(workspaces, projects, this.deps.serverId).map((workspace) => ({
       id: workspace.workspaceId,
       workspaceDirectory: workspace.cwd,
       workspaceKind: workspace.kind,

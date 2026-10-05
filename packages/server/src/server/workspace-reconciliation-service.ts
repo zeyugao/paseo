@@ -7,6 +7,7 @@ import type {
   PersistedProjectRecord,
   PersistedWorkspaceRecord,
 } from "./workspace-registry.js";
+import { isWorkspaceVisibleToServer } from "./workspace-registry.js";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import { areEquivalentPaths } from "../utils/path.js";
 import {
@@ -192,10 +193,13 @@ export class WorkspaceReconciliationService {
   async reconcileGitMetadata(): Promise<ReconciliationResult> {
     const start = Date.now();
     const changes: ReconciliationChange[] = [];
-    const [projects, workspaces] = await Promise.all([
+    const [projects, allWorkspaces] = await Promise.all([
       this.projectRegistry.list(),
       this.workspaceRegistry.list(),
     ]);
+    const workspaces = allWorkspaces.filter((workspace) =>
+      isWorkspaceVisibleToServer(workspace, this.serverId),
+    );
     const workspacesByProject = new Map<string, PersistedWorkspaceRecord[]>();
     for (const workspace of workspaces) {
       if (workspace.archivedAt || this.inspectDirectory(workspace.cwd) !== "directory") continue;
@@ -220,9 +224,11 @@ export class WorkspaceReconciliationService {
 
     const allProjects = await this.projectRegistry.list();
     const allWorkspaces = await this.workspaceRegistry.list();
-
+    const allWorkspacesForServer = allWorkspaces.filter((workspace) =>
+      isWorkspaceVisibleToServer(workspace, this.serverId),
+    );
     const activeProjects = allProjects.filter((p) => !p.archivedAt);
-    const activeWorkspaces = allWorkspaces.filter((w) => !w.archivedAt);
+    const activeWorkspaces = allWorkspacesForServer.filter((w) => !w.archivedAt);
     const workspaceDirectoryStates = activeWorkspaces.map((workspace) => ({
       workspace,
       state: this.inspectDirectory(workspace.cwd),
@@ -500,8 +506,10 @@ export class WorkspaceReconciliationService {
         if (change.kind === "project_updated") projectIds.add(change.projectId);
       }
       if (projectIds.size > 0) {
-        const workspaces = await this.workspaceRegistry.list();
-        for (const workspaceId of workspaceIdsForProjects(workspaces, projectIds)) {
+        const allWorkspacesForServer = (await this.workspaceRegistry.list()).filter((workspace) =>
+          isWorkspaceVisibleToServer(workspace, this.serverId),
+        );
+        for (const workspaceId of workspaceIdsForProjects(allWorkspacesForServer, projectIds)) {
           workspaceIds.add(workspaceId);
         }
       }

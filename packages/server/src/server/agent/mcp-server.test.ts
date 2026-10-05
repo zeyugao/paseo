@@ -2193,6 +2193,13 @@ describe("create_agent MCP tool", () => {
         }),
         workspaceRegistry: {
           get: async (workspaceId) => workspaceRecords.get(workspaceId) ?? null,
+          update: async (workspaceId, updater) => {
+            const existing = workspaceRecords.get(workspaceId);
+            if (!existing) return null;
+            const updated = updater(existing);
+            workspaceRecords.set(workspaceId, updated);
+            return updated;
+          },
           upsert: async (record) => {
             workspaceRecords.set(record.workspaceId, record);
           },
@@ -2895,6 +2902,7 @@ describe("create_agent MCP tool", () => {
         >,
         findWorkspaceIdForCwd: vi.fn(async () => "ws-archive-tool-worktree"),
         listActiveWorkspaces,
+        listAllActiveWorkspaces: listActiveWorkspaces,
         archiveWorkspaceRecord,
         emitWorkspaceUpdatesForWorkspaceIds,
         markWorkspaceArchiving,
@@ -3008,6 +3016,7 @@ describe("create_agent MCP tool", () => {
         >,
         findWorkspaceIdForCwd: vi.fn(async () => "ws-mcp-A"),
         listActiveWorkspaces,
+        listAllActiveWorkspaces: listActiveWorkspaces,
         archiveWorkspaceRecord,
         emitWorkspaceUpdatesForWorkspaceIds: vi.fn(async () => undefined),
         markWorkspaceArchiving: vi.fn(),
@@ -5206,6 +5215,14 @@ describe("rename_workspace MCP tool", () => {
       providerSnapshotManager: createOpenCodeManager().manager,
       workspaceRegistry: {
         get: async (workspaceId) => workspaces.get(workspaceId) ?? null,
+        update: async (workspaceId, updater) => {
+          const existing = workspaces.get(workspaceId);
+          if (!existing) return null;
+          const updated = updater(existing);
+          upsertedWorkspaces.push(updated);
+          workspaces.set(workspaceId, updated);
+          return updated;
+        },
         upsert: async (record) => {
           upsertedWorkspaces.push(record);
           workspaces.set(record.workspaceId, record);
@@ -5277,6 +5294,14 @@ describe("rename_workspace MCP tool", () => {
       providerSnapshotManager: createOpenCodeManager().manager,
       workspaceRegistry: {
         get: async (workspaceId) => workspaces.get(workspaceId) ?? null,
+        update: async (workspaceId, updater) => {
+          const existing = workspaces.get(workspaceId);
+          if (!existing) return null;
+          const updated = updater(existing);
+          upsertedWorkspaces.push(updated);
+          workspaces.set(workspaceId, updated);
+          return updated;
+        },
         upsert: async (record) => {
           upsertedWorkspaces.push(record);
           workspaces.set(record.workspaceId, record);
@@ -5338,6 +5363,14 @@ describe("rename_workspace MCP tool", () => {
       providerSnapshotManager: createOpenCodeManager().manager,
       workspaceRegistry: {
         get: async (workspaceId) => workspaces.get(workspaceId) ?? null,
+        update: async (workspaceId, updater) => {
+          const existing = workspaces.get(workspaceId);
+          if (!existing) return null;
+          const updated = updater(existing);
+          upsertedWorkspaces.push(updated);
+          workspaces.set(workspaceId, updated);
+          return updated;
+        },
         upsert: async (record) => {
           upsertedWorkspaces.push(record);
           workspaces.set(record.workspaceId, record);

@@ -9,7 +9,7 @@
 import assert from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "zx";
 
@@ -118,7 +118,7 @@ try {
     join(paseoHome, "paseo.pid"),
     JSON.stringify({
       pid: ownerProcess.pid,
-      hostname: "test",
+      hostname: hostname(),
       uid: process.getuid?.() ?? -1,
       listen: "127.0.0.1:1",
       startedAt: new Date().toISOString(),

@@ -498,7 +498,7 @@ export class FileBackedProjectRegistry
     this.allocationQueue = new Promise<void>((resolve) => (release = resolve));
     await previous;
     try {
-      return await this.mutateCache((records) => {
+      const { record, changed } = await this.mutateCache((records) => {
         const active = [...records.values()]
           .filter(
             (project) =>
@@ -511,7 +511,7 @@ export class FileBackedProjectRegistry
           )[0];
         if (active) {
           if (active.kind === input.kind && active.projectKey === (input.projectKey ?? null)) {
-            return active;
+            return { record: active, changed: false };
           }
           const refreshed = {
             ...active,
@@ -520,12 +520,12 @@ export class FileBackedProjectRegistry
             updatedAt: input.timestamp,
           };
           records.set(active.projectId, refreshed);
-          return refreshed;
+          return { record: refreshed, changed: true };
         }
 
         let projectId = this.projectIdFactory();
         while (records.has(projectId)) projectId = this.projectIdFactory();
-        const record = createPersistedProjectRecord({
+        const created = createPersistedProjectRecord({
           projectId,
           rootPath: input.rootPath,
           kind: input.kind,
@@ -534,9 +534,20 @@ export class FileBackedProjectRegistry
           createdAt: input.timestamp,
           updatedAt: input.timestamp,
         });
-        records.set(projectId, record);
-        return record;
+        records.set(projectId, created);
+        return { record: created, changed: true };
       });
+      // The atomic cache mutation above replaced the pre-refactor `upsert`
+      // call, which notified listeners; publish after commit so subscribers
+      // (session directory pushes) still learn about new/refreshed projects.
+      if (changed) {
+        await this.notifyMutation({
+          kind: "upsert",
+          projectId: record.projectId,
+          project: record,
+        });
+      }
+      return record;
     } finally {
       release();
     }

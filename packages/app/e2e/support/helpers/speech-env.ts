@@ -28,5 +28,9 @@ export function withDisabledE2ESpeechEnv(env: NodeJS.ProcessEnv): NodeJS.Process
     delete next[key];
   }
 
+  // The developer's agent shell exports PASEO_PASSWORD for the real daemon;
+  // the isolated e2e daemon must not inherit it (it would require auth).
+  delete next.PASEO_PASSWORD;
+  delete next.PASEO_AUTH_PASSWORD;
   return next;
 }

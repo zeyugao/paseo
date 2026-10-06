@@ -155,11 +155,20 @@ jobs:
         run: |
           set -euo pipefail
 
+          retry() {
+            for attempt in 1 2 3; do
+              if "$@"; then return 0; fi
+              echo "Attempt $attempt failed; retrying in 5s" >&2
+              sleep 5
+            done
+            "$@"
+          }
+
           if previous_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}" 2>/dev/null)" &&
             gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
             previous_url="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG/paseo-cli.tgz?build=$previous_commit"
             BUN_INSTALL="$RUNNER_TEMP/paseo-cli-install" \
-              bun install -g --force "@getpaseo/cli@$previous_url"
+              retry bun install -g --force "@getpaseo/cli@$previous_url"
           else
             echo "No previous rolling CLI asset; testing a fresh install."
           fi
@@ -274,9 +283,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          retry() {
+            for attempt in 1 2 3; do
+              if "$@"; then return 0; fi
+              echo "Attempt $attempt failed; retrying in 5s" >&2
+              sleep 5
+            done
+            "$@"
+          }
+
           install_root="$RUNNER_TEMP/paseo-cli-install"
           cli_url="https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG/paseo-cli.tgz?build=$BUILD_COMMIT"
-          BUN_INSTALL="$install_root" bun install -g --force "@getpaseo/cli@$cli_url"
+          BUN_INSTALL="$install_root" retry bun install -g --force "@getpaseo/cli@$cli_url"
           "$install_root/bin/paseo" --version
 
           node - "$install_root" "$BUILD_COMMIT" <<'NODE'

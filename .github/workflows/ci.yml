@@ -259,11 +259,11 @@ jobs:
       - *server_plugin_tests
       - *server_hub_contract
 
-  # Keep the serial integration chain off the Windows unit critical path.
+# Windows CI disabled: shared-home requires NFS-class flock semantics.
   server-integration-windows:
     name: server-integration (windows-latest)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
+    if: false
     runs-on: windows-latest
     steps:
       - *server_capacity

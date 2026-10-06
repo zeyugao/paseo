@@ -9,7 +9,7 @@ import assert from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "zx";
 import { connectToDaemon } from "../src/utils/client.js";
@@ -119,7 +119,7 @@ try {
       {
         pid: stalePid,
         startedAt: new Date().toISOString(),
-        hostname: "stale-supervisor-fixture.local",
+        hostname: hostname(),
         uid: typeof process.getuid === "function" ? process.getuid() : undefined,
         listen: host,
       },

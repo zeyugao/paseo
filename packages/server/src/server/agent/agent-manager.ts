@@ -1418,6 +1418,7 @@ export class AgentManager {
         workspaceId: options.workspaceId ?? null,
         title: options.initialTitle ?? storedConfig.title ?? null,
         labels: options.labels ?? {},
+        internal: config.internal === true,
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -1550,6 +1551,7 @@ export class AgentManager {
         workspaceId: options?.workspaceId ?? null,
         title: record?.title ?? mergedConfig.title ?? null,
         labels: record?.labels ?? options?.labels ?? {},
+        internal: mergedConfig.internal === true,
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -1721,6 +1723,7 @@ export class AgentManager {
         workspaceId: existing.workspaceId,
         title: await this.resolveInitialPersistedTitle(agentId, existing.config, null),
         labels: existing.labels,
+        internal: refreshConfig.internal === true,
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -5725,6 +5728,9 @@ export class AgentManager {
       workspaceId?: string | null;
       title?: string | null;
       labels?: Record<string, string>;
+      /** Internal agents (title refiner, branch naming) skip plugin hooks,
+       * mirroring the `agent.create` hook's `!config.internal` gate. */
+      internal?: boolean;
     },
   ): Promise<AgentLaunchContext> {
     // A plugin changing during this open must still make the resulting session stale.
@@ -5732,7 +5738,7 @@ export class AgentManager {
     this.detachPluginTools(agentId);
     let mcpServers: AgentSessionConfig["mcpServers"];
     let mcpServerOwners: Record<string, string> | undefined;
-    if (this.pluginLifecycle) {
+    if (this.pluginLifecycle && opening?.internal !== true) {
       const request = {
         agentId,
         provider: client.provider,

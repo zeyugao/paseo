@@ -269,6 +269,7 @@ import {
 import { deleteLocalCredential, writeLocalCredential } from "./local-credential.js";
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
+import { AgentTitleRefiner } from "./agent/agent-title-refiner.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
 import { configureGitProcessPolicy } from "../utils/run-git-command.js";
@@ -1215,6 +1216,16 @@ export async function createPaseoDaemon(
     },
     logger,
   });
+
+  agentManager.attachTitleRefiner(
+    new AgentTitleRefiner({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager,
+      readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
+      logger,
+    }),
+  );
 
   setupAutoArchiveOnMerge({
     paseoHome: config.paseoHome,

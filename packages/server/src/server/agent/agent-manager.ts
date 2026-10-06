@@ -2157,6 +2157,17 @@ export class AgentManager {
     this.emitState(agent);
   }
 
+  private agentTitleRefiner: { refine: (agentId: string) => Promise<void> } | null = null;
+
+  /**
+   * The title refiner needs the manager itself (internal generation agents,
+   * timeline reads), so bootstrap constructs it after the manager and attaches
+   * it here. Structural typing keeps the manager decoupled from the module.
+   */
+  attachTitleRefiner(refiner: { refine: (agentId: string) => Promise<void> }): void {
+    this.agentTitleRefiner = refiner;
+  }
+
   async setTitle(agentId: string, title: string): Promise<void> {
     const freshRecord = await this.assertStoredAgentMutable(agentId);
     const agent = this.requireAgent(agentId);
@@ -4566,6 +4577,7 @@ export class AgentManager {
           eventTurnId,
           isForegroundEvent,
           terminalDisposition,
+          options,
         });
         return undefined;
       case "turn_failed":
@@ -4686,8 +4698,9 @@ export class AgentManager {
     eventTurnId: string | undefined;
     isForegroundEvent: boolean;
     terminalDisposition: ActiveTurnTerminalDisposition;
+    options: { fromHistory?: boolean } | undefined;
   }): void {
-    const { agent, event, eventTurnId, isForegroundEvent, terminalDisposition } = params;
+    const { agent, event, eventTurnId, isForegroundEvent, terminalDisposition, options } = params;
     this.logger.trace(
       {
         agentId: agent.id,
@@ -4717,6 +4730,19 @@ export class AgentManager {
       this.emitState(agent);
     }
     void this.refreshRuntimeInfo(agent);
+
+    // History-replayed completions arrive with a "stale" disposition and return
+    // above; the explicit fromHistory gate keeps that contract if the disposition
+    // logic changes. Refinement is fire-and-forget and CAS-protected: a failed
+    // generation keeps the provisional title and a concurrent manual rename wins.
+    if (!options?.fromHistory && this.agentTitleRefiner) {
+      void this.agentTitleRefiner.refine(agent.id).catch((error: unknown) => {
+        this.logger.warn(
+          { err: error, agentId: agent.id },
+          "agent.manager.title_refinement_failed",
+        );
+      });
+    }
   }
 
   private async onStreamTurnFailed(params: {

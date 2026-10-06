@@ -1,6 +1,5 @@
 ---
-title: Metadata generation
-description: How Paseo uses providers to generate branch names, commit messages, and pull request text, and how to configure them.
+description: How Paseo uses providers to generate agent and workspace titles, branch names, commit messages, and pull request text, and how to configure them.
 nav: Metadata generation
 order: 42
 category: Configuration
@@ -16,6 +15,7 @@ Paseo generates these kinds of metadata:
 - **Worktree branch names** — a slug for a new worktree-isolated workspace's branch.
 - **Commit messages** — a concise message for the changes you're committing.
 - **Pull request title and body** — drafted from the diff when you open a PR.
+- **Agent titles** — a short task label for an agent tab, generated from the first prompt and the reply once the agent's first turn completes. Only agents still named by their first prompt line are retitled; a manual rename or an explicit title (subagents) always wins.
 
 A workspace title and its branch name are produced together from the same prompt, but you configure their wording independently (see below).
 

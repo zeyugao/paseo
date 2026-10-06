@@ -4914,6 +4914,29 @@ test("setTitle bumps updatedAt and persists title in the same snapshot write", a
   expect(live!.updatedAt.getTime()).toBeGreaterThan(Date.parse(before!.updatedAt));
 });
 
+test("a completed turn triggers the attached title refiner", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-title-refiner-trigger-"));
+  const client = new SessionRecordingAgentClient();
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  const refine = vi.fn().mockResolvedValue(undefined);
+  manager.attachTitleRefiner({ refine });
+  let agentId: string | null = null;
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    await startAgentRun(manager, agent.id, "first prompt", logger, {});
+
+    await vi.waitFor(() => expect(refine).toHaveBeenCalledWith(agentId));
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("updateAgentMetadata bumps updatedAt for stored agents", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-stored-metadata-updated-at-"));
   const storagePath = join(workdir, "agents");

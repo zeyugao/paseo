@@ -61,8 +61,6 @@ const WINDOWS_RECLAIM_LOCK_HOLDER =
   "$path = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($args[0])); $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); [Console]::Out.Write([char]1); [Console]::Out.Flush(); [Console]::In.ReadToEnd() | Out-Null; $stream.Dispose()";
 const SYNC_RECLAIM_LOCK_HOLDER =
   'printf "\\001" > "$1"; while [ ! -e "$3" ]; do sleep 0.01; done; printf "\\001" > "$2"';
-const WINDOWS_SYNC_RECLAIM_LOCK_HOLDER =
-  "$paths = @(); foreach ($b in $args[0..3]) { $paths += [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($b)) }; $stream = [System.IO.File]::Open($paths[0], [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); [System.IO.File]::WriteAllText($paths[1], '1'); while (-not (Test-Path -LiteralPath $paths[3])) { Start-Sleep -Milliseconds 10 }; $stream.Dispose(); [System.IO.File]::WriteAllText($paths[2], '1')";
 const SYNC_RECLAIM_LOCK_TIMEOUT_MS = 30_000;
 const SYNC_LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
 
@@ -74,6 +72,13 @@ function waitForLockMarker(markerPath: string, deadline: number, description: st
 }
 
 export function withReclaimLockSync<T>(lockPath: string, action: () => T): T {
+  // Windows has no flock; the shared-home feature requires NFS-class storage
+  // with cross-client flock semantics, which Windows does not provide. The
+  // sync lock is only used for same-process plugin config patches, so a
+  // no-op is correct on this platform.
+  if (process.platform === "win32") {
+    return action();
+  }
   ensurePrivateDirectory(dirname(lockPath));
   const lockFd = openSync(lockPath, "a", PRIVATE_FILE_MODE);
   closeSync(lockFd);
@@ -94,20 +99,7 @@ export function withReclaimLockSync<T>(lockPath: string, action: () => T): T {
     releasedPath,
     releasePath,
   ];
-  if (process.platform === "win32") {
-    command = "powershell.exe";
-    const encode = (p: string) => Buffer.from(p, "utf8").toString("base64");
-    args = [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      WINDOWS_SYNC_RECLAIM_LOCK_HOLDER,
-      encode(lockPath),
-      encode(acquiredPath),
-      encode(releasedPath),
-      encode(releasePath),
-    ];
-  } else if (process.platform === "darwin") {
+  if (process.platform === "darwin") {
     command = "lockf";
     args = [
       lockPath,

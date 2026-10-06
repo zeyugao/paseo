@@ -5,6 +5,7 @@ import { createServer as createHTTPServer, type IncomingMessage, type ServerResp
 import { constants, existsSync, unlinkSync } from "fs";
 import { open, rm, stat } from "fs/promises";
 import { randomUUID } from "node:crypto";
+import type { Socket } from "node:net";
 import { getHostName } from "./host-name.js";
 import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -953,6 +954,14 @@ export async function createPaseoDaemon(
   });
 
   const httpServer = createHTTPServer(app);
+  // Track every accepted socket from birth so shutdown can destroy any that
+  // closeAllConnections() leaves behind (e.g. an unanswered WebSocket upgrade
+  // request arriving after the WS server stopped listening for upgrades).
+  const httpServerSockets = new Set<Socket>();
+  httpServer.on("connection", (socket) => {
+    httpServerSockets.add(socket);
+    socket.on("close", () => httpServerSockets.delete(socket));
+  });
 
   // Script proxy WebSocket upgrade handler — must be registered before the
   // VoiceAssistantWebSocketServer attaches its own "upgrade" listener so that
@@ -2023,17 +2032,21 @@ export async function createPaseoDaemon(
         await wsServer.close();
       }
       await serviceProxy.stopStandalone();
-      // Force-drop remaining sockets so httpServer.close() resolves promptly.
-      // We've already closed wsServer (which sent ws-layer close frames) and
-      // stopped every other service, so anything still attached is a TCP
-      // socket whose higher-level shutdown hasn't fully released it (e.g.
-      // upgraded WS sockets in the closing handshake, or HTTP keep-alive
-      // sockets in CLOSE_WAIT). closeIdleConnections() does not catch
-      // upgraded sockets, so we use closeAllConnections() here.
-      httpServer.closeAllConnections();
-      await new Promise<void>((resolve) => {
+      // Close the listener before dropping connections so the accept path is
+      // dead first: a client reconnecting between closeAllConnections() and
+      // close() would otherwise be accepted and keep the close callback
+      // pending forever. Once the WebSocket server has finished closing, its
+      // upgrade listener is gone and an unanswered upgrade request can also
+      // leak a half-closed socket that closeAllConnections() leaves behind,
+      // so destroy every tracked socket as a final sweep.
+      const httpServerClosed = new Promise<void>((resolve) => {
         httpServer.close(() => resolve());
       });
+      httpServer.closeAllConnections();
+      for (const socket of httpServerSockets) {
+        socket.destroy();
+      }
+      await httpServerClosed;
       // Clean up socket files
       if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
         unlinkSync(listenTarget.path);

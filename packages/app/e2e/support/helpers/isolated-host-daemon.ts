@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { withDisabledE2ESpeechEnv } from "./speech-env";
+import { stripInheritedDaemonAuthEnv, withDisabledE2ESpeechEnv } from "./speech-env";
 import { killProcessTree, spawnTsx } from "./spawn-node";
 
 export interface IsolatedHostDaemon {
@@ -156,7 +156,7 @@ export async function startIsolatedHostDaemon(
     const spawnOptions: SpawnOptions = {
       cwd: serverDir,
       env: withDisabledE2ESpeechEnv({
-        ...process.env,
+        ...stripInheritedDaemonAuthEnv(process.env),
         ...options.environment,
         PASEO_HOME: paseoHome,
         PASEO_SERVER_ID: serverId,

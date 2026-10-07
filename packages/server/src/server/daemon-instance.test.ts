@@ -131,11 +131,16 @@ describe.runIf(process.platform === "linux")("daemon instance identity on Linux"
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(Date.now() + uptime() * 1000 + 12 * 60 * 60_000);
 
+    // A resumed supervisor refreshes its heartbeat within one interval; simulate that
+    // touch under the jumped clock so this test exercises boot recency, not staleness.
+    const resumed = new Date(Date.now() - 30_000);
+    await utimes(join(paseoHome, "paseo.pid"), resumed, resumed);
+
     expect(await readDaemonInstance(paseoHome)).toMatchObject({ pid: process.pid });
     expect(await isLocked(paseoHome)).toMatchObject({ locked: true });
-    await expect(
-      acquirePidLock(paseoHome, null, { ownerPid: process.pid + 10_000 }),
-    ).rejects.toThrow("Another Paseo daemon is already running");
+    await expect(acquirePidLock(paseoHome, null, { ownerPid: process.pid + 10_000 })).resolves.toBe(
+      false,
+    );
   });
 
   test("a lock written during another boot has no running owner", async () => {

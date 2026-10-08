@@ -358,6 +358,12 @@ export const OmpSubagentProgressPayloadSchema = z
   })
   .passthrough();
 
+// Every member of OMP's AssistantMessageEvent union must parse: message_update is
+// the frame Paseo pipes assistant text and reasoning deltas from, so one unlisted
+// member (omp 18.8 streams tool-call arguments as `toolcall_*`) rejects the frame
+// and spams a warning per token. Paseo reads only text_delta and thinking_delta;
+// tool calls reach the timeline through tool_execution_* and terminal errors
+// through the message_end/agent_end assistant message.
 export const OmpAssistantMessageEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text_delta"), delta: z.string().optional() }).passthrough(),
   z.object({ type: z.literal("thinking_delta"), delta: z.string().optional() }).passthrough(),
@@ -366,12 +372,22 @@ export const OmpAssistantMessageEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text_end") }).passthrough(),
   z.object({ type: z.literal("thinking_start") }).passthrough(),
   z.object({ type: z.literal("thinking_end") }).passthrough(),
+  z.object({ type: z.literal("image_end") }).passthrough(),
+  z.object({ type: z.literal("toolcall_start") }).passthrough(),
+  z.object({ type: z.literal("toolcall_delta"), delta: z.string().optional() }).passthrough(),
+  z.object({ type: z.literal("toolcall_end") }).passthrough(),
   z.object({ type: z.literal("done") }).passthrough(),
+  z.object({ type: z.literal("error") }).passthrough(),
 ]);
 
 export const OmpAgentSessionEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("agent_start") }).passthrough(),
   z.object({ type: z.literal("turn_start") }).passthrough(),
+  // One turn_end closes each model cycle. Its message and toolResults fields are
+  // not validated because Paseo reads neither: the assistant message arrived
+  // through message_end and every result through tool_execution_end. OMP forwards
+  // it for subagents too, so the frame only has to parse.
+  z.object({ type: z.literal("turn_end") }).passthrough(),
   z.object({ type: z.literal("message_start"), message: OmpAgentMessageSchema }).passthrough(),
   z.object({ type: z.literal("message_end"), message: OmpAgentMessageSchema }).passthrough(),
   z
@@ -398,6 +414,9 @@ export const OmpAgentSessionEventSchema = z.discriminatedUnion("type", [
       partialResult: z.unknown(),
     })
     .passthrough(),
+  // Custom tools streaming argument bytes. Paseo renders progress from
+  // tool_execution_update partial results, so the frame only has to parse.
+  z.object({ type: z.literal("tool_stream_update") }).passthrough(),
   z
     .object({
       type: z.literal("tool_execution_end"),
@@ -512,6 +531,58 @@ export const OmpAutoCompactionEndEventSchema = z
     skipped: z.boolean().optional(),
   })
   .passthrough();
+// OMP tracks these outside Paseo's turn lifecycle: a cache warmer refreshing the
+// prompt cache, rule violations, cleared todo lists, IRC deliveries, thinking
+// level changes, queued steering, and advisor/config bookkeeping. Paseo draws
+// nothing from them yet, but OMP forwards each on its own schedule, so they must
+// parse instead of warning once per frame.
+const OmpCacheWarmingStartEventSchema = z
+  .object({
+    type: z.literal("cache_warming_start"),
+    phase: z.string().optional(),
+    provider: z.string().optional(),
+    model: z.string().optional(),
+  })
+  .passthrough();
+const OmpCacheWarmingEndEventSchema = z
+  .object({
+    type: z.literal("cache_warming_end"),
+    phase: z.string().optional(),
+    provider: z.string().optional(),
+    model: z.string().optional(),
+    outcome: z.string().optional(),
+    usage: z.unknown().optional(),
+    warmingStopReason: z.string().optional(),
+  })
+  .passthrough();
+const OmpTtsrTriggeredEventSchema = z
+  .object({ type: z.literal("ttsr_triggered"), rules: z.array(z.unknown()).optional() })
+  .passthrough();
+const OmpTodoAutoClearEventSchema = z.object({ type: z.literal("todo_auto_clear") }).passthrough();
+const OmpIrcMessageEventSchema = z.object({ type: z.literal("irc_message") }).passthrough();
+const OmpThinkingLevelChangedEventSchema = z
+  .object({
+    type: z.literal("thinking_level_changed"),
+    thinkingLevel: z.string().optional(),
+    configured: z.string().optional(),
+    resolved: z.string().optional(),
+  })
+  .passthrough();
+const OmpQueueUpdateEventSchema = z
+  .object({
+    type: z.literal("queue_update"),
+    steering: z.array(z.string()).optional(),
+    followUp: z.array(z.string()).optional(),
+  })
+  .passthrough();
+const OmpConfigWarningsChangedEventSchema = z
+  .object({ type: z.literal("config_warnings_changed") })
+  .passthrough();
+const OmpAdvisorCostChangedEventSchema = z
+  .object({ type: z.literal("advisor_cost_changed") })
+  .passthrough();
+const OmpAdvisorYieldedEventSchema = z.object({ type: z.literal("advisor_yielded") }).passthrough();
+
 export const OmpAvailableCommandSchema = z
   .object({
     name: z.string(),
@@ -590,6 +661,16 @@ export const OmpRuntimeEventSchema = z.discriminatedUnion("type", [
   OmpAutoCompactionStartEventSchema,
   OmpAutoCompactionEndEventSchema,
   OmpAvailableCommandsUpdateEventSchema,
+  OmpCacheWarmingStartEventSchema,
+  OmpCacheWarmingEndEventSchema,
+  OmpTtsrTriggeredEventSchema,
+  OmpTodoAutoClearEventSchema,
+  OmpIrcMessageEventSchema,
+  OmpThinkingLevelChangedEventSchema,
+  OmpQueueUpdateEventSchema,
+  OmpConfigWarningsChangedEventSchema,
+  OmpAdvisorCostChangedEventSchema,
+  OmpAdvisorYieldedEventSchema,
   OmpRpcHostToolCallRequestSchema,
   OmpRpcHostToolCancelRequestSchema,
   OmpRpcHostToolUpdateSchema,

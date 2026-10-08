@@ -317,11 +317,16 @@ test("errored child notifications carry the failure, not the stale response", as
   scenario.startWatchingChild();
   const parentPrompt = await scenario.errorChildAndReadParentPrompt("Provider execution failed");
 
-  expect(parentPrompt).toEqual(
-    formatSystemNotificationPrompt(
-      "Agent child-agent (Child Agent) errored.\n\n<agent-response>\nProvider execution failed\n</agent-response>",
-    ),
-  );
+  expect(parseAgentMessage(parentPrompt)).toEqual({
+    id: expect.any(String),
+    source: {
+      kind: "agent-notification",
+      agentId: "child-agent",
+      title: "Child Agent",
+      event: "errored",
+    },
+    text: "Agent child-agent (Child Agent) errored.\n\n<agent-response>\nProvider execution failed\n</agent-response>",
+  });
 });
 
 test("finish notifications truncate oversized child responses", async () => {

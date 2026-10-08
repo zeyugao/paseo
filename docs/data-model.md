@@ -6,9 +6,12 @@ Projects are allocated for the exact root selected by the caller, normalized lex
 
 `projectKey` is a persisted, opaque equivalence key used only to group the same logical project
 across hosts. It is separate from the host-local `projectId`; today's producer prefers a normalized
-Git remote and otherwise uses the local project root. Consumers never derive it from live Git.
-Creation persists it with the project, and normal boot reconciliation fills it for
-older records where the field is absent—there is no migration.
+Git remote. Without a remote the key names the local root under every daemon that has observed it
+(`host:srv_a+srv_b:/path`), sorted and joined with `+`: each daemon unions its own `serverId` in
+during reconciliation instead of replacing the list, so several daemons on one home converge on a
+single key instead of rewriting the record for each other. Consumers never derive it from live Git.
+Creation persists it with the project, and normal boot reconciliation fills it for older records
+where the field is absent—there is no migration.
 
 `kind` and `projectKey` are mutable metadata, not identity. Workspace reconciliation watches active project roots and
 updates those fields and `updatedAt` when Git facts change, preserving the project's ID, root path,

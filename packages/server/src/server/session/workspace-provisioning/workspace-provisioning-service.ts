@@ -19,7 +19,7 @@ import {
 } from "../../workspace-registry.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../../worktree-session.js";
-import { deriveProjectKey } from "../../project-key.js";
+import { deriveProjectKey, mergeLocalProjectKeyServerIds } from "../../project-key.js";
 import { areEquivalentPaths, createRealpathAwarePathMatcher } from "../../../utils/path.js";
 import type { UntrustedWorkspaceSource } from "../../workspace-automation-gate.js";
 
@@ -448,13 +448,16 @@ export function createWorkspaceProvisioningService(deps: {
           ? checkout
           : await workspaceGitService.getCheckout(project.rootPath);
       const kind = projectCheckout.isGit ? "git" : "non_git";
-      const projectKey = deriveProjectKey({
-        rootPath: project.rootPath,
-        remoteUrl: projectCheckout.remoteUrl,
-        worktreeRoot: projectCheckout.worktreeRoot,
-        mainRepoRoot: projectCheckout.mainRepoRoot,
-        serverId,
-      });
+      const projectKey = mergeLocalProjectKeyServerIds(
+        project.projectKey,
+        deriveProjectKey({
+          rootPath: project.rootPath,
+          remoteUrl: projectCheckout.remoteUrl,
+          worktreeRoot: projectCheckout.worktreeRoot,
+          mainRepoRoot: projectCheckout.mainRepoRoot,
+          serverId,
+        }),
+      );
       if (project.archivedAt || project.kind !== kind || project.projectKey !== projectKey) {
         await projectRegistry.upsert({
           ...project,
@@ -498,13 +501,16 @@ export function createWorkspaceProvisioningService(deps: {
         ? workspaceCheckout
         : await workspaceGitService.getCheckout(project.rootPath);
     const kind: PersistedProjectRecord["kind"] = projectCheckout.isGit ? "git" : "non_git";
-    const projectKey = deriveProjectKey({
-      rootPath: project.rootPath,
-      remoteUrl: projectCheckout.remoteUrl,
-      worktreeRoot: projectCheckout.worktreeRoot,
-      mainRepoRoot: projectCheckout.mainRepoRoot,
-      serverId,
-    });
+    const projectKey = mergeLocalProjectKeyServerIds(
+      project.projectKey,
+      deriveProjectKey({
+        rootPath: project.rootPath,
+        remoteUrl: projectCheckout.remoteUrl,
+        worktreeRoot: projectCheckout.worktreeRoot,
+        mainRepoRoot: projectCheckout.mainRepoRoot,
+        serverId,
+      }),
+    );
     if (project.kind === kind && project.projectKey === projectKey) return project;
     const refreshed = {
       ...project,

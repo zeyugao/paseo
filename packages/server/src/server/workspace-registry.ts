@@ -14,6 +14,7 @@ import {
   type PersistedProjectKind,
   type PersistedWorkspaceKind,
 } from "./workspace-registry-model.js";
+import { mergeLocalProjectKeyServerIds } from "./project-key.js";
 import type { UntrustedWorkspaceSource } from "./workspace-automation-gate.js";
 
 const UntrustedWorkspaceSourceSchema = z.object({
@@ -510,13 +511,18 @@ export class FileBackedProjectRegistry
               left.projectId.localeCompare(right.projectId),
           )[0];
         if (active) {
-          if (active.kind === input.kind && active.projectKey === (input.projectKey ?? null)) {
+          const requestedKey = input.projectKey ?? null;
+          const projectKey =
+            requestedKey === null
+              ? null
+              : mergeLocalProjectKeyServerIds(active.projectKey, requestedKey);
+          if (active.kind === input.kind && active.projectKey === projectKey) {
             return { record: active, changed: false };
           }
           const refreshed = {
             ...active,
             kind: input.kind,
-            projectKey: input.projectKey ?? null,
+            projectKey,
             updatedAt: input.timestamp,
           };
           records.set(active.projectId, refreshed);

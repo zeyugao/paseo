@@ -114,26 +114,22 @@ describe("getOrCreateServerId", () => {
     expect(readFileSync(idPath, "utf8").trim()).toBe("test-daemon-id");
   });
 
-  it.each(["../escape", "nested/id", "nested\\id", "has space"])(
+  it.each(["../escape", "nested/id", "nested\\id", "has space", "srv+plus", "srv:colon"])(
     "rejects unsafe PASEO_SERVER_ID %s",
     (serverId) => {
       process.env.PASEO_SERVER_ID = serverId;
-      expect(() => getOrCreateServerId(home)).toThrow(
-        "Invalid PASEO_SERVER_ID: it must not contain path separators, '..', or whitespace",
-      );
+      expect(() => getOrCreateServerId(home)).toThrow(/Invalid PASEO_SERVER_ID/);
       expect(existsSync(path.join(home, "server-id"))).toBe(false);
     },
   );
 
-  it.each(["../escape", "nested/id", "nested\\id", "has space"])(
+  it.each(["../escape", "nested/id", "nested\\id", "has space", "srv+plus", "srv:colon"])(
     "rejects unsafe persisted server id %s",
     (serverId) => {
       const idPath = path.join(home, "server-id");
       writeFileSync(idPath, `${serverId}\n`);
 
-      expect(() => getOrCreateServerId(home)).toThrow(
-        "Invalid PASEO_SERVER_ID: it must not contain path separators, '..', or whitespace",
-      );
+      expect(() => getOrCreateServerId(home)).toThrow(/Invalid PASEO_SERVER_ID/);
       expect(readFileSync(idPath, "utf8").trim()).toBe(serverId);
     },
   );

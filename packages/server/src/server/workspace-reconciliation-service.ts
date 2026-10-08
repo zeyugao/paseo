@@ -16,7 +16,7 @@ import {
   type MutableWorkspacePlacement,
 } from "./workspace-registry-model.js";
 import { workspaceIdsForProjects } from "./workspace-directory.js";
-import { deriveProjectKey } from "./project-key.js";
+import { deriveProjectKey, mergeLocalProjectKeyServerIds } from "./project-key.js";
 
 const DEFAULT_RESCAN_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_DEBOUNCE_MS = 100;
@@ -370,13 +370,16 @@ export class WorkspaceReconciliationService {
     );
     const projectUpdates: Partial<Pick<PersistedProjectRecord, "kind" | "projectKey">> = {};
     const mappedKind = deriveProjectKind(currentGit);
-    const projectKey = deriveProjectKey({
-      rootPath: project.rootPath,
-      remoteUrl: currentGit.remoteUrl,
-      worktreeRoot: currentGit.worktreeRoot,
-      mainRepoRoot: currentGit.mainRepoRoot,
-      serverId: this.serverId,
-    });
+    const projectKey = mergeLocalProjectKeyServerIds(
+      project.projectKey,
+      deriveProjectKey({
+        rootPath: project.rootPath,
+        remoteUrl: currentGit.remoteUrl,
+        worktreeRoot: currentGit.worktreeRoot,
+        mainRepoRoot: currentGit.mainRepoRoot,
+        serverId: this.serverId,
+      }),
+    );
 
     if (project.kind !== mappedKind) {
       projectUpdates.kind = mappedKind;

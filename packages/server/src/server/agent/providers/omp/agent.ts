@@ -1931,7 +1931,7 @@ export class OmpAgentSession implements AgentSession {
   private handleSessionEvent(event: OmpAgentSessionEvent): void {
     // OMP can be briefly idle between cycles while queued work is still scheduled.
     // Only its terminal agent_end may settle the turn or finish an interrupted drain.
-    if (event.type === "agent_end" && event.isTerminal === false) {
+    if (this.hasPendingContinuation(event)) {
       return;
     }
     if (this.suppressingUnreadSteerRun && !this.activeTurnId) {
@@ -2010,6 +2010,19 @@ export class OmpAgentSession implements AgentSession {
       default:
         return;
     }
+  }
+
+  // A non-terminal agent_end marks work that resumes inside this same turn: queued
+  // input, a scheduled continuation, or an admitted submission. A run that yields to
+  // a pending background job is the exception — OMP has finished the run, reports the
+  // session idle, and resumes only through a fresh run when the job result lands.
+  // OMP's settle watcher stays quiet while async work is pending, so treating that
+  // yield as a live turn keeps Paseo "running" for the job's whole lifetime, and
+  // forever when the wake never comes.
+  private hasPendingContinuation(event: OmpAgentSessionEvent): boolean {
+    return (
+      event.type === "agent_end" && event.isTerminal === false && event.awaitingAsyncWork !== true
+    );
   }
 
   private emitTurnStarted(turnId: string | undefined): void {

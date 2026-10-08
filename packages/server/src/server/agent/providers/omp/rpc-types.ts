@@ -412,6 +412,10 @@ export const OmpAgentSessionEventSchema = z.discriminatedUnion("type", [
       type: z.literal("agent_end"),
       messages: z.array(OmpAgentMessageSchema).optional(),
       isTerminal: z.boolean().optional(),
+      // Set together with isTerminal=false: OMP yielded the run and resumes only
+      // through a fresh run, either for queued input or a background-job result.
+      yielded: z.boolean().optional(),
+      awaitingAsyncWork: z.boolean().optional(),
     })
     .passthrough(),
 ]);

@@ -1776,6 +1776,26 @@ describe("OMP agent client and session", () => {
     expect(omp.eventTypes().filter(isTurnLifecycle)).toEqual(["turn_started", "turn_canceled"]);
   });
 
+  test("a turn_end frame neither renders output nor settles the active turn", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    await omp.requireStartTurn("keep going");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.emit({
+      type: "turn_end",
+      message: { role: "assistant", content: [{ type: "text", text: "cycle done" }] },
+      toolResults: [],
+    });
+
+    // The cycle's message and tool results already reached the timeline through
+    // message_end and tool_execution_end; the frame must duplicate neither and
+    // must not end the run.
+    expect(omp.timeline()).toEqual([]);
+    expect(omp.eventTypes().filter(isTurnLifecycle)).toEqual(["turn_started"]);
+  });
+
   test("a resumed session does not re-emit replayed events as live timeline items", async () => {
     const omp = new OmpHarness();
     await omp.resume({

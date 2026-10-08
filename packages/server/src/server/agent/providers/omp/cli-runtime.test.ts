@@ -428,6 +428,105 @@ describe("OMP CLI runtime", () => {
     ]);
   });
 
+  test("accepts the omp 18.8 event frames this build does not render", async () => {
+    const child = createOmpChild();
+    const warnings: unknown[] = [];
+    const logger = {
+      debug: () => undefined,
+      info: () => undefined,
+      error: () => undefined,
+      warn: (...args: unknown[]) => warnings.push(args),
+    } as unknown as Logger;
+    const session = await createRuntime(child, [], { logger }).startSession({
+      cwd: "/workspace/project",
+    });
+    const eventTypes: string[] = [];
+    const assistantEventTypes: string[] = [];
+    session.onEvent((event) => {
+      eventTypes.push(event.type);
+      if (event.type === "message_update") {
+        assistantEventTypes.push(event.assistantMessageEvent.type);
+      }
+    });
+
+    // One frame per event type omp 18.8 forwards that this build draws nothing
+    // from. turn_end closes each model cycle, the toolcall and image assistant
+    // events stream renderer input Paseo reads elsewhere, and the rest is
+    // session telemetry; a rejection here used to warn once per frame.
+    const frames: Record<string, unknown>[] = [
+      {
+        type: "turn_end",
+        message: { role: "assistant", content: [{ type: "text", text: "cycle done" }] },
+        toolResults: [{ role: "toolResult", content: [{ type: "text", text: "ok" }] }],
+      },
+      {
+        type: "message_update",
+        message: { role: "assistant", content: [] },
+        assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: '{"path"' },
+      },
+      {
+        type: "message_update",
+        message: { role: "assistant", content: [] },
+        assistantMessageEvent: {
+          type: "image_end",
+          contentIndex: 0,
+          content: { type: "image", data: "aGk=", mimeType: "image/png" },
+        },
+      },
+      { type: "tool_stream_update", toolCallId: "call-1", toolName: "hub", update: { chunk: 1 } },
+      { type: "cache_warming_start", phase: "idle", provider: "ai-harness-omp", model: "glm-5" },
+      {
+        type: "cache_warming_end",
+        phase: "idle",
+        provider: "ai-harness-omp",
+        model: "glm-5",
+        outcome: "hit",
+      },
+      { type: "thinking_level_changed", thinkingLevel: "high" },
+      { type: "queue_update", steering: ["do this instead"], followUp: [] },
+      { type: "ttsr_triggered", rules: [{ name: "no-primary-skill" }] },
+      { type: "todo_auto_clear" },
+      { type: "irc_message", message: { role: "custom", content: "hello from peer" } },
+      { type: "config_warnings_changed" },
+      { type: "advisor_cost_changed" },
+      { type: "advisor_yielded" },
+      {
+        type: "subagent_event",
+        payload: {
+          id: "child-1",
+          event: {
+            type: "turn_end",
+            message: { role: "assistant", content: [] },
+            toolResults: [],
+          },
+        },
+      },
+    ];
+    for (const frame of frames) {
+      child.stdout.write(`${JSON.stringify(frame)}\n`);
+    }
+
+    expect(warnings).toEqual([]);
+    expect(eventTypes).toEqual([
+      "turn_end",
+      "message_update",
+      "message_update",
+      "tool_stream_update",
+      "cache_warming_start",
+      "cache_warming_end",
+      "thinking_level_changed",
+      "queue_update",
+      "ttsr_triggered",
+      "todo_auto_clear",
+      "irc_message",
+      "config_warnings_changed",
+      "advisor_cost_changed",
+      "advisor_yielded",
+      "subagent_event",
+    ]);
+    expect(assistantEventTypes).toEqual(["toolcall_delta", "image_end"]);
+  });
+
   test("lists commands through get_available_commands", async () => {
     const child = createOmpChild();
     const commandTypes: string[] = [];

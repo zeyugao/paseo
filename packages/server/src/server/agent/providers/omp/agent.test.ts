@@ -5,12 +5,13 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 
-import type { AgentStreamEvent } from "../../agent-sdk-types.js";
+import type { AgentStreamEvent, AgentTimelineItem } from "../../agent-sdk-types.js";
 import type { PaseoToolCatalog } from "../../tools/types.js";
 import type { OmpAgentMessage } from "./rpc-types.js";
 import type { OmpNoTurnScheduler, OmpProviderIdleScheduler } from "./agent.js";
 import type { OmpUsagePollScheduler } from "./usage-poller.js";
 import { resolveOmpProviderOptions } from "./provider-config.js";
+import { OMP_BACKGROUND_WORK_CALL_ID } from "./background-work.js";
 import { OmpRuntimeEventSchema } from "./rpc-types.js";
 import { OmpHarness } from "./test-utils/omp-harness.js";
 import { OmpAgentClient, OmpAgentSession } from "./agent.js";
@@ -730,6 +731,80 @@ describe("OMP agent client and session", () => {
 
     await expect(run).resolves.toMatchObject({ finalText: "first done" });
     expect(omp.completedTurnCount()).toBe(1);
+  });
+
+  // Drive one run that ends as a yield to a still-pending background job.
+  async function yieldToBackgroundWork(omp: OmpHarness, input = "first"): Promise<void> {
+    const runtime = omp.runtime();
+    const promptStarted = runtime.nextPrompt();
+    const run = omp.requireSession().run(input);
+    await promptStarted;
+    runtime.beginTurn();
+    runtime.acceptPrompt(input, "user-1");
+    runtime.streamAssistantText(`${input} done`);
+    runtime.emit({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: `${input} done` }] },
+    });
+    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+    runtime.emit({
+      type: "agent_end",
+      isTerminal: false,
+      yielded: true,
+      awaitingAsyncWork: true,
+      messages: [{ role: "assistant", content: [{ type: "text", text: `${input} done` }] }],
+    });
+    await run;
+  }
+
+  function backgroundWorkRows(omp: OmpHarness) {
+    return omp
+      .timeline()
+      .filter(
+        (item): item is Extract<AgentTimelineItem, { type: "tool_call" }> =>
+          item.type === "tool_call" && item.callId === OMP_BACKGROUND_WORK_CALL_ID,
+      );
+  }
+
+  test("marks yielded background work on the timeline and clears it when the session settles", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const runtime = omp.runtime();
+
+    // A plain terminal turn leaves no background-work row behind.
+    await omp.runPrompt("plain", "plain done");
+    expect(backgroundWorkRows(omp)).toEqual([]);
+
+    await yieldToBackgroundWork(omp);
+    expect(backgroundWorkRows(omp)).toEqual([
+      expect.objectContaining({ callId: OMP_BACKGROUND_WORK_CALL_ID, status: "running" }),
+    ]);
+
+    // The settle watcher speaks only once nothing background can re-wake the session.
+    runtime.emit({ type: "session_settled" });
+    await waitForImmediate();
+    expect(backgroundWorkRows(omp).at(-1)?.status).toBe("completed");
+  });
+
+  test("cancels the background-work row when the OMP process exits", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    await yieldToBackgroundWork(omp);
+
+    omp.processExit("runtime crashed");
+    await waitForImmediate();
+
+    expect(backgroundWorkRows(omp).at(-1)?.status).toBe("canceled");
+  });
+
+  test("cancels the background-work row when the session closes", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    await yieldToBackgroundWork(omp);
+
+    await omp.close();
+
+    expect(backgroundWorkRows(omp).at(-1)?.status).toBe("canceled");
   });
 
   test("steers a running turn and correlates a template-expanded echo exactly once", async () => {

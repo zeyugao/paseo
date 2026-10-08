@@ -11,7 +11,9 @@ This is server-side behavior. Clients need no changes: each daemon has its own
 
 1. Set a distinct, machine-stable `PASEO_SERVER_ID` on every machine (for example
    `srv_desktop`, `srv_laptop`). Two daemons with the same serverId on one home fail to
-   start — the per-instance registry rejects the collision.
+   start — the per-instance registry rejects the collision. Path separators, `+`, `:`,
+   `..`, and whitespace are rejected: the id also names the per-instance directory, the
+   `daemon.{serverId}.log` file, and one entry in a host-local `projectKey`.
 2. For cross-machine agent history reads, point the provider session directories at the
    shared volume too (for example `CLAUDE_CONFIG_DIR`, `CODEX_HOME`). Provider transcripts
    live outside PASEO_HOME; without sharing them, a foreign agent's record is visible but

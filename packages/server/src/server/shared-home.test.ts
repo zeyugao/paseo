@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { join } from "node:path";
 import pino from "pino";
 
-import { createTestPaseoDaemon } from "./test-utils/paseo-daemon.js";
+import { createTestPaseoDaemon, type TestPaseoDaemon } from "./test-utils/paseo-daemon.js";
 import { DaemonClient } from "./test-utils/daemon-client.js";
 import { AgentStorage } from "./agent/agent-storage.js";
 import type { StoredAgentRecord } from "./agent/agent-storage.js";
@@ -142,5 +142,58 @@ test("two daemons share one home with per-host workspaces and cross-host agent r
     expect(existsSync(join(daemonA.paseoHome, "daemons", "srv_shared_b", "instance.json"))).toBe(
       false,
     );
+  }
+}, 60_000);
+
+test("a second daemon adds itself to a local project key instead of replacing it", async () => {
+  process.env.PASEO_SERVER_ID = "srv_shared_a";
+  delete process.env.PASEO_PID_LOCK_OWNER;
+  const daemonA = await createTestPaseoDaemon({
+    paseoHomeRoot: homeRoot,
+    staticDir,
+    cleanup: false,
+  });
+
+  const clientA = new DaemonClient({
+    url: `ws://127.0.0.1:${daemonA.port}/ws`,
+    appVersion: "0.1.70",
+  });
+  let daemonB: TestPaseoDaemon | null = null;
+  try {
+    await clientA.connect();
+    await clientA.fetchAgents({ subscribe: {} });
+    await clientA.createWorkspace({ source: { kind: "directory", path: projectDir } });
+
+    const projectsFile = join(daemonA.paseoHome, "projects", "projects.json");
+    const readProjectKeys = async (): Promise<string[]> =>
+      (JSON.parse(await readFile(projectsFile, "utf8")) as Array<{ projectKey?: string | null }>)
+        .map((project) => project.projectKey ?? "")
+        .filter((key) => key.length > 0);
+
+    const keysWrittenByFirstDaemon = await waitFor(async () => {
+      const keys = await readProjectKeys();
+      return keys.length === 1 && keys[0]!.startsWith("host:srv_shared_a:");
+    });
+    expect(keysWrittenByFirstDaemon).toBe(true);
+    const [firstKey] = await readProjectKeys();
+    const observedPath = firstKey!.slice("host:srv_shared_a:".length);
+
+    // The second daemon boots onto the same home and reconciles the same project.
+    process.env.PASEO_SERVER_ID = "srv_shared_b";
+    process.env.PASEO_PID_LOCK_OWNER = "0";
+    daemonB = await createTestPaseoDaemon({ paseoHomeRoot: homeRoot, staticDir, cleanup: false });
+
+    const expectedKey = `host:srv_shared_a+srv_shared_b:${observedPath}`;
+    const converged = await waitFor(async () => {
+      const keys = await readProjectKeys();
+      return keys.length === 1 && keys[0] === expectedKey;
+    });
+
+    expect(converged).toBe(true);
+    expect(await readProjectKeys()).toEqual([expectedKey]);
+  } finally {
+    await clientA.close();
+    await daemonB?.close();
+    await daemonA.close();
   }
 }, 60_000);

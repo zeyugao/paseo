@@ -21,9 +21,9 @@ function getServerIdPath(paseoHome: string): string {
 }
 
 export function validateEnvironmentServerId(serverId: string): string {
-  if (/[\\/]/.test(serverId) || serverId.includes("..") || /\s/.test(serverId)) {
+  if (/[\\/:+]/.test(serverId) || serverId.includes("..") || /\s/.test(serverId)) {
     throw new Error(
-      "Invalid PASEO_SERVER_ID: it must not contain path separators, '..', or whitespace",
+      "Invalid PASEO_SERVER_ID: it must not contain path separators, '+', ':', '..', or whitespace",
     );
   }
   return serverId;

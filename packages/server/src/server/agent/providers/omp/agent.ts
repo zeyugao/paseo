@@ -73,7 +73,6 @@ import { OmpSubagentCardTracker, type OmpSubagentCardScheduler } from "./subagen
 import { ompSkillPromptUserText, shouldDisplayOmpCustomMessage } from "./custom-message.js";
 import { getUserMessageText } from "./message-history.js";
 import { mapOmpSystemNoticeToToolCalls } from "./system-notice.js";
-import { buildOmpBackgroundWorkItem } from "./background-work.js";
 import { materializeProviderImage } from "../provider-image-output.js";
 import { OmpCliRuntime } from "./cli-runtime.js";
 import { listOmpImportableSessions, readOmpImportSessionConfig } from "./session-descriptor.js";
@@ -739,8 +738,6 @@ export class OmpAgentSession implements AgentSession {
   private initialUsageReadStarted = false;
   private closed = false;
   private live: boolean;
-  private backgroundWorkPending = false;
-  private backgroundWorkTurnId: string | undefined;
   private readonly emittedUserMessageIds = new Set<string>();
 
   private readonly usageSessionKey = randomUUID();
@@ -1273,11 +1270,6 @@ export class OmpAgentSession implements AgentSession {
       return;
     }
     this.closed = true;
-    // Background jobs die with the runtime; nothing will ever re-wake this session.
-    this.finalizeBackgroundWork(
-      "canceled",
-      "The OMP session closed; pending background work was discarded.",
-    );
     this.unsubscribeRuntime?.();
     this.usagePoller.close();
     this.cancelNoTurnPromptCompletion();
@@ -1752,11 +1744,6 @@ export class OmpAgentSession implements AgentSession {
 
   private handleExtraRuntimeEvent(event: OmpRuntimeEvent): boolean {
     if (event.type === "session_settled") {
-      // The settle watcher only speaks once nothing queued or background can re-wake.
-      this.finalizeBackgroundWork(
-        "completed",
-        "The background job finished and the OMP session settled.",
-      );
       this.settleTurnAfterSessionSettled();
       return true;
     }
@@ -1924,11 +1911,6 @@ export class OmpAgentSession implements AgentSession {
 
   private handleProcessExit(error: string): void {
     this.runtimeDead = true;
-    // The background jobs died with the process; their results will never land.
-    this.finalizeBackgroundWork(
-      "canceled",
-      `The OMP process exited (${error}); pending background work was discarded.`,
-    );
     void this.hostTools?.close();
     this.usagePoller.stopTurn();
     if (!this.activeTurnId) {
@@ -2009,7 +1991,22 @@ export class OmpAgentSession implements AgentSession {
         return;
       }
       case "agent_end": {
-        this.handleAgentEnd(event, turnId);
+        const messages = event.messages ?? [];
+        let terminalMessages: OmpAgentMessage[] | null = null;
+        if (messages.some((message) => message.role === "assistant")) {
+          terminalMessages = messages;
+        } else if (this.activeTurnTerminalAssistantMessage) {
+          terminalMessages = [this.activeTurnTerminalAssistantMessage];
+        }
+        // OMP can end an internal extension-notice cycle before it starts the
+        // model turn for the same prompt. Ignore only cycles where neither the
+        // terminal payload nor the live stream contained an assistant message.
+        if (!terminalMessages) {
+          return;
+        }
+        // A state request is processed after OMP's RPC loop becomes promptable,
+        // so do not advertise Paseo idle until it reports that transition.
+        void this.completeTurnAfterProviderIdle(turnId, terminalMessages);
         return;
       }
       default:
@@ -2017,33 +2014,6 @@ export class OmpAgentSession implements AgentSession {
         // their content already arrived through message_end and tool_execution_end.
         return;
     }
-  }
-
-  private handleAgentEnd(
-    event: Extract<OmpAgentSessionEvent, { type: "agent_end" }>,
-    turnId: string | undefined,
-  ): void {
-    const messages = event.messages ?? [];
-    let terminalMessages: OmpAgentMessage[] | null = null;
-    if (messages.some((message) => message.role === "assistant")) {
-      terminalMessages = messages;
-    } else if (this.activeTurnTerminalAssistantMessage) {
-      terminalMessages = [this.activeTurnTerminalAssistantMessage];
-    }
-    // OMP can end an internal extension-notice cycle before it starts the
-    // model turn for the same prompt. Ignore only cycles where neither the
-    // terminal payload nor the live stream contained an assistant message.
-    if (!terminalMessages) {
-      return;
-    }
-    // A yielded run settles the turn while its background job keeps the session
-    // busy; mark it so an idle agent still shows what will wake it.
-    if (event.isTerminal === false && event.awaitingAsyncWork === true) {
-      this.markBackgroundWorkRunning(turnId);
-    }
-    // A state request is processed after OMP's RPC loop becomes promptable,
-    // so do not advertise Paseo idle until it reports that transition.
-    void this.completeTurnAfterProviderIdle(turnId, terminalMessages);
   }
 
   // A non-terminal agent_end marks work that resumes inside this same turn: queued
@@ -2057,33 +2027,6 @@ export class OmpAgentSession implements AgentSession {
     return (
       event.type === "agent_end" && event.isTerminal === false && event.awaitingAsyncWork !== true
     );
-  }
-
-  // The yielded-run marker row. Every transition re-emits the same callId so the
-  // timeline projection collapses them into one row; the daemon-side row never
-  // enters OMP history, so a restart-rehydrated timeline simply lacks it.
-  private markBackgroundWorkRunning(turnId: string | undefined): void {
-    this.backgroundWorkPending = true;
-    this.backgroundWorkTurnId = turnId;
-    this.emitBackgroundWorkItem(
-      "running",
-      "OMP finished this run and is waiting on a background job; the session resumes when the job reports its result.",
-    );
-  }
-
-  private finalizeBackgroundWork(status: "completed" | "canceled", text: string): void {
-    if (!this.backgroundWorkPending) return;
-    this.backgroundWorkPending = false;
-    this.emitBackgroundWorkItem(status, text);
-  }
-
-  private emitBackgroundWorkItem(status: "running" | "completed" | "canceled", text: string): void {
-    this.emit({
-      type: "timeline",
-      provider: this.provider,
-      turnId: this.backgroundWorkTurnId,
-      item: buildOmpBackgroundWorkItem(status, text),
-    });
   }
 
   private emitTurnStarted(turnId: string | undefined): void {

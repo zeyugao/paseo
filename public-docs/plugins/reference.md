@@ -1835,11 +1835,6 @@ For pills that follow the agent directory, use an explicit [owned list subscript
 The [local plugin example](https://github.com/getpaseo/paseo/blob/main/plugin-examples/local-plugin/client/main.tsx)
 replaces registrations on each snapshot and aborts the observation during entry cleanup, including pending bootstrap.
 
-The [omp-background example](https://github.com/getpaseo/paseo/tree/main/plugin-examples/omp-background)
-derives its pill from timeline state instead of the agent directory: it subscribes to each omp
-agent's projected timeline and keeps the pill registered exactly while the daemon's
-background-work marker row reads running.
-
 ## Button descriptor
 
 These contracts are exported from `@getpaseo/plugin/client`.

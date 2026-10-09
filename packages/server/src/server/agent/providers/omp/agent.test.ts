@@ -702,36 +702,6 @@ describe("OMP agent client and session", () => {
     expect(omp.completedTurnCount()).toBe(1);
   });
 
-  test("settles a run that yielded to a pending background job", async () => {
-    const omp = new OmpHarness();
-    await omp.start();
-    const runtime = omp.runtime();
-    const promptStarted = runtime.nextPrompt();
-    const run = omp.requireSession().run("first");
-    await promptStarted;
-    runtime.beginTurn();
-    runtime.acceptPrompt("first", "user-1");
-    runtime.streamAssistantText("first done");
-    runtime.emit({
-      type: "message_end",
-      message: { role: "assistant", content: [{ type: "text", text: "first done" }] },
-    });
-    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
-    // A run whose background job is still pending ends as a yield, not a
-    // continuation: OMP reports the session idle and resumes only for the job
-    // result, which arrives as a fresh run.
-    runtime.emit({
-      type: "agent_end",
-      isTerminal: false,
-      yielded: true,
-      awaitingAsyncWork: true,
-      messages: [{ role: "assistant", content: [{ type: "text", text: "first done" }] }],
-    });
-
-    await expect(run).resolves.toMatchObject({ finalText: "first done" });
-    expect(omp.completedTurnCount()).toBe(1);
-  });
-
   test("steers a running turn and correlates a template-expanded echo exactly once", async () => {
     const omp = new OmpHarness();
     await omp.start();

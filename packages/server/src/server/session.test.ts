@@ -2375,14 +2375,7 @@ describe("session checkout merge handling", () => {
       messages,
     });
     gitCommandMocks.runGitCommand.mockResolvedValue({
-      stdout: [
-        "worktree /tmp/request-worktree",
-        "branch refs/heads/feature",
-        "",
-        "worktree /tmp/base-worktree",
-        "branch refs/heads/main",
-        "",
-      ].join("\n"),
+      stdout: "refs/heads/main\0/tmp/base-worktree\0",
       stderr: "",
       exitCode: 0,
     });
@@ -2445,14 +2438,7 @@ describe("session checkout merge handling", () => {
       ),
     };
     gitCommandMocks.runGitCommand.mockResolvedValue({
-      stdout: [
-        "worktree /tmp/request-worktree",
-        "branch refs/heads/feature",
-        "",
-        "worktree /tmp/foreign-base-worktree",
-        "branch refs/heads/main",
-        "",
-      ].join("\n"),
+      stdout: "refs/heads/main\0/tmp/foreign-base-worktree\0",
       stderr: "",
       exitCode: 0,
     });

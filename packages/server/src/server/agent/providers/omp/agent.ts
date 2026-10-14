@@ -2090,7 +2090,6 @@ export class OmpAgentSession implements AgentSession {
     }
   }
 
-
   private handleMessageUpdate(
     event: Extract<OmpAgentSessionEvent, { type: "message_update" }>,
     turnId: string | undefined,

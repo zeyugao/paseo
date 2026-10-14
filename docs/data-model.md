@@ -202,6 +202,7 @@ snapshot so a mixed edit can apply its live subset and still name the paths that
 
 Configuration saves use the JSON symlink rule described above, so a symbolic link at `config.json`
 is preserved while its target is replaced atomically.
+
 ```
 {
   version: 1,

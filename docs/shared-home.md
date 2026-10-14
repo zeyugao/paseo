@@ -42,6 +42,9 @@ with hostname, PID, bootId, and a 30s mtime heartbeat), `daemon-keypair.json`, a
 `local-credential`. A daemon adopting a legacy single-machine home keeps the legacy
 keypair only when its serverId matches the legacy `server-id` file; every other serverId
 generates a fresh keypair, so relay identities and pairing stays per-machine.
+The reverse also holds: a pairing offer generated after the first daemon boot mirrors
+that daemon's keypair to the legacy root `daemon-keypair.json`, so the CLI keeps reading
+the home root and offers always carry the live daemon's public key.
 
 `paseo.pid` is a CLI discovery pointer, not the mutual exclusion. The daemon that holds
 it mirrors its credential to the legacy `local-credential` path for the unchanged CLI.

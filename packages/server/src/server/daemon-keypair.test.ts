@@ -82,6 +82,23 @@ describe("daemon keypair persistence", () => {
     }
   });
 
+  test("legacy caller mirrors the active per-server keypair when the daemon booted first", async () => {
+    const home = createTempHome();
+    try {
+      writeFileSync(path.join(home, "server-id"), `${SERVER_ID}\n`);
+      const active = await loadOrCreateDaemonKeyPair(home, { serverId: SERVER_ID });
+
+      const legacy = await loadOrCreateDaemonKeyPair(home);
+
+      expect(legacy.publicKeyB64).toBe(active.publicKeyB64);
+      expect(readFileSync(path.join(home, "daemon-keypair.json"), "utf8")).toBe(
+        readFileSync(instanceKeypairPath(home), "utf8"),
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("regenerates an unreadable per-server keypair", async () => {
     const home = createTempHome();
     try {

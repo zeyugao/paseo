@@ -117,6 +117,40 @@ async function adoptLegacyDaemonKeyPair(
   }
 }
 
+/**
+ * A legacy caller (pairing offer) running after the first daemon boot must offer that
+ * daemon's real identity, or clients pair against a public key the daemon cannot decrypt
+ * with. Mirror the active per-server keypair to the legacy root path so both callers and
+ * the CLI keep reading daemon-keypair.json at the home root.
+ */
+async function mirrorActiveDaemonKeyPair(
+  paseoHome: string,
+  legacyPath: string,
+  log?: pino.Logger,
+): Promise<DaemonKeyPairBundle | null> {
+  let serverId: string;
+  try {
+    serverId = readFileSync(path.join(paseoHome, "server-id"), "utf8").trim();
+  } catch {
+    return null;
+  }
+  if (!serverId) return null;
+  const activePath = path.join(paseoHome, "daemons", serverId, KEYPAIR_FILENAME);
+  try {
+    const active = await loadStoredKeyPair(activePath);
+    if (await createKeyPairExclusive(legacyPath, active)) {
+      log?.info({ legacyPath, activePath }, "Mirrored active daemon keypair to legacy root");
+      return active;
+    }
+    const winner = await loadKeyPairWinner(legacyPath);
+    log?.info({ legacyPath }, "Loaded concurrently created daemon keypair");
+    return winner;
+  } catch (error) {
+    log?.warn({ err: error, activePath }, "Failed to mirror active daemon keypair");
+    return null;
+  }
+}
+
 export async function loadOrCreateDaemonKeyPair(
   paseoHome: string,
   options: LoadDaemonKeyPairOptions = {},
@@ -148,6 +182,10 @@ export async function loadOrCreateDaemonKeyPair(
       log,
     );
     if (adopted) return adopted;
+  }
+  if (targetMissing && !options.serverId) {
+    const mirrored = await mirrorActiveDaemonKeyPair(paseoHome, legacyPath, log);
+    if (mirrored) return mirrored;
   }
 
   const reclaimLockPath = path.join(path.dirname(filePath), ".reclaim.lock");

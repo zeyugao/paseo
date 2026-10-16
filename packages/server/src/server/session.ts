@@ -743,9 +743,7 @@ export class Session {
   private clientCapabilities: ReadonlySet<ClientCapability>;
   private readonly sessionId: string;
   private readonly onMessage: (msg: SessionOutboundMessage) => void;
-  private readonly onMessageToSource:
-    | ((source: object, msg: SessionOutboundMessage) => void | Promise<void>)
-    | null;
+  private readonly onMessageToSource: SessionOptions["onMessageToSource"] | null;
   private readonly onBinaryMessage: ((frame: Uint8Array) => void) | null;
   private readonly onBinaryMessageToSource:
     | ((source: object, frame: Uint8Array) => Promise<void>)
@@ -761,6 +759,7 @@ export class Session {
   private readonly projectIcons: ProjectIconReader;
   private readonly worktreesRoot: string | undefined;
   private readonly rewindInitiators = new Map<string, object | undefined>();
+  private readonly timelineRequests = new WeakMap<object, Promise<void>>();
 
   private agentManager: AgentManager;
   private readonly agentStorage: AgentStorage;
@@ -2248,7 +2247,34 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
    * Main entry point for processing session messages
    */
   public async handleMessage(msg: SessionInboundMessage, source?: object): Promise<void> {
-    return this.delivery.request(source, msg, () => this.handleRequest(msg, source));
+    return this.delivery.request(source, msg, () => {
+      if (
+        msg.type === "fetch_agent_timeline_request" ||
+        msg.type === "agent.provider_subagents.timeline.get.request"
+      ) {
+        return this.runTimelineRequest(() => this.handleRequest(msg, source));
+      }
+      return this.handleRequest(msg, source);
+    });
+  }
+  private async runTimelineRequest(run: () => Promise<void>): Promise<void> {
+    const source = this.delivery.currentSource!;
+    const signal = this.delivery.requestSignal;
+    const previous = this.timelineRequests.get(source);
+    let release!: () => void;
+    const current = new Promise<void>((resume) => {
+      release = resume;
+    });
+    // Queue small requests before projection, not already-materialized history pages.
+    this.timelineRequests.set(source, current);
+    try {
+      if (previous) await previous;
+      if (signal.aborted) return;
+      await run();
+    } finally {
+      release();
+      if (this.timelineRequests.get(source) === current) this.timelineRequests.delete(source);
+    }
   }
 
   private async handleRequest(msg: SessionInboundMessage, source?: object): Promise<void> {
@@ -8143,6 +8169,7 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
     msg: Extract<SessionInboundMessage, { type: "fetch_agent_timeline_request" }>,
     source?: object,
   ): Promise<void> {
+    const signal = this.delivery.requestSignal;
     const direction: AgentTimelineFetchDirection = msg.direction ?? (msg.cursor ? "after" : "tail");
     const projection = "projected" as const;
     const cursor: AgentTimelineCursor | undefined = msg.cursor
@@ -8158,7 +8185,9 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
         agentStorage: this.agentStorage,
         logger: this.sessionLogger,
       });
+      if (signal.aborted) return;
       const agentPayload = await this.buildAgentPayload(snapshot);
+      if (signal.aborted) return;
 
       const fetchedControlTimeline = this.agentManager.fetchTimeline(msg.agentId, {
         direction,
@@ -8186,7 +8215,7 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
         this.supportsTimelineItem(entry.item, source),
       );
 
-      this.emitForSource(
+      await this.emitForSource(
         {
           type: "fetch_agent_timeline_response",
           payload: {
@@ -8231,11 +8260,12 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
         source,
       );
     } catch (error) {
+      if (signal.aborted) return;
       this.sessionLogger.error(
         { err: error, agentId: msg.agentId },
         "Failed to handle fetch_agent_timeline_request",
       );
-      this.emitForSource(
+      await this.emitForSource(
         {
           type: "fetch_agent_timeline_response",
           payload: {
@@ -8416,6 +8446,7 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
     msg: Extract<SessionInboundMessage, { type: "agent.provider_subagents.timeline.get.request" }>,
     source?: object,
   ): Promise<void> {
+    const signal = this.delivery.requestSignal;
     const direction: AgentTimelineFetchDirection = msg.direction ?? (msg.cursor ? "after" : "tail");
     try {
       await ensureUnarchivedAgentLoaded(msg.parentAgentId, {
@@ -8423,6 +8454,7 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
         agentStorage: this.agentStorage,
         logger: this.sessionLogger,
       });
+      if (signal.aborted) return;
       const descriptor = this.agentManager.getProviderSubagent(msg.parentAgentId, msg.subagentId);
       if (!descriptor) {
         throw new Error("Provider subagent not found");
@@ -8441,7 +8473,7 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
         },
       );
       const rows = timeline.rows.filter((row) => this.supportsTimelineItem(row.item, source));
-      this.emitForSource(
+      await this.emitForSource(
         {
           type: "agent.provider_subagents.timeline.get.response",
           payload: {
@@ -8487,7 +8519,8 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
         source,
       );
     } catch (error) {
-      this.emitForSource(
+      if (signal.aborted) return;
+      await this.emitForSource(
         {
           type: "agent.provider_subagents.timeline.get.response",
           payload: {
@@ -9027,11 +9060,10 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
     return pending;
   }
 
-  private emitForSource(msg: SessionOutboundMessage, source?: object): void {
+  private emitForSource(msg: SessionOutboundMessage, source?: object): void | Promise<void> {
     if (source && this.onMessageToSource) {
       msg = this.delivery.authorizeReply(msg, source);
-      this.onMessageToSource(source, msg);
-      return;
+      return this.onMessageToSource(source, msg);
     }
     this.emit(msg);
   }

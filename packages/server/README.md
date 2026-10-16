@@ -26,6 +26,17 @@ npm run dev
 - **Agent** - STT → LLM → TTS pipeline with terminal control
 - **Daemon** - tmux-based terminal management (in-process)
 
+### Timeline response backpressure
+
+Timeline page requests wait per physical socket before loading or projecting history, and release
+the next request only after their response finishes sending. A projected-item limit is a target:
+long-lived tool entries can widen the page, and `limit: 0` intentionally requests full history.
+Queueing serialized responses instead would move the same memory spike out of the socket buffer.
+
+Control RPCs and sibling sockets bypass that queue. A failed write cancels its source before releasing
+queued requests because the transport's close event may arrive later. The 64 MiB physical-socket
+cutoff remains an OOM backstop; the timeline wire format and full-history reads are unchanged.
+
 ## Development
 
 ```bash

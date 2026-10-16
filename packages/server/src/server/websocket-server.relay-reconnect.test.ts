@@ -130,7 +130,11 @@ vi.mock("./push/index.js", () => ({
 
 import { z } from "zod";
 import { VoiceAssistantWebSocketServer } from "./websocket-server";
-import { DAEMON_PERMISSIONS, parseServerInfoStatusPayload } from "./messages.js";
+import {
+  DAEMON_PERMISSIONS,
+  parseServerInfoStatusPayload,
+  type SessionOutboundMessage,
+} from "./messages.js";
 import type { SpeechReadinessSnapshot } from "./speech/speech-runtime.js";
 
 interface WebSocketServerInternals {
@@ -231,6 +235,37 @@ class MockSocket {
     );
   }
 }
+
+class DeferredSendSocket extends MockSocket {
+  completeSend: ((error?: Error) => void) | undefined;
+
+  override send(data: unknown, callback?: (error?: Error) => void): void {
+    super.send(data);
+    if (callback) this.completeSend = callback;
+  }
+}
+
+const timelineReply: Extract<SessionOutboundMessage, { type: "fetch_agent_timeline_response" }> = {
+  type: "fetch_agent_timeline_response",
+  payload: {
+    requestId: "timeline-paced",
+    agentId: "agent-1",
+    agent: null,
+    direction: "tail",
+    projection: "projected",
+    epoch: "",
+    reset: false,
+    staleCursor: false,
+    gap: false,
+    window: { minSeq: 0, maxSeq: 0, nextSeq: 0 },
+    startCursor: null,
+    endCursor: null,
+    hasOlder: false,
+    hasNewer: false,
+    entries: [],
+    error: "history unavailable",
+  },
+};
 
 function createLogger() {
   const logger = {
@@ -496,6 +531,85 @@ function holdSessionCleanup(session: (typeof sessionMock.instances)[number]): {
 }
 
 describe("relay external socket reconnect behavior", () => {
+  test("timeline replies keep their request active until the physical write completes", async () => {
+    const server = createServer();
+    const socket = new DeferredSendSocket();
+    try {
+      await attachDirectAndHello({ server, socket, clientId: "cid-paced-timeline" });
+      const session = sessionMock.instances[0];
+      const reply = session.args.onMessageToSource;
+      if (typeof reply !== "function") throw new Error("Missing source reply transport");
+      let completed = false;
+      const sending = session.delivery.request(
+        socket,
+        { type: "fetch_agent_timeline_request", agentId: "agent-1", requestId: "timeline-paced" },
+        async () => {
+          await reply(socket, session.delivery.authorizeReply(timelineReply, socket));
+          completed = true;
+        },
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(completed).toBe(false);
+      socket.completeSend?.();
+      await sending;
+      expect(completed).toBe(true);
+      expect(
+        sentEnvelopes(socket).filter((frame) => frame.message?.type === timelineReply.type),
+      ).toEqual([{ type: "session", message: timelineReply }]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test.each([
+    { state: 1, failure: new Error("write failed before close") },
+    { state: 3, failure: undefined },
+  ])(
+    "cancels a source before its paced send settles with readyState=$state",
+    async ({ state, failure }) => {
+      const server = createServer();
+      const socket = new DeferredSendSocket();
+      const sibling = new MockSocket();
+      try {
+        await attachDirectAndHello({ server, socket, clientId: "cid-paced-siblings" });
+        await attachDirectAndHello({ server, socket: sibling, clientId: "cid-paced-siblings" });
+        const session = sessionMock.instances[0];
+        const reply = session.args.onMessageToSource;
+        if (typeof reply !== "function") throw new Error("Missing source reply transport");
+        let sourceSignal: AbortSignal | undefined;
+        socket.readyState = state;
+        const sending = session.delivery.request(
+          socket,
+          { type: "fetch_agent_timeline_request", agentId: "agent-1", requestId: "timeline-paced" },
+          async () => {
+            sourceSignal = session.delivery.requestSignal;
+            await reply(socket, session.delivery.authorizeReply(timelineReply, socket));
+          },
+        );
+        const settled = sending.then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        socket.completeSend?.(failure);
+        expect(await settled).toBe(failure);
+        expect(sourceSignal?.aborted).toBe(true);
+        await session.delivery.request(
+          sibling,
+          { type: "fetch_agent_timeline_request", agentId: "agent-1", requestId: "timeline-paced" },
+          async () => {
+            await reply(sibling, session.delivery.authorizeReply(timelineReply, sibling));
+          },
+        );
+        expect(
+          sentEnvelopes(sibling).filter((frame) => frame.message?.type === timelineReply.type),
+        ).toEqual([{ type: "session", message: timelineReply }]);
+      } finally {
+        await server.close();
+      }
+    },
+  );
+
   test("closes only a hello socket when post-admission setup throws", async () => {
     const server = createServer();
     class ThrowOnceSocket extends MockSocket {

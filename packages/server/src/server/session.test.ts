@@ -397,12 +397,14 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
     onMessage: (message) => messages.push(message),
     ...(options.targetedMessages
       ? {
-          onMessageToSource: (source: object, message: SessionOutboundMessage) =>
-            options.targetedMessages?.push({ source, message }),
+          onMessageToSource: (source: object, message: SessionOutboundMessage) => {
+            options.targetedMessages?.push({ source, message });
+          },
         }
       : {
-          onMessageToSource: (_source: object, message: SessionOutboundMessage) =>
-            messages.push(message),
+          onMessageToSource: (_source: object, message: SessionOutboundMessage) => {
+            messages.push(message);
+          },
         }),
     onBinaryMessage: createBinaryMessageHandler(options.binaryMessages),
     logger,

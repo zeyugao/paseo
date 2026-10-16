@@ -4,12 +4,13 @@ import {
 } from "./test-utils/session-stubs.js";
 import pino from "pino";
 import { z } from "zod";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import {
   AgentTimelineItemPayloadSchema,
   FetchAgentTimelineResponseMessageSchema,
+  ProviderSubagentTimelineResponseMessageSchema,
   SessionInboundMessageSchema,
   SessionOutboundMessageSchema,
   type SessionOutboundMessage,
@@ -47,21 +48,18 @@ const LegacyFetchAgentTimelineResponseMessageSchema = z.object({
   }),
 });
 
-interface SessionInternals {
-  handleFetchAgentTimelineRequest: (
-    message: Extract<
-      z.infer<typeof SessionInboundMessageSchema>,
-      { type: "fetch_agent_timeline_request" }
-    >,
-  ) => Promise<void>;
-}
-
 class InMemoryAgentManager {
   private readonly timeline = new InMemoryAgentTimelineStore();
+  private readonly subagentTimeline = new InMemoryAgentTimelineStore();
 
   constructor(rows: AgentTimelineRow[]) {
     this.timeline.initialize("agent-1", {
       epoch: "epoch-1",
+      rows,
+      nextSeq: (rows.at(-1)?.seq ?? 0) + 1,
+    });
+    this.subagentTimeline.initialize("subagent-1", {
+      epoch: "subagent-epoch-1",
       rows,
       nextSeq: (rows.at(-1)?.seq ?? 0) + 1,
     });
@@ -113,6 +111,20 @@ class InMemoryAgentManager {
 
   fetchTimeline(_agentId: string, options?: AgentTimelineFetchOptions) {
     return this.timeline.fetch("agent-1", options);
+  }
+
+  async waitForAgentClose() {}
+
+  getProviderSubagent() {
+    return { provider: "codex" as const };
+  }
+
+  fetchProviderSubagentTimeline(
+    _agentId: string,
+    _subagentId: string,
+    options?: AgentTimelineFetchOptions,
+  ) {
+    return this.subagentTimeline.fetch("subagent-1", options);
   }
 
   listAgents() {
@@ -188,6 +200,7 @@ function createSessionForWireCompatTest(options?: {
   clientCapabilities?: Record<string, unknown> | null;
   directorySync?: DirectorySyncService;
   messages?: SessionOutboundMessage[];
+  manager?: InMemoryAgentManager;
   onMessageToSource?: SessionOptions["onMessageToSource"];
   rows?: AgentTimelineRow[];
 }): Session {
@@ -217,14 +230,17 @@ function createSessionForWireCompatTest(options?: {
     permissions: OWNER_PERMISSIONS,
     clientCapabilities: options?.clientCapabilities ?? null,
     onMessage: (message) => messages.push(message),
-    onMessageToSource: options?.onMessageToSource ?? ((_source, message) => messages.push(message)),
+    onMessageToSource:
+      options?.onMessageToSource ??
+      ((_source, message) => {
+        messages.push(message);
+      }),
     logger: pino({ level: "silent" }),
     downloadTokenStore: {} as SessionOptions["downloadTokenStore"],
     pushNotifications: {} as SessionOptions["pushNotifications"],
     paseoHome: "/tmp/paseo-home",
-    agentManager: new InMemoryAgentManager(
-      options?.rows ?? rows,
-    ) as unknown as SessionOptions["agentManager"],
+    agentManager: (options?.manager ??
+      new InMemoryAgentManager(options?.rows ?? rows)) as unknown as SessionOptions["agentManager"],
     agentStorage: new EmptyAgentStorage() as unknown as SessionOptions["agentStorage"],
     projectRegistry: new EmptyProjectRegistry() as unknown as SessionOptions["projectRegistry"],
     workspaceRegistry:
@@ -298,9 +314,7 @@ async function emitTimelineResponse(options?: {
     rows: options?.rows,
     messages,
   });
-  const internals = session as unknown as SessionInternals;
-
-  await internals.handleFetchAgentTimelineRequest({
+  await session.handleMessage({
     type: "fetch_agent_timeline_request",
     requestId: "req-timeline",
     agentId: "agent-1",
@@ -315,6 +329,343 @@ async function emitTimelineResponse(options?: {
   }
   return response;
 }
+
+function deferred() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+describe("timeline request source scheduling", () => {
+  const rows: AgentTimelineRow[] = [
+    {
+      seq: 1,
+      timestamp: "2026-05-02T00:00:00.000Z",
+      item: { type: "user_message", text: "first prompt" },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-05-02T00:00:01.000Z",
+      item: { type: "assistant_message", text: "first answer" },
+    },
+    {
+      seq: 3,
+      timestamp: "2026-05-02T00:00:02.000Z",
+      item: { type: "user_message", text: "second prompt" },
+    },
+    {
+      seq: 4,
+      timestamp: "2026-05-02T00:00:03.000Z",
+      item: { type: "assistant_message", text: "second answer" },
+    },
+  ];
+  const rootRequest = {
+    type: "fetch_agent_timeline_request",
+    requestId: "root",
+    agentId: "agent-1",
+    projection: "projected",
+    direction: "after",
+    cursor: { epoch: "epoch-1", seq: 0 },
+    limit: 1,
+  } as const;
+  const childRequest = {
+    type: "agent.provider_subagents.timeline.get.request",
+    requestId: "child",
+    parentAgentId: "agent-1",
+    subagentId: "subagent-1",
+    direction: "after",
+    cursor: { epoch: "subagent-epoch-1", seq: 2 },
+    limit: 0,
+  } as const;
+
+  test("waits for the physical send before producing same-source pages while other work proceeds", async () => {
+    const manager = new InMemoryAgentManager(rows);
+    const rootReads = vi.spyOn(manager, "fetchTimeline");
+    const childReads = vi.spyOn(manager, "fetchProviderSubagentTimeline");
+    const agentReads = vi.spyOn(manager, "getAgent");
+    const source = {};
+    const otherSource = {};
+    const firstStarted = deferred();
+    const firstSend = deferred();
+    const delivered: Array<{ source: object; message: SessionOutboundMessage }> = [];
+    const session = createSessionForWireCompatTest({
+      manager,
+      onMessageToSource: (target, message) => {
+        delivered.push({ source: target, message });
+        if (
+          message.type === "fetch_agent_timeline_response" &&
+          message.payload.requestId === "first"
+        ) {
+          firstStarted.resolve();
+          return firstSend.promise;
+        }
+      },
+    });
+    for (const socket of [source, otherSource]) {
+      session.updateClientCapabilities({ [CLIENT_CAPS.projectedSubagentTimeline]: true }, socket);
+    }
+
+    const first = session.handleMessage({ ...rootRequest, requestId: "first" }, source);
+    await firstStarted.promise;
+    const second = session.handleMessage(
+      { ...rootRequest, requestId: "second", cursor: { epoch: "epoch-1", seq: 1 } },
+      source,
+    );
+    const third = session.handleMessage(childRequest, source);
+    await session.handleMessage({ ...childRequest, requestId: "other" }, otherSource);
+    await session.handleMessage(
+      { type: "session.events.set_subscription.request", requestId: "events", events: [] },
+      source,
+    );
+
+    expect(rootReads).toHaveBeenCalledTimes(1);
+    expect(childReads).toHaveBeenCalledTimes(1);
+    expect(agentReads).toHaveBeenCalledTimes(2);
+    expect(delivered.map(({ message }) => message.type)).toEqual([
+      "fetch_agent_timeline_response",
+      "agent.provider_subagents.timeline.get.response",
+      "session.events.set_subscription.response",
+    ]);
+    expect(delivered[1]?.source).toBe(otherSource);
+    expect(
+      FetchAgentTimelineResponseMessageSchema.parse(delivered[0]?.message).payload,
+    ).toMatchObject({
+      requestId: "first",
+      entries: [{ item: { type: "user_message", text: "first prompt" }, seqStart: 1, seqEnd: 1 }],
+      startCursor: { epoch: "epoch-1", seq: 1 },
+      endCursor: { epoch: "epoch-1", seq: 1 },
+      hasNewer: true,
+      error: null,
+    });
+    expect(
+      ProviderSubagentTimelineResponseMessageSchema.parse(delivered[1]?.message).payload,
+    ).toMatchObject({
+      requestId: "other",
+      rows: [
+        { item: { type: "user_message", text: "second prompt" }, seqStart: 3, seqEnd: 3 },
+        { item: { type: "assistant_message", text: "second answer" }, seqStart: 4, seqEnd: 4 },
+      ],
+      startCursor: { epoch: "subagent-epoch-1", seq: 3 },
+      endCursor: { epoch: "subagent-epoch-1", seq: 4 },
+      hasNewer: false,
+      error: null,
+    });
+
+    firstSend.resolve();
+    await Promise.all([first, second, third]);
+    expect(rootReads).toHaveBeenCalledTimes(2);
+    expect(childReads).toHaveBeenCalledTimes(2);
+    expect(delivered.slice(3).map(({ source: socket }) => socket)).toEqual([source, source]);
+    expect(
+      FetchAgentTimelineResponseMessageSchema.parse(delivered[3]?.message).payload,
+    ).toMatchObject({
+      requestId: "second",
+      entries: [
+        { item: { type: "assistant_message", text: "first answer" }, seqStart: 2, seqEnd: 2 },
+      ],
+      startCursor: { epoch: "epoch-1", seq: 2 },
+      endCursor: { epoch: "epoch-1", seq: 2 },
+      hasNewer: true,
+      error: null,
+    });
+    expect(
+      ProviderSubagentTimelineResponseMessageSchema.parse(delivered[4]?.message).payload,
+    ).toEqual({
+      ...ProviderSubagentTimelineResponseMessageSchema.parse(delivered[1]?.message).payload,
+      requestId: "child",
+    });
+    await session.cleanup();
+  });
+
+  test.each(["root", "child"] as const)(
+    "drops queued pages when a source closes during a pending %s send",
+    async (kind) => {
+      const manager = new InMemoryAgentManager(rows);
+      const rootReads = vi.spyOn(manager, "fetchTimeline");
+      const childReads = vi.spyOn(manager, "fetchProviderSubagentTimeline");
+      const source = {};
+      const started = deferred();
+      const send = deferred();
+      const messages: SessionOutboundMessage[] = [];
+      const session = createSessionForWireCompatTest({
+        manager,
+        onMessageToSource: (_source, message) => {
+          messages.push(message);
+          started.resolve();
+          return send.promise;
+        },
+      });
+      session.updateClientCapabilities({ [CLIENT_CAPS.projectedSubagentTimeline]: true }, source);
+      const first = session.handleMessage(kind === "root" ? rootRequest : childRequest, source);
+      await started.promise;
+      const queuedRoot = session.handleMessage(
+        { ...rootRequest, requestId: "queued-root" },
+        source,
+      );
+      const queuedChild = session.handleMessage(
+        { ...childRequest, requestId: "queued-child" },
+        source,
+      );
+      session.clearAgentTimelineSubscription(source);
+      send.resolve();
+      await Promise.all([first, queuedRoot, queuedChild]);
+
+      expect(rootReads).toHaveBeenCalledTimes(kind === "root" ? 1 : 0);
+      expect(childReads).toHaveBeenCalledTimes(kind === "child" ? 1 : 0);
+      expect(messages).toHaveLength(1);
+      if (kind === "root") {
+        expect(FetchAgentTimelineResponseMessageSchema.parse(messages[0]).payload).toMatchObject({
+          entries: [{ item: { text: "first prompt" } }],
+          endCursor: { epoch: "epoch-1", seq: 1 },
+          error: null,
+        });
+      } else {
+        expect(
+          ProviderSubagentTimelineResponseMessageSchema.parse(messages[0]).payload,
+        ).toMatchObject({
+          rows: [{ item: { text: "second prompt" } }, { item: { text: "second answer" } }],
+          endCursor: { epoch: "subagent-epoch-1", seq: 4 },
+          error: null,
+        });
+      }
+      await session.cleanup();
+    },
+  );
+
+  test.each(["root", "child"] as const)(
+    "does not produce or send a %s page after its source closes during loading",
+    async (kind) => {
+      const manager = new InMemoryAgentManager(rows);
+      const rootReads = vi.spyOn(manager, "fetchTimeline");
+      const childReads = vi.spyOn(manager, "fetchProviderSubagentTimeline");
+      const loadStarted = deferred();
+      const load = deferred();
+      vi.spyOn(manager, "waitForAgentClose").mockImplementationOnce(() => {
+        loadStarted.resolve();
+        return load.promise;
+      });
+      const messages: SessionOutboundMessage[] = [];
+      const session = createSessionForWireCompatTest({ manager, messages });
+      const source = {};
+      const first = session.handleMessage(kind === "root" ? rootRequest : childRequest, source);
+      await loadStarted.promise;
+      const queued = session.handleMessage({ ...rootRequest, requestId: "queued" }, source);
+      session.clearAgentTimelineSubscription(source);
+      load.resolve();
+      await Promise.all([first, queued]);
+
+      expect(rootReads).not.toHaveBeenCalled();
+      expect(childReads).not.toHaveBeenCalled();
+      expect(messages).toEqual([]);
+      await session.cleanup();
+    },
+  );
+
+  test("waits for an error response send and then releases later requests", async () => {
+    const manager = new InMemoryAgentManager(rows);
+    const reads = vi.spyOn(manager, "fetchTimeline").mockImplementationOnce(() => {
+      throw new Error("timeline page failed");
+    });
+    const started = deferred();
+    const send = deferred();
+    const messages: SessionOutboundMessage[] = [];
+    const session = createSessionForWireCompatTest({
+      manager,
+      onMessageToSource: (_source, message) => {
+        messages.push(message);
+        if (
+          message.type === "fetch_agent_timeline_response" &&
+          message.payload.requestId === "failed"
+        ) {
+          started.resolve();
+          return send.promise;
+        }
+      },
+    });
+    const source = {};
+    const first = session.handleMessage({ ...rootRequest, requestId: "failed" }, source);
+    await started.promise;
+    const next = session.handleMessage({ ...rootRequest, requestId: "next" }, source);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(messages).toHaveLength(1);
+    expect(FetchAgentTimelineResponseMessageSchema.parse(messages[0]).payload).toMatchObject({
+      requestId: "failed",
+      entries: [],
+      startCursor: null,
+      endCursor: null,
+      error: "timeline page failed",
+    });
+
+    send.resolve();
+    await Promise.all([first, next]);
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(FetchAgentTimelineResponseMessageSchema.parse(messages[1]).payload).toMatchObject({
+      requestId: "next",
+      entries: [{ item: { text: "first prompt" } }],
+      endCursor: { epoch: "epoch-1", seq: 1 },
+      error: null,
+    });
+    await session.cleanup();
+  });
+
+  test("a rejected physical send does not strand the next timeline request", async () => {
+    const manager = new InMemoryAgentManager(rows);
+    const reads = vi.spyOn(manager, "fetchTimeline");
+    const started = deferred();
+    const send = deferred();
+    const sendError = new Error("physical send failed");
+    const messages: SessionOutboundMessage[] = [];
+    const session = createSessionForWireCompatTest({
+      manager,
+      onMessageToSource: (_source, message) => {
+        messages.push(message);
+        if (
+          message.type === "fetch_agent_timeline_response" &&
+          message.payload.requestId === "failed"
+        ) {
+          started.resolve();
+          return send.promise;
+        }
+      },
+    });
+    const source = {};
+    const first = session.handleMessage({ ...rootRequest, requestId: "failed" }, source);
+    await started.promise;
+    const next = session.handleMessage({ ...rootRequest, requestId: "next" }, source);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(messages).toHaveLength(1);
+    send.reject(sendError);
+    await first;
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "rpc_error",
+          payload: expect.objectContaining({
+            requestId: "failed",
+            requestType: "fetch_agent_timeline_request",
+            code: "handler_error",
+          }),
+        }),
+      ]),
+    );
+    await next;
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(FetchAgentTimelineResponseMessageSchema.parse(messages.at(-1)).payload).toMatchObject({
+      requestId: "next",
+      entries: [{ item: { text: "first prompt" } }],
+      startCursor: { epoch: "epoch-1", seq: 1 },
+      endCursor: { epoch: "epoch-1", seq: 1 },
+      error: null,
+    });
+    await session.cleanup();
+  });
+});
 
 describe("wire compatibility", () => {
   test("sends project updates only to clients that declare support", async () => {
@@ -560,8 +911,9 @@ test("setup progress is adapted per socket without changing the canonical snapsh
   const modernCapable = {};
   const delivered = new Map<object, SessionOutboundMessage[]>();
   const session = createSessionForWireCompatTest({
-    onMessageToSource: (source, message) =>
-      delivered.set(source, [...(delivered.get(source) ?? []), message]),
+    onMessageToSource: (source, message) => {
+      delivered.set(source, [...(delivered.get(source) ?? []), message]);
+    },
   });
   for (const [source, blocked, owned] of [
     [legacy, false, false],

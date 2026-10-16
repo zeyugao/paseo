@@ -467,7 +467,7 @@ interface SocketSessionOptions {
   permissions: readonly DaemonPermission[];
   connectionLogger: pino.Logger;
   onMessage: (message: SessionOutboundMessage) => void;
-  onMessageToSource?: (source: object, message: SessionOutboundMessage) => void;
+  onMessageToSource?: (source: object, message: SessionOutboundMessage) => void | Promise<void>;
   onBinaryMessage?: (frame: Uint8Array) => void;
   onBinaryMessageToSource?: (source: object, frame: Uint8Array) => Promise<void>;
   getTransportBufferedAmount?: (source?: object) => number | null;
@@ -1152,8 +1152,11 @@ export class VoiceAssistantWebSocketServer {
     sockets: Iterable<WebSocketLike>,
     message: WSOutboundMessage,
     reportRejection = false,
-  ): void {
-    const writableSockets = [...sockets].filter((ws) => {
+    signal?: AbortSignal,
+  ): void | Promise<void> {
+    if (signal?.aborted) return;
+    const physicalSockets = [...sockets];
+    const writableSockets = physicalSockets.filter((ws) => {
       if (
         message.type === "session" &&
         this.sessions.get(ws)?.session.delivery.permits(ws, message.message) !== true
@@ -1174,6 +1177,13 @@ export class VoiceAssistantWebSocketServer {
       return this.ensureOutboundCapacity(ws, 0);
     });
     if (writableSockets.length === 0) {
+      if (signal) {
+        return Promise.all(
+          physicalSockets
+            .filter((ws) => ws.readyState !== 1)
+            .map((ws) => this.detachSocket(ws, {})),
+        ).then(() => undefined);
+      }
       return;
     }
 
@@ -1186,6 +1196,34 @@ export class VoiceAssistantWebSocketServer {
     }
 
     const payloadBytes = outboundFrameByteLength(payload);
+    if (signal) {
+      return Promise.all(
+        writableSockets.map(async (ws) => {
+          try {
+            const sent = await sendBoundedPhysicalFrameAndWait({
+              socket: ws,
+              frame: payload,
+              frameBytes: payloadBytes,
+              signal,
+              onHighWater: () => this.closeAtOutboundHighWater(ws),
+            });
+            if (sent) this.runtimeMetrics.recordOutboundMessage(message, ws.bufferedAmount);
+            else if (!signal.aborted) await this.detachSocket(ws, {});
+          } catch (error) {
+            // A failed write can precede the close event; cancel queued producers now.
+            this.closePhysicalSocket({
+              ws,
+              logMessage: "Closing physical WebSocket after send failure",
+              logFields: { err: error },
+            });
+            await this.detachSocket(ws, {
+              error: error instanceof Error ? error : new Error(String(error)),
+            });
+            throw error;
+          }
+        }),
+      ).then(() => undefined);
+    }
     for (const ws of writableSockets) {
       this.sendFrameToClient(ws, payload, payloadBytes, () => {
         this.runtimeMetrics.recordOutboundMessage(message, ws.bufferedAmount);
@@ -1398,6 +1436,17 @@ export class VoiceAssistantWebSocketServer {
       onMessageToSource: (source, msg) => {
         if (!connection || !connection.sockets.has(source as WebSocketLike)) {
           return;
+        }
+        if (
+          msg.type === "fetch_agent_timeline_response" ||
+          msg.type === "agent.provider_subagents.timeline.get.response"
+        ) {
+          return this.sendMessageToSockets(
+            [source as WebSocketLike],
+            wrapSessionMessage(msg),
+            true,
+            connection.session.delivery.requestSignal,
+          );
         }
         this.sendToClient(source as WebSocketLike, wrapSessionMessage(msg));
       },

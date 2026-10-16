@@ -62,28 +62,54 @@ export async function sendBoundedPhysicalFrameAndWait(params: {
   frame: string | Uint8Array | ArrayBuffer;
   frameBytes?: number;
   onHighWater: () => void;
+  signal?: AbortSignal;
 }): Promise<boolean> {
-  const { socket, frame, frameBytes = outboundFrameByteLength(frame), onHighWater } = params;
-  if (socket.readyState !== 1) return false;
+  const {
+    socket,
+    frame,
+    frameBytes = outboundFrameByteLength(frame),
+    onHighWater,
+    signal,
+  } = params;
+  if (signal?.aborted || socket.readyState !== 1) return false;
   if (!physicalSocketHasCapacity(socket, frameBytes)) {
     onHighWater();
     return false;
   }
 
-  await new Promise<void>((resolve, reject) => {
+  return new Promise<boolean>((resolve, reject) => {
+    function removeAbortListener(): void {
+      signal?.removeEventListener("abort", abort);
+    }
+    function abort(): void {
+      removeAbortListener();
+      resolve(false);
+    }
+    function complete(): void {
+      removeAbortListener();
+      resolve(true);
+    }
+    function fail(error: unknown): void {
+      removeAbortListener();
+      reject(error);
+    }
+    signal?.addEventListener("abort", abort, { once: true });
     let callbackUsed = false;
-    const result = socket.send(frame, (error) => {
-      callbackUsed = true;
-      if (error) reject(error);
-      else resolve();
-    });
-    if (result && typeof result.then === "function") {
-      result.then(resolve, reject);
-    } else if (socket.send.length < 2 && !callbackUsed) {
-      resolve();
+    try {
+      const result = socket.send(frame, (error) => {
+        callbackUsed = true;
+        if (error) fail(error);
+        else complete();
+      });
+      if (result && typeof result.then === "function") {
+        result.then(complete, fail);
+      } else if (socket.send.length < 2 && !callbackUsed) {
+        complete();
+      }
+    } catch (error) {
+      fail(error);
     }
   });
-  return true;
 }
 
 export function physicalSocketHasCapacity(

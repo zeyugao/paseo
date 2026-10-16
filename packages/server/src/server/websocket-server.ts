@@ -1219,8 +1219,47 @@ export class VoiceAssistantWebSocketServer {
     sockets: Iterable<WebSocketLike>,
     message: WSOutboundMessage,
     reportRejection = false,
-  ): void {
-    const prepared = this.prepareJsonDelivery(sockets, message, reportRejection);
+    signal?: AbortSignal,
+  ): void | Promise<void> {
+    if (signal?.aborted) return;
+    const physicalSockets = [...sockets];
+    if (signal) {
+      const paced = this.prepareJsonDelivery(physicalSockets, message, reportRejection);
+      if (!paced) {
+        return Promise.all(
+          physicalSockets
+            .filter((ws) => ws.readyState !== 1)
+            .map((ws) => this.detachSocket(ws, {})),
+        ).then(() => undefined);
+      }
+      return Promise.all(
+        paced.sockets.map(async (ws) => {
+          try {
+            const sent = await sendBoundedPhysicalFrameAndWait({
+              socket: ws,
+              frame: paced.payload,
+              frameBytes: paced.bytes,
+              signal,
+              onHighWater: () => this.closeAtOutboundHighWater(ws),
+            });
+            if (sent) this.runtimeMetrics.recordOutboundMessage(message, ws.bufferedAmount);
+            else if (!signal.aborted) await this.detachSocket(ws, {});
+          } catch (error) {
+            // A failed write can precede the close event; cancel queued producers now.
+            this.closePhysicalSocket({
+              ws,
+              logMessage: "Closing physical WebSocket after send failure",
+              logFields: { err: error },
+            });
+            await this.detachSocket(ws, {
+              error: error instanceof Error ? error : new Error(String(error)),
+            });
+            throw error;
+          }
+        }),
+      ).then(() => undefined);
+    }
+    const prepared = this.prepareJsonDelivery(physicalSockets, message, reportRejection);
     if (!prepared) return;
     for (const ws of prepared.sockets) {
       this.sendFrameToClient(ws, prepared.payload, prepared.bytes, () => {
@@ -1499,6 +1538,17 @@ export class VoiceAssistantWebSocketServer {
       onMessageToSource: async (source, msg) => {
         if (!connection || !connection.sockets.has(source as WebSocketLike)) {
           return;
+        }
+        if (
+          msg.type === "fetch_agent_timeline_response" ||
+          msg.type === "agent.provider_subagents.timeline.get.response"
+        ) {
+          return this.sendMessageToSockets(
+            [source as WebSocketLike],
+            wrapSessionMessage(msg),
+            true,
+            connection.session.delivery.requestSignal,
+          );
         }
         await this.sendMessageToClientAndWait(source as WebSocketLike, wrapSessionMessage(msg));
       },

@@ -8686,7 +8686,7 @@ test("cwd-addressed project writes and implicit agent creation reject a foreign 
   });
 });
 
-test("cwd-based checkout writes and worktree creation reject a foreign workspace", async () => {
+test("cwd checkout writes stay gated while worktree creation accepts a foreign source", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const session = asTestSession(
     createSessionForWorkspaceTests({
@@ -8719,11 +8719,12 @@ test("cwd-based checkout writes and worktree creation reject a foreign workspace
     requestId: "req-worktree-foreign",
   });
 
-  expect(findByType(emitted, "create_paseo_worktree_response")?.payload).toMatchObject({
+  const worktreeResponse = findByType(emitted, "create_paseo_worktree_response")?.payload;
+  expect(worktreeResponse).toMatchObject({
     requestId: "req-worktree-foreign",
     workspace: null,
-    error: expect.stringContaining("owned by host srv-other"),
   });
+  expect(worktreeResponse?.error).not.toContain("owned by host srv-other");
 });
 
 test("fs file mutations reject a cwd owned by another host", async () => {
@@ -8957,7 +8958,7 @@ test("archive_workspace_request rejects a workspace owned by another host", asyn
   expect(workspaces.get(workspace.workspaceId)?.archivedAt).toBeNull();
 });
 
-test("archive_workspace_request gates a local target against foreign path ownership", async () => {
+test("archive_workspace_request allows a local target with a foreign path sibling", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const session = asTestSession(
     createSessionForWorkspaceTests({
@@ -8994,10 +8995,12 @@ test("archive_workspace_request gates a local target against foreign path owners
   expect(findByType(emitted, "archive_workspace_response")?.payload).toMatchObject({
     requestId: "req-archive-local-overlap",
     workspaceId: local.workspaceId,
-    archivedAt: null,
-    error: expect.stringContaining("owned by host srv-other"),
+    error: null,
   });
-  expect(archive).not.toHaveBeenCalled();
+  expect(findByType(emitted, "archive_workspace_response")?.payload.archivedAt).toEqual(
+    expect.any(String),
+  );
+  expect(archive).toHaveBeenCalledWith(local.workspaceId, expect.any(String), undefined);
 });
 
 test("workspace.label.assignment.set.request rejects a workspace owned by another host", async () => {

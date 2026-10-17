@@ -34,9 +34,7 @@ import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type { TerminalSession } from "../terminal/terminal.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import {
-  assertCwdWorkspaceOwnedByThisServer,
   createPersistedProjectRecord,
-  createPersistedWorkspaceRecord,
   type PersistedProjectRecord,
   type PersistedWorkspaceRecord,
   type ProjectRegistry,
@@ -600,20 +598,11 @@ describe("create-agent worktree setup boundary", () => {
 });
 
 describe("createPaseoWorktreeWorkflow source ownership", () => {
-  test("rejects a source checkout owned by another host before creating the worktree", async () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), "paseo-workflow-ownership-"));
-    const foreignRecord = createPersistedWorkspaceRecord({
-      workspaceId: "ws-foreign-source",
-      projectId: "proj-foreign-source",
-      cwd: path.join(tempDir, "foreign-checkout"),
-      kind: "local_checkout",
-      displayName: "foreign",
-      hostId: "srv-other",
-      createdAt: "2026-03-01T12:00:00.000Z",
-      updatedAt: "2026-03-01T12:00:00.000Z",
-    });
+  test("allows a source checkout owned by another host", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "paseo-workflow-shared-source-"));
+    const sourceCwd = path.join(tempDir, "foreign-checkout");
     const createPaseoWorktree = vi.fn(async () => {
-      throw new Error("createPaseoWorktree must not run for a foreign source");
+      throw new Error("create invoked");
     });
 
     try {
@@ -634,21 +623,15 @@ describe("createPaseoWorktreeWorkflow source ownership", () => {
             getDaemonTcpPort: null,
             getDaemonTcpHost: null,
             onScriptsChanged: null,
-            assertSourceWorkspaceOwned: (cwd) =>
-              assertCwdWorkspaceOwnedByThisServer(
-                cwd,
-                { list: async () => [foreignRecord] },
-                "srv-local",
-              ),
           },
           {
-            cwd: foreignRecord.cwd,
-            worktreeSlug: "blocked-foreign-source",
+            cwd: sourceCwd,
+            worktreeSlug: "shared-source",
             runSetup: false,
           },
         ),
-      ).rejects.toThrow("owned by host srv-other");
-      expect(createPaseoWorktree).not.toHaveBeenCalled();
+      ).rejects.toThrow("create invoked");
+      expect(createPaseoWorktree).toHaveBeenCalledOnce();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

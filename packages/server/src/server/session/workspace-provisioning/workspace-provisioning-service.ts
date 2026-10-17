@@ -9,7 +9,6 @@ import {
   reconcileWorkspacePlacement,
 } from "../../workspace-registry-model.js";
 import {
-  assertCwdWorkspaceRecordsOwnedByThisServer,
   createPersistedWorkspaceRecord,
   isWorkspaceVisibleToServer,
   type PersistedProjectRecord,
@@ -268,7 +267,7 @@ export function createWorkspaceProvisioningService(deps: {
       updatedAt: timestamp,
       background: await resolveBackground(context),
     });
-    await workspaceRegistry.upsertIfCwdOwnedByThisServer(workspace, serverId, context);
+    await workspaceRegistry.upsert(workspace, context);
     emitWorkspaceCreated(workspace);
     return workspace;
   }
@@ -304,7 +303,7 @@ export function createWorkspaceProvisioningService(deps: {
       ...(input.untrustedSource ? { untrustedSource: input.untrustedSource } : {}),
       background: await resolveBackground(input),
     });
-    await workspaceRegistry.upsertIfCwdOwnedByThisServer(workspace, serverId, {
+    await workspaceRegistry.upsert(workspace, {
       expectsInitialAgent: input.expectsInitialAgent,
     });
     emitWorkspaceCreated(workspace);
@@ -362,9 +361,9 @@ export function createWorkspaceProvisioningService(deps: {
 
   async function findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord> {
     const normalizedCwd = resolve(cwd);
-    // Path-based discovery selects public work; explicit-ID recovery bypasses this selector.
     const allWorkspaces = await workspaceRegistry.list();
-    assertCwdWorkspaceRecordsOwnedByThisServer(normalizedCwd, allWorkspaces, serverId);
+    // A path can have one workspace per host. Path-based discovery is local to
+    // this daemon; explicit workspace IDs remain host-scoped elsewhere.
     const workspaces = allWorkspaces
       .filter((workspace) => isWorkspaceVisibleToServer(workspace, serverId))
       .filter(

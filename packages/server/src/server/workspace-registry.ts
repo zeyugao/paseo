@@ -656,22 +656,15 @@ export class FileBackedWorkspaceRegistry
     });
   }
 
+  // Kept for registry callers compiled against the pre-shared-directory API.
+  // Cwd overlap is no longer a global ownership boundary; workspace IDs still
+  // remain unique through the normal registry mutation path.
   async upsertIfCwdOwnedByThisServer(
     record: PersistedWorkspaceRecord,
-    serverId: string | undefined,
+    _serverId: string | undefined,
     context?: WorkspaceMutationContext,
   ): Promise<void> {
-    const parsed = PersistedWorkspaceRecordSchema.parse(record);
-    await this.mutateCache((records) => {
-      assertCwdWorkspaceRecordsOwnedByThisServer(parsed.cwd, records.values(), serverId);
-      records.set(parsed.workspaceId, parsed);
-    });
-    await this.notifyMutation({
-      kind: "upsert",
-      workspaceId: parsed.workspaceId,
-      workspace: parsed,
-      ...(context?.expectsInitialAgent ? { expectsInitialAgent: true } : {}),
-    });
+    await this.upsert(record, context);
   }
 
   async archive(
@@ -793,11 +786,9 @@ export function isWorkspaceVisibleToServer(
   return serverId === undefined || record.hostId === undefined || record.hostId === serverId;
 }
 
-// Mutations addressed by cwd are rejected when the path falls inside a workspace
-// owned by another host sharing PASEO_HOME. Containment, not exact match:
-// operations from any subdirectory of a foreign workspace's checkout — and
-// paths containing one — must also be rejected. Archived records still retain
-// backing-path ownership; legacy (hostId-less) records stay writable by every host.
+// Cwd operations are allowed when the current host already has a workspace
+// covering the path. A foreign-only path remains blocked until this host creates
+// its own workspace; explicit workspace IDs always use the stricter owner check.
 export async function assertCwdWorkspaceOwnedByThisServer(
   cwd: string,
   registry: Pick<WorkspaceRegistry, "list"> | undefined,
@@ -815,15 +806,21 @@ export function assertCwdWorkspaceRecordsOwnedByThisServer(
   serverId: string | undefined,
 ): void {
   const target = resolveRealpathWithMissingSuffix(expandTilde(cwd));
+  let firstForeignOverlap: PersistedWorkspaceRecord | null = null;
   for (const workspace of workspaces) {
     const workspaceCwd = resolveRealpathWithMissingSuffix(workspace.cwd);
     if (
-      (isSameOrDescendantPath(target, workspaceCwd) ||
-        isSameOrDescendantPath(workspaceCwd, target)) &&
-      !isWorkspaceVisibleToServer(workspace, serverId)
-    ) {
-      throw new Error(`Workspace ${workspace.workspaceId} is owned by host ${workspace.hostId}`);
-    }
+      !isSameOrDescendantPath(target, workspaceCwd) &&
+      !isSameOrDescendantPath(workspaceCwd, target)
+    )
+      continue;
+    if (isWorkspaceVisibleToServer(workspace, serverId)) return;
+    firstForeignOverlap ??= workspace;
+  }
+  if (firstForeignOverlap) {
+    throw new Error(
+      `Workspace ${firstForeignOverlap.workspaceId} is owned by host ${firstForeignOverlap.hostId}`,
+    );
   }
 }
 

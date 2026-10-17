@@ -55,9 +55,8 @@ export interface ArchiveDependencies {
   killTerminalsForWorkspace: (workspaceId: string) => Promise<void>;
   stopWorkspaceSetup?: (workspaceId: string) => Promise<void>;
   assertWorkspaceAutomationAllowed?: (workspaceId: string) => Promise<void>;
-  // Archive teardown runs lifecycle commands and deletes directories; callers
-  // wire this to reject targets inside a foreign (other-host) workspace
-  // sharing PASEO_HOME before any teardown side effect happens.
+  // Archive targets are resolved to the current host's workspace. Filesystem
+  // deletion still checks all active host records before removing a backing path.
   assertCwdWorkspaceOwnedByThisServer: (cwd: string) => Promise<void>;
   sessionLogger?: Logger;
 }

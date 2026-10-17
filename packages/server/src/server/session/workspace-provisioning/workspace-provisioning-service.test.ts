@@ -195,14 +195,11 @@ test("serializes concurrent directory creation across hosts", async () => {
     provisioningB.createWorkspaceForDirectory(repo),
   ]);
 
-  expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-  expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
-  expect(String(results.find((result) => result.status === "rejected")?.reason)).toContain(
-    "owned by host",
-  );
+  expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(2);
+  expect(results.filter((result) => result.status === "rejected")).toHaveLength(0);
   const records = await workspaceRegistry.list();
-  expect(records).toHaveLength(1);
-  expect(["srv-a", "srv-b"]).toContain(records[0]?.hostId);
+  expect(records).toHaveLength(2);
+  expect(records.map((record) => record.hostId).sort()).toEqual(["srv-a", "srv-b"]);
 });
 
 test("background workspace creation preserves hooks, inheritance and durable visibility", async () => {
@@ -245,7 +242,7 @@ test("background workspace creation preserves hooks, inheritance and durable vis
   expect((await reloaded.get(child.workspaceId))?.background).toBe(true);
 });
 
-test("rejects directory provisioning that overlaps another host's workspace", async () => {
+test("allows multiple hosts to provision the same directory independently", async () => {
   const repo = path.join(tmpDir, "shared-repo");
   const hostedProvisioning = createWorkspaceProvisioningService({
     serverId: "srv-a",
@@ -273,13 +270,17 @@ test("rejects directory provisioning that overlaps another host's workspace", as
   });
   await workspaceRegistry.upsert(foreign);
 
-  await expect(
-    hostedProvisioning.findOrCreateWorkspaceForDirectory(path.join(repo, "nested")),
-  ).rejects.toThrow("owned by host srv-other");
-  await expect(hostedProvisioning.createWorkspaceForDirectory(repo)).rejects.toThrow(
-    "owned by host srv-other",
-  );
-  expect(await workspaceRegistry.list()).toEqual([foreign]);
+  const local = await hostedProvisioning.findOrCreateWorkspaceForDirectory(repo);
+  expect(local.hostId).toBe("srv-a");
+  expect(local.workspaceId).not.toBe(foreign.workspaceId);
+  expect(await hostedProvisioning.findOrCreateWorkspaceForDirectory(repo)).toMatchObject({
+    workspaceId: local.workspaceId,
+    hostId: "srv-a",
+  });
+
+  const duplicateLocal = await hostedProvisioning.createWorkspaceForDirectory(repo);
+  expect(duplicateLocal.hostId).toBe("srv-a");
+  expect(duplicateLocal.workspaceId).not.toBe(local.workspaceId);
 
   const worktree = await hostedProvisioning.createWorkspaceForWorktree({
     sourceCwd: repo,

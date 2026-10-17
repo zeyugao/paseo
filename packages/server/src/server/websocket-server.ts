@@ -26,7 +26,11 @@ import type { AgentStorage } from "./agent/agent-storage.js";
 import type { DownloadTokenStore } from "./file-download/token-store.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type pino from "pino";
-import type { ProjectRegistry, WorkspaceRegistry } from "./workspace-registry.js";
+import {
+  isWorkspaceVisibleToServer,
+  type ProjectRegistry,
+  type WorkspaceRegistry,
+} from "./workspace-registry.js";
 import type { ProjectUpdate } from "./workspace-reconciliation-service.js";
 import type { ScheduleService } from "./schedule/service.js";
 import type { CheckoutDiffManager, CheckoutDiffMetrics } from "./checkout-diff-manager.js";
@@ -627,6 +631,9 @@ export class VoiceAssistantWebSocketServer {
     if (snapshot.workspace && snapshot.kind === "workspace") {
       const workspace = await this.workspaceRegistry.get(snapshot.workspace.id);
       if (!workspace) throw new Error("Previously created workspace no longer exists");
+      if (!isWorkspaceVisibleToServer(workspace, this.serverId)) {
+        throw new Error(`Workspace ${workspace.workspaceId} is owned by host ${workspace.hostId}`);
+      }
       const directory = await stat(workspace.cwd).catch(() => null);
       if (!directory?.isDirectory())
         throw Object.assign(new Error(`Directory not found: ${workspace.cwd}`), {

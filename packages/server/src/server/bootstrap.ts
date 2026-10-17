@@ -1174,10 +1174,14 @@ export async function createPaseoDaemon(
     if (!existingWorkspace || existingWorkspace.archivedAt) return;
     teardownArchivedWorkspaceRuntime(workspaceId);
   };
-  // external path→workspace adapter, not ownership: archive-by-path requests that
-  // arrive with a worktree path and no workspaceId (old clients / CLI).
+  // Legacy path-based requests resolve only the current host's workspace.
   const findWorkspaceIdForCwdExternal = async (cwd: string): Promise<string | null> => {
-    return resolveWorkspaceIdForPath(cwd, await workspaceRegistry.list());
+    return resolveWorkspaceIdForPath(
+      cwd,
+      (await workspaceRegistry.list()).filter((workspace) =>
+        isWorkspaceVisibleToServer(workspace, serverId),
+      ),
+    );
   };
   const ensureWorkspaceForCreateExternal = async (
     cwd: string,
@@ -1320,8 +1324,6 @@ export async function createPaseoDaemon(
       {
         paseoHome: config.paseoHome,
         worktreesRoot: config.worktreesRoot,
-        assertSourceWorkspaceOwned: (cwd) =>
-          assertCwdWorkspaceOwnedByThisServer(cwd, workspaceRegistry, serverId),
         createPaseoWorktree: async (workflowInput, workflowOptions) => {
           return createRegisteredPaseoWorktree(workflowInput, {
             github,

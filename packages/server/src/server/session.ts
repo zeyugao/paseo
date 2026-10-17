@@ -5941,12 +5941,12 @@ export class Session {
     return this.workspaceDirectory.buildDescriptorMap(options);
   }
 
-  // external path→workspace adapter, not ownership. Used by archive-by-path flows
-  // where the request carries a worktree path (unique to one workspace) rather
-  // than a workspaceId. This is a directory lookup for an archive target, not a
-  // status/ownership attribution.
+  // Path-based compatibility requests resolve only the current host's records.
+  // Explicit workspace IDs remain the authoritative ownership boundary.
   private async findWorkspaceIdForCwd(cwd: string): Promise<string | null> {
-    const workspaces = await this.workspaceRegistry.list();
+    const workspaces = (await this.workspaceRegistry.list()).filter((workspace) =>
+      isWorkspaceVisibleToServer(workspace, this.serverId),
+    );
     return resolveWorkspaceIdForPath(cwd, workspaces);
   }
 
@@ -7581,7 +7581,6 @@ export class Session {
         emit: (message) => this.emit(message),
         sessionLogger: this.sessionLogger,
         createPaseoWorktreeWorkflow: (input) => this.createPaseoWorktreeWorkflow(input),
-        assertSourceWorkspaceOwned: (cwd) => this.assertCwdWorkspaceOwnedByThisServer(cwd),
       },
       request,
     );
@@ -7597,7 +7596,6 @@ export class Session {
       {
         paseoHome: this.paseoHome,
         worktreesRoot: this.worktreesRoot,
-        assertSourceWorkspaceOwned: (cwd) => this.assertCwdWorkspaceOwnedByThisServer(cwd),
         createPaseoWorktree: (workflowInput, serviceOptions) =>
           this.createPaseoWorktree(workflowInput, serviceOptions),
         warmWorkspaceGitData: (workspace) => this.warmWorkspaceGitDataForWorkspace(workspace),

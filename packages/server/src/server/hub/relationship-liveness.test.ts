@@ -89,6 +89,8 @@ test("a silently lost Hub connection leaves connected state and reconnects when 
   });
 
   try {
+    // connect() requires the per-home connection lease that start() acquires.
+    await controller.start();
     // Keep TCP and WebSocket I/O real; accelerate only the keepalive interval and its clock.
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
     await controller.connect({

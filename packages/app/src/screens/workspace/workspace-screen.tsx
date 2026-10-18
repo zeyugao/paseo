@@ -620,6 +620,18 @@ function renderWorkspaceContent(input: RenderWorkspaceContentInput): React.React
   });
 }
 
+/**
+ * Stands in for the default layout's New tab while the directory hydrates, so a
+ * workspace with existing agents never presents New during startup.
+ */
+function WorkspaceStartupTabPlaceholder() {
+  return (
+    <View style={styles.emptyState}>
+      <ThemedLoadingSpinner uniProps={mutedColorMapping} />
+    </View>
+  );
+}
+
 interface WorkspaceHeaderFields {
   isWorkspaceHeaderLoading: boolean;
   workspaceHeaderTitle: string;
@@ -2923,8 +2935,8 @@ function WorkspaceScreenContent({
       host?: PaneHost;
       /** Overrides the guarded tab close, for a host that closes the tab its own way. */
       onCloseCurrentTab?: () => void;
-    }) =>
-      buildWorkspacePaneContentModel({
+    }) => {
+      const model = buildWorkspacePaneContentModel({
         tab: input.tab,
         normalizedServerId,
         normalizedWorkspaceId,
@@ -2997,10 +3009,19 @@ function WorkspaceScreenContent({
           });
         },
         onOpenImportSheet: openImportSheet,
-      }),
+      });
+      // A fresh layout's only tab is the New tab placeholder. Keep it behind the
+      // startup spinner until directory hydration reconciles real tabs in.
+      if (input.tab.kind === "new_tab" && (!hasHydratedAgents || !terminalsQuery.isSuccess)) {
+        return { ...model, Component: WorkspaceStartupTabPlaceholder };
+      }
+      return model;
+    },
     [
       handleCloseTabById,
       panelRevisions,
+      hasHydratedAgents,
+      terminalsQuery.isSuccess,
       handleOpenWorkspaceFileFromPane,
       navigateToTabId,
       normalizedServerId,

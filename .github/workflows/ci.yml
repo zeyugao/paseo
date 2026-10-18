@@ -260,7 +260,7 @@ jobs:
       - *server_plugin_tests
       - *server_hub_contract
 
-# Windows CI disabled: shared-home requires NFS-class flock semantics.
+  # Windows CI disabled: shared-home requires NFS-class flock semantics.
   server-integration-windows:
     name: server-integration (windows-latest)
     needs: changes

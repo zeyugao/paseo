@@ -537,17 +537,15 @@ test("Windows units and integration run independently with complete routed cover
   const serverConfig = readFileSync(new URL("packages/server/vitest.config.ts", repoRoot), "utf8");
   assert.doesNotMatch(serverConfig, /maxWorkers/);
 
-  function condition(job) {
-    return /    if: \$\{\{ (.+) \}\}/.exec(job)[1];
-  }
+  // Windows jobs are disabled with `if: false` in this fork (shared-home
+  // needs NFS-class flock), so their job-level routing conditions cannot be
+  // parsed here. Step-level routing and the ubuntu routing below still apply.
   function selected(expression, outputs, cancelled = false) {
     return runInNewContext(expression, {
       needs: { changes: { outputs } },
       cancelled: () => cancelled,
     });
   }
-  const unitCondition = condition(windows);
-  const integrationCondition = condition(integration);
   const unitStep = /      - name: Run server unit tests\n        if: \$\{\{ (.+) \}\}/.exec(
     windows,
   )[1];
@@ -559,20 +557,16 @@ test("Windows units and integration run independently with complete routed cover
     /      - &server_plugin_tests\n        name: Run built-in plugin tests\n        if: \$\{\{ (.+) \}\}/.exec(
       ubuntu,
     )[1];
-  for (const [outputs, units, integrations, hub] of [
-    [{ full: "true", server: "false", hub: "false" }, true, true, false],
-    [{ full: "false", server: "true", hub: "false" }, true, true, false],
-    [{ full: "false", server: "false", hub: "true" }, true, false, true],
-    [{ full: "false", server: "false", hub: "false" }, false, false, false],
-    [{}, true, true, false],
+  for (const [outputs, integrations, hub] of [
+    [{ full: "true", server: "false", hub: "false" }, true, false],
+    [{ full: "false", server: "true", hub: "false" }, true, false],
+    [{ full: "false", server: "false", hub: "true" }, false, true],
+    [{ full: "false", server: "false", hub: "false" }, false, false],
+    [{}, true, false],
   ]) {
-    assert.equal(selected(unitCondition, outputs), units);
-    assert.equal(selected(integrationCondition, outputs), integrations);
     assert.equal(selected(unitStep, outputs), integrations);
     assert.equal(selected(pluginStep, outputs), integrations);
     assert.equal(selected(hubStep, outputs), hub);
-    assert.equal(selected(unitCondition, outputs, true), false);
-    assert.equal(selected(integrationCondition, outputs, true), false);
   }
 });
 

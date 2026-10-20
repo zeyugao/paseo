@@ -11707,6 +11707,45 @@ test("OMP /compact keeps ordered durable markers when a subscriber throws mid-br
   }
 });
 
+test("OMP /compact marks the agent running until compaction settles", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-omp-compact-busy-"));
+  const runtime = new FakeOmp();
+  const manager = new AgentManager({
+    clients: { omp: new OmpAgentClient({ logger, runtime }) },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "omp", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    const session = runtime.latestSession();
+    session.holdNextCompaction();
+
+    const dispatch = await startAgentRun(manager, agent.id, "/compact", logger);
+    expect(dispatch.disposition).toBe("out_of_band");
+    await vi.waitFor(() => {
+      const snapshot = manager.getAgent(agent.id);
+      expect(snapshot?.lifecycle).toBe("running");
+      // The client maps a running lifecycle with no open turn back to idle.
+      expect(snapshot?.activeTurnId).toEqual(expect.any(String));
+    });
+
+    await session.releaseHeldCompaction();
+    await vi.waitFor(() => {
+      const snapshot = manager.getAgent(agent.id);
+      expect(snapshot?.lifecycle).toBe("idle");
+      expect(snapshot?.activeTurnId).toBeNull();
+    });
+  } finally {
+    if (agentId) {
+      await manager.closeAgent(agentId).catch(() => undefined);
+    }
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("replaceAgentRun succeeds when foreground turn terminal event is never delivered", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-stale-fg-"));
   const storagePath = join(workdir, "agents");

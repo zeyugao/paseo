@@ -1582,6 +1582,9 @@ export class OmpAgentSession implements AgentSession {
     }
     // OMP reports no wire event for manual compaction — `auto_compaction_*` is
     // maintenance-only — so the RPC call itself drives the loading/completed rows.
+    // Synthesize the turn boundaries through the session stream so the manager
+    // keeps the agent running for the whole RPC rather than leaving it idle.
+    const turnId = randomUUID();
     this.outOfBandCompactionRunning = true;
     const emitCompaction = (status: "loading" | "completed"): void => {
       emit({
@@ -1602,6 +1605,7 @@ export class OmpAgentSession implements AgentSession {
       }
     };
     try {
+      this.emit({ type: "turn_started", provider: this.provider, turnId });
       tryEmitCompaction("loading");
       try {
         await this.runtimeSession.compact(customInstructions);
@@ -1621,7 +1625,11 @@ export class OmpAgentSession implements AgentSession {
       }
       tryEmitCompaction("completed");
     } finally {
-      this.outOfBandCompactionRunning = false;
+      try {
+        this.emit({ type: "turn_completed", provider: this.provider, turnId });
+      } finally {
+        this.outOfBandCompactionRunning = false;
+      }
     }
     await this.usagePoller.refresh();
   }

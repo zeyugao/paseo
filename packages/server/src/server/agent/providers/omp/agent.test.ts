@@ -261,6 +261,10 @@ describe("OMP agent client and session", () => {
           text: "[Error] Failed to compact context: compaction refused",
         },
       }),
+      // Session-stream events (the synthetic turn boundaries) are collected
+      // separately from the out-of-band emitter, so they trail the markers.
+      expect.objectContaining({ type: "turn_started", provider: "omp" }),
+      expect.objectContaining({ type: "turn_completed", provider: "omp" }),
     ]);
   });
 
@@ -281,6 +285,8 @@ describe("OMP agent client and session", () => {
         type: "timeline",
         item: { type: "compaction", status: "completed", trigger: "manual" },
       }),
+      expect.objectContaining({ type: "turn_started", provider: "omp" }),
+      expect.objectContaining({ type: "turn_completed", provider: "omp" }),
       expect.objectContaining({
         type: "usage_updated",
         usage: expect.objectContaining({

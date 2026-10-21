@@ -8,6 +8,7 @@ import {
   type PersistedWorkspaceRecord,
 } from "../../workspace-registry.js";
 import { createPaseoToolCatalog, type PaseoToolHostDependencies } from "./paseo-tools.js";
+import type { PaseoToolResult } from "./types.js";
 
 const TIMESTAMP = "2026-03-01T12:00:00.000Z";
 
@@ -67,6 +68,18 @@ function createCatalogForWorkspaces(
     ...overrides,
   });
   return { catalog, workspaceScripts, upsert, update, records };
+}
+
+// Delegated tools surface host-ownership failures as structured errors once the
+// catalog carries a serverId; assert that shape instead of a thrown rejection.
+async function expectForeignHostBlocked(execution: Promise<PaseoToolResult>): Promise<void> {
+  const result = await execution;
+  expect(result.isError).toBe(true);
+  const failure = result.structuredContent;
+  if (failure === null || typeof failure !== "object" || !("error" in failure)) {
+    expect.unreachable(`expected structured failure payload, got ${JSON.stringify(failure)}`);
+  }
+  expect(failure).toMatchObject({ error: expect.stringContaining("owned by host srv-other") });
 }
 
 describe("paseo tools workspace ownership", () => {
@@ -153,13 +166,13 @@ describe("paseo tools workspace ownership", () => {
     });
     const { catalog } = createCatalogForWorkspaces([foreign], { createPaseoWorktree });
 
-    await expect(
+    await expectForeignHostBlocked(
       catalog.executeTool("create_workspace", {
         isolation: "worktree",
         path: foreign.cwd,
         worktreeSlug: "blocked",
       }),
-    ).rejects.toThrow("owned by host srv-other");
+    );
     expect(createPaseoWorktree).not.toHaveBeenCalled();
   });
 
@@ -168,12 +181,12 @@ describe("paseo tools workspace ownership", () => {
     const createDirectoryWorkspace = vi.fn(async () => foreign);
     const { catalog } = createCatalogForWorkspaces([foreign], { createDirectoryWorkspace });
 
-    await expect(
+    await expectForeignHostBlocked(
       catalog.executeTool("create_workspace", {
         isolation: "local",
         path: foreign.cwd,
       }),
-    ).rejects.toThrow("owned by host srv-other");
+    );
     expect(createDirectoryWorkspace).not.toHaveBeenCalled();
   });
 
@@ -235,13 +248,13 @@ describe("paseo tools workspace ownership", () => {
     const ensureWorkspaceForCreate = vi.fn(async () => "ws-created");
     const { catalog } = createCatalogForWorkspaces([foreign], { ensureWorkspaceForCreate });
 
-    await expect(
+    await expectForeignHostBlocked(
       catalog.executeTool("create_agent", {
         title: "Blocked",
         provider: "codex/gpt-5.4",
         initialPrompt: "Do work",
       }),
-    ).rejects.toThrow("owned by host srv-other");
+    );
     expect(ensureWorkspaceForCreate).not.toHaveBeenCalled();
   });
   test("create_agent rejects an inherited cwd owned by another host", async () => {
@@ -262,13 +275,13 @@ describe("paseo tools workspace ownership", () => {
       } as unknown as AgentManager,
     });
 
-    await expect(
+    await expectForeignHostBlocked(
       catalog.executeTool("create_agent", {
         title: "Blocked child",
         provider: "codex/gpt-5.4",
         initialPrompt: "Do work",
       }),
-    ).rejects.toThrow("owned by host srv-other");
+    );
     expect(createAgent).not.toHaveBeenCalled();
   });
 
@@ -290,7 +303,7 @@ describe("paseo tools workspace ownership", () => {
       } as unknown as AgentManager,
     });
 
-    await expect(
+    await expectForeignHostBlocked(
       catalog.executeTool("create_agent", {
         title: "Blocked child",
         provider: "codex/gpt-5.4",
@@ -298,7 +311,7 @@ describe("paseo tools workspace ownership", () => {
         relationship: { kind: "subagent" },
         workspace: { kind: "current", cwd: foreign.cwd },
       }),
-    ).rejects.toThrow("owned by host srv-other");
+    );
     expect(createAgent).not.toHaveBeenCalled();
   });
 
@@ -315,7 +328,7 @@ describe("paseo tools workspace ownership", () => {
       agentManager: { createAgent } as unknown as AgentManager,
     });
 
-    await expect(
+    await expectForeignHostBlocked(
       catalog.executeTool("create_agent", {
         title: "Blocked agent",
         provider: "codex/gpt-5.4",
@@ -327,7 +340,7 @@ describe("paseo tools workspace ownership", () => {
           cwd: foreign.cwd,
         },
       }),
-    ).rejects.toThrow("owned by host srv-other");
+    );
     expect(createAgent).not.toHaveBeenCalled();
   });
 
@@ -354,7 +367,7 @@ describe("paseo tools workspace ownership", () => {
     const ensureWorkspaceForCreate = vi.fn(async () => "ws-created");
     const { catalog } = createCatalogForWorkspaces([foreign], { ensureWorkspaceForCreate });
 
-    await expect(
+    await expectForeignHostBlocked(
       catalog.executeTool("create_agent", {
         title: "Blocked",
         provider: "codex/gpt-5.4",
@@ -362,7 +375,7 @@ describe("paseo tools workspace ownership", () => {
         relationship: { kind: "detached" },
         workspace: { kind: "create", source: { kind: "directory", path: process.cwd() } },
       }),
-    ).rejects.toThrow("owned by host srv-other");
+    );
     expect(ensureWorkspaceForCreate).not.toHaveBeenCalled();
   });
 

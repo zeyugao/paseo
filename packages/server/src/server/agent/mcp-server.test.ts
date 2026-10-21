@@ -2056,7 +2056,6 @@ describe("create_agent MCP tool", () => {
     );
   });
 
-
   it("auto-titles an agent-created directory workspace from the initial prompt", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
     const tempDir = await mkdtemp(join(tmpdir(), "paseo-mcp-agent-directory-auto-title-"));

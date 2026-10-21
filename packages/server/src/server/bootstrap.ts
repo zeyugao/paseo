@@ -1539,7 +1539,6 @@ export async function createPaseoDaemon(
     },
     agentManager,
     agentStorage,
-    serverId,
     terminalManager,
     getDaemonTcpPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
     scheduleService,

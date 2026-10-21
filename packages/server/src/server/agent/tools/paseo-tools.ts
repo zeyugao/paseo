@@ -124,7 +124,6 @@ export interface PaseoToolHostDependencies {
   hosts?: () => ToolHosts;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
-  serverId?: string;
   terminalManager?: TerminalManager | null;
   getDaemonTcpPort?: () => number | null;
   scheduleService?: ScheduleService | null;

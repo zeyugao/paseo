@@ -110,6 +110,7 @@ function HostWorkspaceRouteContent() {
     ? (decodeWorkspaceIdFromPathSegment(workspaceValue) ?? "")
     : "";
   const openValue = getParamValue(params.open);
+
   useEffect(() => {
     if (!serverId || !workspaceId) {
       return;

@@ -115,6 +115,7 @@ function HostWorkspaceRouteContent() {
   // phone, where the sidebar only demands while its panel is active. Without demand the deck
   // waits on workspace hydration that never starts.
   useDirectoryDemand(serverId);
+
   useEffect(() => {
     if (!serverId || !workspaceId) {
       return;

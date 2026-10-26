@@ -12,6 +12,7 @@ import {
 import { createTestLogger } from "../test-utils/test-logger.js";
 
 import {
+  connectIdleRuntimeCleanupConfig,
   createDaemonInstanceHeartbeatErrorHandler,
   createScheduleLocalWorkspaceHandler,
   fanOutReconciledWorkspaceUpdates,
@@ -222,6 +223,7 @@ test.each([false, true])(
     refuse();
   },
 );
+
 test("disposing bootstrap's binding stops configuration delivery", async () => {
   const host = liveCleanupHost();
   host.unsubscribe();

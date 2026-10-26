@@ -141,25 +141,31 @@ describe("Windows replace retries", () => {
       await writeJsonFileAtomic(file, { state: "pending" });
       let failures = 3;
       let elapsed = 0;
-      await writeJsonFileAtomic(file, { state: "completed" }, {
-        operations: {
-          platform: "win32",
-          now: () => elapsed,
-          sleep: async (milliseconds) => {
-            elapsed += milliseconds;
-          },
-          rename: async (source, destination) => {
-            if (failures-- > 0) {
-              expect(JSON.parse(await fs.readFile(destination, "utf8"))).toEqual({
-                state: "pending",
-              });
-              expect(JSON.parse(await fs.readFile(source, "utf8"))).toEqual({ state: "completed" });
-              throw Object.assign(new Error("destination held open"), { code });
-            }
-            await fs.rename(source, destination);
+      await writeJsonFileAtomic(
+        file,
+        { state: "completed" },
+        {
+          operations: {
+            platform: "win32",
+            now: () => elapsed,
+            sleep: async (milliseconds) => {
+              elapsed += milliseconds;
+            },
+            rename: async (source, destination) => {
+              if (failures-- > 0) {
+                expect(JSON.parse(await fs.readFile(destination, "utf8"))).toEqual({
+                  state: "pending",
+                });
+                expect(JSON.parse(await fs.readFile(source, "utf8"))).toEqual({
+                  state: "completed",
+                });
+                throw Object.assign(new Error("destination held open"), { code });
+              }
+              await fs.rename(source, destination);
+            },
           },
         },
-      });
+      );
       expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual({ state: "completed" });
       expect(await fs.readdir(directory)).toEqual(["receipt.json"]);
       expect(elapsed).toBeGreaterThan(0);
@@ -177,20 +183,24 @@ describe("Windows replace retries", () => {
       let elapsed = 0;
       const attempts: number[] = [];
       await expect(
-        writeJsonFileAtomic(file, { state: "completed" }, {
-          operations: {
-            platform: "win32",
-            now: () => elapsed,
-            sleep: async (milliseconds) => {
-              waits.push(milliseconds);
-              elapsed += milliseconds;
-            },
-            rename: async () => {
-              attempts.push(elapsed);
-              throw error;
+        writeJsonFileAtomic(
+          file,
+          { state: "completed" },
+          {
+            operations: {
+              platform: "win32",
+              now: () => elapsed,
+              sleep: async (milliseconds) => {
+                waits.push(milliseconds);
+                elapsed += milliseconds;
+              },
+              rename: async () => {
+                attempts.push(elapsed);
+                throw error;
+              },
             },
           },
-        }),
+        ),
       ).rejects.toBe(error);
       expect(elapsed).toBe(1000);
       expect(waits.slice(0, 5)).toEqual([10, 20, 40, 80, 100]);

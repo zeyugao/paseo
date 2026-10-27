@@ -379,35 +379,39 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
       lockHeld?: boolean;
     },
   ): Promise<TResult> {
-    const mutate = () =>
-      this.runInMutationQueue(async () => {
-        await this.refreshCacheFromDisk();
-        if (this.mutationsBlockedUntilRestart) {
-          throw new Error("Workspace registry mutations are blocked until daemon restart");
-        }
-        if (this.diskStateUncertain) {
-          throw new Error(
-            "Workspace registry file is unreadable; mutations are blocked until it can be refreshed",
-          );
-        }
-        await hooks?.beforeUpdate?.();
-        const staged = new Map(this.cache);
-        const result = updater(staged);
-        const recordsChanged = !mapsEqual(this.cache, staged);
-        if (!recordsChanged && !hooks?.forcePersist?.(result)) return result;
-        const records = Array.from(staged.values());
-        await hooks?.beforeWrite?.(records);
-        if (recordsChanged) await this.writeRecords(this.filePath, records);
-        await hooks?.afterWrite?.();
-        if (recordsChanged) {
-          this.cache.clear();
-          for (const [id, record] of staged) this.cache.set(id, record);
-          this.fileMetadata = await this.readFileMetadata();
-        }
-        hooks?.afterCommit?.();
-        return result;
-      });
-    return hooks?.lockHeld ? mutate() : withReclaimLock(this.mutationLockPath, mutate);
+    // Reserve the queue slot synchronously at call time: acquiring the
+    // cross-process lock first would let two concurrent mutations race for
+    // the lock and invert their call order in the queue.
+    const operation = async (): Promise<TResult> => {
+      await this.refreshCacheFromDisk();
+      if (this.mutationsBlockedUntilRestart) {
+        throw new Error("Workspace registry mutations are blocked until daemon restart");
+      }
+      if (this.diskStateUncertain) {
+        throw new Error(
+          "Workspace registry file is unreadable; mutations are blocked until it can be refreshed",
+        );
+      }
+      await hooks?.beforeUpdate?.();
+      const staged = new Map(this.cache);
+      const result = updater(staged);
+      const recordsChanged = !mapsEqual(this.cache, staged);
+      if (!recordsChanged && !hooks?.forcePersist?.(result)) return result;
+      const records = Array.from(staged.values());
+      await hooks?.beforeWrite?.(records);
+      if (recordsChanged) await this.writeRecords(this.filePath, records);
+      await hooks?.afterWrite?.();
+      if (recordsChanged) {
+        this.cache.clear();
+        for (const [id, record] of staged) this.cache.set(id, record);
+        this.fileMetadata = await this.readFileMetadata();
+      }
+      hooks?.afterCommit?.();
+      return result;
+    };
+    return this.runInMutationQueue(() =>
+      hooks?.lockHeld ? operation() : withReclaimLock(this.mutationLockPath, operation),
+    );
   }
 
   private async runInMutationQueue<TResult>(operation: () => Promise<TResult>): Promise<TResult> {

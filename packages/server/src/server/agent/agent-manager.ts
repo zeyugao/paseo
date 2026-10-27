@@ -1379,14 +1379,7 @@ export class AgentManager {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
     if (agentId !== undefined) {
-      const existingRecord = this.registry ? await this.registry.getFresh(resolvedAgentId) : null;
-      const existingAgent = this.agents.get(resolvedAgentId);
-      const foreignRecord = existingRecord && this.isForeignHost(existingRecord.hostId);
-      const foreignAgent = existingAgent && this.isForeignHost(existingAgent.hostId);
-      if (foreignRecord || foreignAgent) {
-        const owner = existingRecord?.hostId ?? existingAgent?.hostId;
-        throw new Error(`agent is owned by host ${owner}`);
-      }
+      await this.assertCreatedAgentIdNotForeign(resolvedAgentId);
     }
     if (this.pluginLifecycle && !config.internal) {
       const request = await this.pluginLifecycle.before("agent.create.before", {
@@ -1440,6 +1433,19 @@ export class AgentManager {
       });
     }
     return agent;
+  }
+
+  // A create with an explicit ID must not displace a record or live agent that
+  // another daemon in a shared PASEO_HOME owns.
+  private async assertCreatedAgentIdNotForeign(resolvedAgentId: string): Promise<void> {
+    const existingRecord = this.registry ? await this.registry.getFresh(resolvedAgentId) : null;
+    const existingAgent = this.agents.get(resolvedAgentId);
+    const foreignRecord = existingRecord && this.isForeignHost(existingRecord.hostId);
+    const foreignAgent = existingAgent && this.isForeignHost(existingAgent.hostId);
+    if (foreignRecord || foreignAgent) {
+      const owner = existingRecord?.hostId ?? existingAgent?.hostId;
+      throw new Error(`agent is owned by host ${owner}`);
+    }
   }
 
   private buildCreateSessionOptions(options?: {
@@ -1512,18 +1518,13 @@ export class AgentManager {
       ...overrides,
       provider: handle.provider,
     } as AgentSessionConfig;
-    // Re-read ownership inside the lifecycle lane: another daemon may have updated
-    // the shared record after the loader selected a purpose.
-    const record = this.registry ? await this.registry.getFresh(resolvedAgentId) : null;
-    if (explicitAgentId && this.registry && record === null) {
-      throw new Error(`Agent not found: ${resolvedAgentId}`);
-    }
     const {
+      record,
       foreign,
       takingOverClosed,
       resumeOptions: currentResumeOptions,
-    } = this.resolveOwnershipIntent(record, resumeOptions);
-    const purpose = currentResumeOptions?.purpose ?? "interactive";
+      purpose,
+    } = await this.resolveResumeRecordOwnership(resolvedAgentId, resumeOptions, explicitAgentId);
     this.assertForeignHistoryProviderSupported(foreign, purpose, handle.provider);
 
     const launchEnv = record?.launchEnv;
@@ -1573,6 +1574,37 @@ export class AgentManager {
       ...(record !== null ? { hostId: takingOverClosed ? this.serverId : record.hostId } : {}),
       projectedLifecycle: foreign && !takingOverClosed ? record?.lastStatus : undefined,
     });
+  }
+
+  // Re-reads ownership inside the lifecycle lane: another daemon may have
+  // updated the shared record after the loader selected a purpose.
+  private async resolveResumeRecordOwnership(
+    resolvedAgentId: string,
+    resumeOptions: AgentResumeSessionOptions | undefined,
+    explicitAgentId: boolean,
+  ): Promise<{
+    record: StoredAgentRecord | null;
+    foreign: boolean;
+    takingOverClosed: boolean;
+    resumeOptions: AgentResumeSessionOptions | undefined;
+    purpose: AgentResumePurpose;
+  }> {
+    const record = this.registry ? await this.registry.getFresh(resolvedAgentId) : null;
+    if (explicitAgentId && this.registry && record === null) {
+      throw new Error(`Agent not found: ${resolvedAgentId}`);
+    }
+    const {
+      foreign,
+      takingOverClosed,
+      resumeOptions: currentResumeOptions,
+    } = this.resolveOwnershipIntent(record, resumeOptions);
+    return {
+      record,
+      foreign,
+      takingOverClosed,
+      resumeOptions: currentResumeOptions,
+      purpose: currentResumeOptions?.purpose ?? "interactive",
+    };
   }
 
   importProviderSession(input: {
@@ -5754,30 +5786,12 @@ export class AgentManager {
     // A plugin changing during this open must still make the resulting session stale.
     const generation = this.sessionOpenGeneration;
     this.detachPluginTools(agentId);
-    let mcpServers: AgentSessionConfig["mcpServers"];
-    let mcpServerOwners: Record<string, string> | undefined;
-    if (this.pluginLifecycle && opening?.internal !== true) {
-      const request = {
-        agentId,
-        provider: client.provider,
-        cwd,
-        workspaceId: opening?.workspaceId ?? null,
-        reason: opening?.reason ?? "resume",
-        purpose: opening?.purpose ?? "interactive",
-        env: { ...env },
-        title: opening?.title ?? null,
-        labels: opening?.labels ?? {},
-        tools: [],
-        mcpServers: {},
-      };
-      const transformed = await this.pluginLifecycle.before("agent.open.before", request);
-      env = transformed.env;
-      if (request.purpose === "interactive") {
-        this.attachedPluginTools.set(agentId, transformed.tools as AttachedAgentTool[]);
-        mcpServers = transformed.mcpServers;
-        mcpServerOwners = transformed.mcpServerOwners;
-      }
-    }
+    const {
+      env: sessionOpenEnv,
+      mcpServers,
+      mcpServerOwners,
+    } = await this.runSessionOpenPluginHooks(agentId, client, cwd, env, opening);
+    env = sessionOpenEnv;
     const context: AgentLaunchContext = {
       agentId,
       mcpServers,
@@ -5809,6 +5823,45 @@ export class AgentManager {
     }
     this.sessionOpenGenerations.set(agentId, generation);
     return context;
+  }
+
+  private async runSessionOpenPluginHooks(
+    agentId: string,
+    client: AgentClient,
+    cwd: string,
+    env: Record<string, string> | undefined,
+    opening: Parameters<AgentManager["buildLaunchContext"]>[5],
+  ): Promise<{
+    env: Record<string, string> | undefined;
+    mcpServers: AgentSessionConfig["mcpServers"];
+    mcpServerOwners: Record<string, string> | undefined;
+  }> {
+    if (!this.pluginLifecycle || opening?.internal === true) {
+      return { env, mcpServers: undefined, mcpServerOwners: undefined };
+    }
+    const request = {
+      agentId,
+      provider: client.provider,
+      cwd,
+      workspaceId: opening?.workspaceId ?? null,
+      reason: opening?.reason ?? "resume",
+      purpose: opening?.purpose ?? "interactive",
+      env: { ...env },
+      title: opening?.title ?? null,
+      labels: opening?.labels ?? {},
+      tools: [],
+      mcpServers: {},
+    };
+    const transformed = await this.pluginLifecycle.before("agent.open.before", request);
+    if (request.purpose !== "interactive") {
+      return { env: transformed.env, mcpServers: undefined, mcpServerOwners: undefined };
+    }
+    this.attachedPluginTools.set(agentId, transformed.tools as AttachedAgentTool[]);
+    return {
+      env: transformed.env,
+      mcpServers: transformed.mcpServers,
+      mcpServerOwners: transformed.mcpServerOwners,
+    };
   }
 
   private resolveProviderLaunchConfig(

@@ -692,6 +692,9 @@ export class OmpAgentSession implements AgentSession {
   private readonly pendingExtensionUiRequests = new Map<string, AgentPermissionRequest>();
   private readonly questionUi = new OmpQuestionUi();
   private activeTurnId: string | null = null;
+  // Held from the admission check until activeTurnId is assigned so a prompt
+  // arriving while queued steers drain still rejects synchronously.
+  private turnAdmissionPending = false;
   private readonly pendingClientMessages: Array<{ clientMessageId: string | null; text: string }> =
     [];
   private pendingSteerSubmissions: Array<{
@@ -868,12 +871,17 @@ export class OmpAgentSession implements AgentSession {
     streamingBehavior?: "steer" | "followUp";
     announceTurn?: boolean;
   }): Promise<StartTurnResult> {
-    if (this.activeTurnId) {
+    if (this.activeTurnId || this.turnAdmissionPending) {
       throw new Error("An OMP turn is already active");
     }
-    await this.waitForPendingSteerDrain();
-    if (this.activeTurnId) {
-      throw new Error("An OMP turn became active while waiting for queued steers");
+    this.turnAdmissionPending = true;
+    try {
+      await this.waitForPendingSteerDrain();
+      if (this.activeTurnId) {
+        throw new Error("An OMP turn became active while waiting for queued steers");
+      }
+    } finally {
+      this.turnAdmissionPending = false;
     }
 
     const turnId = randomUUID();

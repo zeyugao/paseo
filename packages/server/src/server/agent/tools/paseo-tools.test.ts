@@ -271,6 +271,7 @@ describe("paseo tools workspace ownership", () => {
       callerAgentId: caller.id,
       agentManager: {
         getAgent: (agentId: string) => (agentId === caller.id ? caller : null),
+        getPluginTools: () => [],
         createAgent,
       } as unknown as AgentManager,
     });
@@ -299,6 +300,7 @@ describe("paseo tools workspace ownership", () => {
       callerAgentId: caller.id,
       agentManager: {
         getAgent: (agentId: string) => (agentId === caller.id ? caller : null),
+        getPluginTools: () => [],
         createAgent,
       } as unknown as AgentManager,
     });

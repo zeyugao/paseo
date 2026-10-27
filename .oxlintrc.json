@@ -126,12 +126,16 @@
               ],
               // Provider child process: Pi loads this extension outside the daemon; it reads child-agent status there.
               "server/agent/providers/pi/extensions/pi-subagents/index.ts": ["readFileSync"],
+              // TODO: atomic replacement probes and resolves symlinks synchronously at the write boundary shared by every registry; convert the write path and its callers together.
+              "server/atomic-file.ts": ["lstatSync", "realpathSync"],
               // Startup/shutdown only: remove stale Unix listening sockets before bind and during disposal.
               "server/bootstrap.ts": ["existsSync", "unlinkSync"],
               // Startup configuration resolution: detect the bundled app distribution before the daemon listens.
               "server/config.ts": ["existsSync"],
+              // TODO: instance lease records are read and unlinked synchronously under the cross-process registry lock; migrate with shared-home lease ownership.
+              "server/daemon-instance-registry.ts": ["readFileSync", "unlinkSync"],
               // Startup identity: load or create the daemon keypair before accepting connections.
-              "server/daemon-keypair.ts": ["existsSync", "readFileSync"],
+              "server/daemon-keypair.ts": ["readFileSync"],
               // Fatal exit diagnostics: synchronously flush the exit reason when the worker is about to terminate.
               "server/daemon-worker.ts": ["appendFileSync", "mkdirSync"],
               // Startup host identity: memoized scutil lookup is warmed before listening; later callers use the cache.
@@ -154,7 +158,14 @@
               // Startup config and exported synchronous configuration API; runtime DaemonConfigStore uses the async load/save capabilities.
               "server/persisted-config.ts": ["existsSync", "readFileSync"],
               // Startup pid identity: read and memoize the Linux boot id for the daemon lock.
-              "server/pid-lock.ts": ["readFileSync"],
+              "server/pid-lock.ts": [
+                "closeSync",
+                "existsSync",
+                "openSync",
+                "readFileSync",
+                "unlinkSync",
+                "writeFileSync"
+              ],
               // Startup builtin loader construction: select the bundled plugin root before loading plugins.
               "server/plugins/builtin/index.ts": ["existsSync"],
               // Build child process: plugin graph traversal and esbuild preparation run in the isolated compiler process.
@@ -169,7 +180,6 @@
               "server/private-files.ts": [
                 "chmodSync",
                 "mkdirSync",
-                "realpathSync",
                 "renameSync",
                 "rmSync",
                 "writeFileSync"
@@ -177,7 +187,7 @@
               // TODO: constructor load plus runtime renew/revoke/prune use synchronous persistence; introduce ordered async mutations and readiness.
               "server/push/token-store.ts": ["existsSync", "readFileSync"],
               // Startup identity: load or create the server id before accepting connections.
-              "server/server-id.ts": ["existsSync", "readFileSync"],
+              "server/server-id.ts": ["existsSync", "readFileSync", "writeFileSync"],
               // Listener lifecycle only: unlink the Unix socket before binding or after stopping the proxy.
               "server/service-proxy.ts": ["existsSync", "unlinkSync"],
               // TODO: self-update origin validation exposes synchronous package-root and realpath checks; migrate validation and its runtime interface together.
@@ -197,6 +207,8 @@
               "server/web-ui.ts": ["readFileSync", "statSync"],
               // Startup registry hydration: check persisted workspace directories before the runtime reconciliation service starts.
               "server/workspace-registry-bootstrap.ts": ["statSync"],
+              // TODO: registry writes dereference workspace symlinks synchronously to keep atomic-replace semantics; migrate together with atomic-file.
+              "server/workspace-registry.ts": ["realpathSync"],
               // Terminal child process: hook config installation/removal is owned by terminal creation and teardown in the worker.
               "terminal/agent-hooks/agent-hook-installer.ts": [
                 "existsSync",

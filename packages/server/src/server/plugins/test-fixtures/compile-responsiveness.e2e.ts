@@ -31,6 +31,14 @@ try {
 } finally {
   await entryFile.close();
 }
+// Plugin mutations re-read config.json from disk under the cross-process
+// lock, so the initial plugins map must exist there before the store loads.
+await writeFile(
+  path.join(directory, "config.json"),
+  JSON.stringify({
+    plugins: { "responsive-build": { source: "directory", path: directory, enabled: false } },
+  }),
+);
 const store = new DaemonConfigStore(directory, {
   mcp: { injectIntoAgents: true },
   browserTools: { enabled: false },

@@ -133,6 +133,7 @@ import {
 } from "./websocket/physical-socket.js";
 
 const WS_CLOSE_DAEMON_AUTH_FAILED = 4401;
+const TIMELINE_RESPONSE_SEND_TIMEOUT_MS = 20_000;
 
 export interface ExternalSocketMetadata {
   transport: "relay" | "hub";
@@ -1226,12 +1227,42 @@ export class VoiceAssistantWebSocketServer {
   private sendToClient(ws: WebSocketLike, message: WSOutboundMessage): void {
     this.sendMessageToSockets([ws], message, true);
   }
+  private async sendPhysicalFrameAndWait(
+    params: Parameters<typeof sendBoundedPhysicalFrameAndWait>[0],
+    timeoutMs?: number,
+  ): Promise<{ sent: boolean; timedOut: boolean }> {
+    if (timeoutMs === undefined) {
+      return {
+        sent: await sendBoundedPhysicalFrameAndWait(params),
+        timedOut: false,
+      };
+    }
+
+    const controller = new AbortController();
+    let timedOut = false;
+    const onRequestAbort = () => controller.abort();
+    params.signal?.addEventListener("abort", onRequestAbort, { once: true });
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    try {
+      return {
+        sent: await sendBoundedPhysicalFrameAndWait({ ...params, signal: controller.signal }),
+        timedOut,
+      };
+    } finally {
+      clearTimeout(timeoutId);
+      params.signal?.removeEventListener("abort", onRequestAbort);
+    }
+  }
 
   private sendMessageToSockets(
     sockets: Iterable<WebSocketLike>,
     message: WSOutboundMessage,
     reportRejection = false,
     signal?: AbortSignal,
+    waitTimeoutMs?: number,
   ): void | Promise<void> {
     if (signal?.aborted) return;
     const physicalSockets = [...sockets];
@@ -1247,15 +1278,33 @@ export class VoiceAssistantWebSocketServer {
       return Promise.all(
         paced.sockets.map(async (ws) => {
           try {
-            const sent = await sendBoundedPhysicalFrameAndWait({
-              socket: ws,
-              frame: paced.payload,
-              frameBytes: paced.bytes,
-              signal,
-              onHighWater: () => this.closeAtOutboundHighWater(ws),
-            });
-            if (sent) this.runtimeMetrics.recordOutboundMessage(message, ws.bufferedAmount);
-            else if (!signal.aborted) await this.detachSocket(ws, {});
+            const { sent, timedOut } = await this.sendPhysicalFrameAndWait(
+              {
+                socket: ws,
+                frame: paced.payload,
+                frameBytes: paced.bytes,
+                signal,
+                onHighWater: () => this.closeAtOutboundHighWater(ws),
+              },
+              waitTimeoutMs,
+            );
+            if (sent) {
+              this.runtimeMetrics.recordOutboundMessage(message, ws.bufferedAmount);
+            } else if (timedOut) {
+              const error = new Error("Timeline response send timed out");
+              this.logger.warn(
+                { messageType: message.type, timeoutMs: waitTimeoutMs },
+                "ws_timeline_response_timeout",
+              );
+              this.closePhysicalSocket({
+                ws,
+                logMessage: "Closing physical WebSocket after timeline response timeout",
+                logFields: { messageType: message.type, timeoutMs: waitTimeoutMs },
+              });
+              await this.detachSocket(ws, { error });
+            } else if (!signal.aborted) {
+              await this.detachSocket(ws, {});
+            }
           } catch (error) {
             // A failed write can precede the close event; cancel queued producers now.
             this.closePhysicalSocket({
@@ -1560,6 +1609,7 @@ export class VoiceAssistantWebSocketServer {
             wrapSessionMessage(msg),
             true,
             connection.session.delivery.requestSignal,
+            TIMELINE_RESPONSE_SEND_TIMEOUT_MS,
           );
         }
         await this.sendMessageToClientAndWait(source as WebSocketLike, wrapSessionMessage(msg));

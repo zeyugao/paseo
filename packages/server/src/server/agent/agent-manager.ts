@@ -1554,14 +1554,7 @@ export class AgentManager {
       storedConfig.cwd,
       paseoToolPolicy,
       launchEnv,
-      {
-        reason: "resume",
-        purpose,
-        workspaceId: workspaceId ?? null,
-        title: record?.title ?? mergedConfig.title ?? null,
-        labels: record?.labels ?? options?.labels ?? {},
-        internal: mergedConfig.internal === true,
-      },
+      this.buildResumeLaunchOptions(purpose, workspaceId, record, mergedConfig, options),
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const session = await client.resumeSession(
@@ -1582,6 +1575,24 @@ export class AgentManager {
       ...(record !== null ? { hostId: record.hostId } : {}),
       projectedLifecycle: foreign ? record?.lastStatus : undefined,
     });
+  }
+
+  // Kept separate so the resume path stays inside the oxlint complexity gate.
+  private buildResumeLaunchOptions(
+    purpose: AgentResumePurpose,
+    workspaceId: string | undefined,
+    record: StoredAgentRecord | null,
+    mergedConfig: AgentSessionConfig,
+    options: { labels?: Record<string, string> } | undefined,
+  ): Parameters<AgentManager["buildLaunchContext"]>[5] {
+    return {
+      reason: "resume",
+      purpose,
+      workspaceId: workspaceId ?? null,
+      title: record?.title ?? mergedConfig.title ?? null,
+      labels: record?.labels ?? options?.labels ?? {},
+      internal: mergedConfig.internal === true,
+    };
   }
 
   // Re-reads ownership inside the lifecycle lane: another daemon may have
@@ -4107,22 +4118,24 @@ export class AgentManager {
       | undefined;
   }): ActiveManagedAgent {
     const { resolvedAgentId, session, config, now, durableTimelineHasRows, options } = params;
+    // Optional chains each count toward the complexity gate; normalize once.
+    const defaults = options ?? {};
     return {
       id: resolvedAgentId,
       provider: config.provider,
       cwd: config.cwd,
-      workspaceId: options?.workspaceId,
-      owner: options?.owner,
-      launchEnv: options?.launchEnv,
+      workspaceId: defaults.workspaceId,
+      owner: defaults.owner,
+      launchEnv: defaults.launchEnv,
       hostId: this.resolveRegistrationHostId(options),
-      projectedLifecycle: options?.projectedLifecycle,
+      projectedLifecycle: defaults.projectedLifecycle,
       session,
       capabilities: session.capabilities,
       config,
       runtimeInfo: undefined,
       lifecycle: "initializing",
-      createdAt: options?.createdAt ?? now,
-      updatedAt: options?.updatedAt ?? now,
+      createdAt: defaults.createdAt ?? now,
+      updatedAt: defaults.updatedAt ?? now,
       availableModes: [],
       currentModeId: null,
       pendingPermissions: new Map<string, AgentPermissionRequest>(),
@@ -4136,16 +4149,16 @@ export class AgentManager {
       finalizedForegroundTurnIds: new Set<string>(),
       unsubscribeSession: null,
       persistence: normalizePersistenceForConfig(
-        options?.persistence ?? session.describePersistence(),
+        defaults.persistence ?? session.describePersistence(),
         config,
       ),
-      historyPrimed: options?.historyPrimed ?? durableTimelineHasRows,
-      lastUserMessageAt: options?.lastUserMessageAt ?? null,
-      lastUsage: options?.lastUsage,
-      lastError: options?.lastError,
-      attention: resolveInitialAttention(options?.attention),
+      historyPrimed: defaults.historyPrimed ?? durableTimelineHasRows,
+      lastUserMessageAt: defaults.lastUserMessageAt ?? null,
+      lastUsage: defaults.lastUsage,
+      lastError: defaults.lastError,
+      attention: resolveInitialAttention(defaults.attention),
       internal: config.internal ?? false,
-      labels: options?.labels ?? {},
+      labels: defaults.labels ?? {},
     } as ActiveManagedAgent;
   }
 

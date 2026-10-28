@@ -3484,10 +3484,8 @@ export class Session {
     // durable snapshot, otherwise an in-flight background write can recreate it.
     await this.agentManager.flush();
 
-    // The flush can take arbitrarily long on a busy daemon; another host may
-    // have legitimately taken over a closed foreign record in that window.
-    // The delete fence makes normal getFresh return null, so bypass it:
-    // a takeover must still abort the irreversible remove.
+    // Ownership may change externally while the flush is pending. The delete
+    // fence makes normal getFresh return null, so bypass it before removing data.
     const postFlushRecord = await this.agentStorage.getFresh(agentId, {
       ignoreDeleteFence: true,
     });

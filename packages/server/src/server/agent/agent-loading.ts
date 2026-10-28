@@ -89,16 +89,12 @@ export async function ensureAgentLoaded(
     if (!isForeignCopy) {
       return existing;
     }
-    // A resident foreign history copy may have become adoptable (the owner
-    // closed it) or stale (the record is gone) since it was loaded.
+    // Reopen a stale history runtime after an ownership change or when the
+    // owner's lifecycle first becomes closed; neither operation transfers ownership.
     const fresh = await deps.agentStorage.getFresh(agentId);
-    const adoptable =
-      fresh !== null &&
-      fresh.hostId !== undefined &&
-      fresh.hostId !== deps.agentManager.serverId &&
-      fresh.archivedAt == null &&
-      fresh.lastStatus === "closed";
-    if ((fresh !== null && !adoptable) || !deps.agentManager.closeAgent) {
+    const ownershipChanged = fresh !== null && fresh.hostId !== existing.hostId;
+    const newlyClosed = fresh?.lastStatus === "closed" && existing.projectedLifecycle !== "closed";
+    if ((fresh !== null && !ownershipChanged && !newlyClosed) || !deps.agentManager.closeAgent) {
       return existing;
     }
     await deps.agentManager.closeAgent(agentId);

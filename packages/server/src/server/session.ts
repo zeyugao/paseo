@@ -2262,34 +2262,22 @@ export class Session {
     const current = new Promise<void>((complete) => {
       release = complete;
     });
-    let released = false;
-    const releaseQueue = () => {
-      if (released) return;
-      released = true;
-      release();
-      if (this.timelineRequests.get(source) === current) this.timelineRequests.delete(source);
-    };
-    // Queue projection work, not already-materialized history response writes.
+    // Wait before loading or projecting the next page, not after retaining its payload.
+    // The transport's send deadline cancels stalled sources and their queued requests.
     this.timelineRequests.set(source, current);
     try {
       if (previous) await previous;
       if (signal.aborted) return;
       const response = await run();
-      if (!response) return;
-      let sending: Promise<void>;
+      if (!response || signal.aborted) return;
       try {
-        sending = Promise.resolve(emit(response));
-      } catch (error) {
-        sending = Promise.reject(error);
-      }
-      releaseQueue();
-      try {
-        await sending;
+        await emit(response);
       } catch (error) {
         this.sessionLogger.warn({ err: error }, "Failed to send timeline response");
       }
     } finally {
-      releaseQueue();
+      release();
+      if (this.timelineRequests.get(source) === current) this.timelineRequests.delete(source);
     }
   }
 

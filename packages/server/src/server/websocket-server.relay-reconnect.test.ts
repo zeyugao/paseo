@@ -561,6 +561,39 @@ describe("relay external socket reconnect behavior", () => {
       await server.close();
     }
   });
+  test("times out a stalled timeline response and detaches its socket", async () => {
+    const server = createServer();
+    const socket = new DeferredSendSocket();
+    try {
+      await attachDirectAndHello({ server, socket, clientId: "cid-timeline-timeout" });
+      const session = sessionMock.instances[0];
+      const reply = session.args.onMessageToSource;
+      if (typeof reply !== "function") throw new Error("Missing source reply transport");
+      let sourceSignal: AbortSignal | undefined;
+      let completed = false;
+      vi.useFakeTimers();
+      const sending = session.delivery.request(
+        socket,
+        { type: "fetch_agent_timeline_request", agentId: "agent-1", requestId: "timeline-timeout" },
+        async () => {
+          sourceSignal = session.delivery.requestSignal;
+          await reply(socket, session.delivery.authorizeReply(timelineReply, socket));
+          completed = true;
+        },
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(completed).toBe(false);
+      await vi.advanceTimersByTimeAsync(20_000);
+      await sending;
+      expect(completed).toBe(true);
+      expect(sourceSignal?.aborted).toBe(true);
+      expect(socket.readyState).toBe(3);
+    } finally {
+      vi.useRealTimers();
+      await server.close();
+    }
+  });
 
   test.each([
     { state: 1, failure: new Error("write failed before close") },

@@ -387,11 +387,10 @@ describe("timeline request source scheduling", () => {
     limit: 0,
   } as const;
 
-  test("waits for the physical send before producing same-source pages while other work proceeds", async () => {
+  test("projects later same-source pages while an earlier physical send is pending", async () => {
     const manager = new InMemoryAgentManager(rows);
     const rootReads = vi.spyOn(manager, "fetchTimeline");
     const childReads = vi.spyOn(manager, "fetchProviderSubagentTimeline");
-    const agentReads = vi.spyOn(manager, "getAgent");
     const source = {};
     const otherSource = {};
     const firstStarted = deferred();
@@ -421,52 +420,29 @@ describe("timeline request source scheduling", () => {
       source,
     );
     const third = session.handleMessage(childRequest, source);
+    await Promise.all([second, third]);
     await session.handleMessage({ ...childRequest, requestId: "other" }, otherSource);
     await session.handleMessage(
       { type: "session.events.set_subscription.request", requestId: "events", events: [] },
       source,
     );
 
-    expect(rootReads).toHaveBeenCalledTimes(1);
-    expect(childReads).toHaveBeenCalledTimes(1);
-    expect(agentReads).toHaveBeenCalledTimes(2);
+    expect(rootReads).toHaveBeenCalledTimes(2);
+    expect(childReads).toHaveBeenCalledTimes(2);
     expect(delivered.map(({ message }) => message.type)).toEqual([
       "fetch_agent_timeline_response",
+      "fetch_agent_timeline_response",
+      "agent.provider_subagents.timeline.get.response",
       "agent.provider_subagents.timeline.get.response",
       "session.events.set_subscription.response",
     ]);
-    expect(delivered[1]?.source).toBe(otherSource);
+    expect(delivered.slice(0, 3).map(({ source: socket }) => socket)).toEqual([
+      source,
+      source,
+      source,
+    ]);
     expect(
-      FetchAgentTimelineResponseMessageSchema.parse(delivered[0]?.message).payload,
-    ).toMatchObject({
-      requestId: "first",
-      entries: [{ item: { type: "user_message", text: "first prompt" }, seqStart: 1, seqEnd: 1 }],
-      startCursor: { epoch: "epoch-1", seq: 1 },
-      endCursor: { epoch: "epoch-1", seq: 1 },
-      hasNewer: true,
-      error: null,
-    });
-    expect(
-      ProviderSubagentTimelineResponseMessageSchema.parse(delivered[1]?.message).payload,
-    ).toMatchObject({
-      requestId: "other",
-      rows: [
-        { item: { type: "user_message", text: "second prompt" }, seqStart: 3, seqEnd: 3 },
-        { item: { type: "assistant_message", text: "second answer" }, seqStart: 4, seqEnd: 4 },
-      ],
-      startCursor: { epoch: "subagent-epoch-1", seq: 3 },
-      endCursor: { epoch: "subagent-epoch-1", seq: 4 },
-      hasNewer: false,
-      error: null,
-    });
-
-    firstSend.resolve();
-    await Promise.all([first, second, third]);
-    expect(rootReads).toHaveBeenCalledTimes(2);
-    expect(childReads).toHaveBeenCalledTimes(2);
-    expect(delivered.slice(3).map(({ source: socket }) => socket)).toEqual([source, source]);
-    expect(
-      FetchAgentTimelineResponseMessageSchema.parse(delivered[3]?.message).payload,
+      FetchAgentTimelineResponseMessageSchema.parse(delivered[1]?.message).payload,
     ).toMatchObject({
       requestId: "second",
       entries: [
@@ -478,11 +454,19 @@ describe("timeline request source scheduling", () => {
       error: null,
     });
     expect(
-      ProviderSubagentTimelineResponseMessageSchema.parse(delivered[4]?.message).payload,
-    ).toEqual({
-      ...ProviderSubagentTimelineResponseMessageSchema.parse(delivered[1]?.message).payload,
+      ProviderSubagentTimelineResponseMessageSchema.parse(delivered[2]?.message).payload,
+    ).toMatchObject({
       requestId: "child",
+      rows: [
+        { item: { type: "user_message", text: "second prompt" }, seqStart: 3, seqEnd: 3 },
+        { item: { type: "assistant_message", text: "second answer" }, seqStart: 4, seqEnd: 4 },
+      ],
+      hasNewer: false,
+      error: null,
     });
+
+    firstSend.resolve();
+    await first;
     await session.cleanup();
   });
 
@@ -570,7 +554,7 @@ describe("timeline request source scheduling", () => {
     },
   );
 
-  test("waits for an error response send and then releases later requests", async () => {
+  test("projects the next request while an error response send is pending", async () => {
     const manager = new InMemoryAgentManager(rows);
     const reads = vi.spyOn(manager, "fetchTimeline").mockImplementationOnce(() => {
       throw new Error("timeline page failed");
@@ -596,8 +580,8 @@ describe("timeline request source scheduling", () => {
     await started.promise;
     const next = session.handleMessage({ ...rootRequest, requestId: "next" }, source);
     await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(reads).toHaveBeenCalledTimes(1);
-    expect(messages).toHaveLength(1);
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(messages).toHaveLength(2);
     expect(FetchAgentTimelineResponseMessageSchema.parse(messages[0]).payload).toMatchObject({
       requestId: "failed",
       entries: [],
@@ -605,16 +589,15 @@ describe("timeline request source scheduling", () => {
       endCursor: null,
       error: "timeline page failed",
     });
-
-    send.resolve();
-    await Promise.all([first, next]);
-    expect(reads).toHaveBeenCalledTimes(2);
     expect(FetchAgentTimelineResponseMessageSchema.parse(messages[1]).payload).toMatchObject({
       requestId: "next",
       entries: [{ item: { text: "first prompt" } }],
       endCursor: { epoch: "epoch-1", seq: 1 },
       error: null,
     });
+
+    send.resolve();
+    await Promise.all([first, next]);
     await session.cleanup();
   });
 
@@ -643,22 +626,17 @@ describe("timeline request source scheduling", () => {
     await started.promise;
     const next = session.handleMessage({ ...rootRequest, requestId: "next" }, source);
     await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(reads).toHaveBeenCalledTimes(1);
-    expect(messages).toHaveLength(1);
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(messages).toHaveLength(2);
+    expect(FetchAgentTimelineResponseMessageSchema.parse(messages[1]).payload).toMatchObject({
+      requestId: "next",
+      entries: [{ item: { text: "first prompt" } }],
+      startCursor: { epoch: "epoch-1", seq: 1 },
+      endCursor: { epoch: "epoch-1", seq: 1 },
+      error: null,
+    });
     send.reject(sendError);
-    await first;
-    expect(messages).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "rpc_error",
-          payload: expect.objectContaining({
-            requestId: "failed",
-            requestType: "fetch_agent_timeline_request",
-            code: "handler_error",
-          }),
-        }),
-      ]),
-    );
+    await expect(first).resolves.toBeUndefined();
     await next;
     expect(reads).toHaveBeenCalledTimes(2);
     expect(FetchAgentTimelineResponseMessageSchema.parse(messages.at(-1)).payload).toMatchObject({

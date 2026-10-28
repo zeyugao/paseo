@@ -45,7 +45,7 @@ Heartbeat is used for notification routing. It must not be used as a correctness
 
 ## Gap recovery is paged but complete
 
-Large unbounded timeline responses can exceed relay frame limits, so catch-up uses bounded pages. Bounded does not mean partial.
+Catch-up uses projected pages. Their item targets are not byte budgets: whole-turn expansion can produce a large response.
 
 Page limits are projected-item targets. A tool call lifecycle is one projected item even if it spans many source sequence numbers, and assistant/reasoning chunks are merged before counting. The response carries `seqStart`, `seqEnd`, `sourceSeqRanges`, and `collapsed` so clients can advance sequence cursors without rendering delta rows.
 
@@ -54,6 +54,11 @@ responds with `hasNewer: true`, the app immediately fetches the next page from `
 recovery is complete only when `hasNewer: false`.
 
 Initialization timeouts guard lack of catch-up progress, not the full multi-page sync. A successful page that queues the next `after` page refreshes the watchdog.
+
+Pace root and provider-child history together per source, before loading or projecting the next page.
+Waiting only after each response starts sending lets a reconnect burst fill the socket with large
+pages. Keep the bounded physical-write deadline with this pacing; otherwise an abandoned socket
+can hold all later history requests indefinitely. Other sources and control requests remain independent.
 
 Opening or resuming an agent fetches the latest available turns with a soft target of 40
 projected items. Backward pages and prompt-jump windows also include whole turns, including

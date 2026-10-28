@@ -1,3 +1,11 @@
+import { once } from "node:events";
+import { createServer } from "node:http";
+import type { Socket } from "node:net";
+import { WebSocket, WebSocketServer } from "ws";
+import {
+  MAX_PHYSICAL_SOCKET_BUFFERED_BYTES,
+  sendBoundedPhysicalFrameAndWait,
+} from "./websocket/physical-socket.js";
 import { createWorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import { createAgentMessageDeliveryStub } from "./test-utils/session-stubs.js";
 import {
@@ -335,10 +343,10 @@ async function emitTimelineResponse(options?: {
   return response;
 }
 
-function deferred() {
-  let resolve!: () => void;
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
   let reject!: (error: Error) => void;
-  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
   });
@@ -387,87 +395,117 @@ describe("timeline request source scheduling", () => {
     limit: 0,
   } as const;
 
-  test("projects later same-source pages while an earlier physical send is pending", async () => {
-    const manager = new InMemoryAgentManager(rows);
-    const rootReads = vi.spyOn(manager, "fetchTimeline");
-    const childReads = vi.spyOn(manager, "fetchProviderSubagentTimeline");
-    const source = {};
-    const otherSource = {};
+  test("a paused client receives a large timeline burst without reconnecting", async () => {
+    const http = createServer();
+    const wss = new WebSocketServer({ server: http });
+    http.listen(0, "127.0.0.1");
+    await once(http, "listening");
+    const address = http.address();
+    if (!address || typeof address === "string") throw new Error("Missing port");
+    const accepted = deferred<WebSocket>();
+    const tcpAccepted = deferred<Socket>();
+    wss.once("connection", accepted.resolve);
+    http.once("connection", tcpAccepted.resolve);
+    const receiver = new WebSocket(`ws://127.0.0.1:${address.port}`);
+    const physical = await accepted.promise;
+    const tcp = await tcpAccepted.promise;
+    await once(receiver, "open");
+    const text = "history".repeat(1024 * 1024);
+    const received: string[] = [];
     const firstStarted = deferred();
-    const firstSend = deferred();
-    const delivered: Array<{ source: object; message: SessionOutboundMessage }> = [];
+    const otherMessages: SessionOutboundMessage[] = [];
+    let highWater = 0;
     const session = createSessionForWireCompatTest({
-      manager,
-      onMessageToSource: (target, message) => {
-        delivered.push({ source: target, message });
-        if (
-          message.type === "fetch_agent_timeline_response" &&
-          message.payload.requestId === "first"
-        ) {
-          firstStarted.resolve();
-          return firstSend.promise;
+      rows: [
+        {
+          seq: 1,
+          timestamp: "2026-05-02T00:00:00.000Z",
+          item: { type: "assistant_message", text },
+        },
+      ],
+      onMessageToSource: async (source, message) => {
+        if (source !== physical) {
+          otherMessages.push(message);
+          return;
         }
+        const sending = sendBoundedPhysicalFrameAndWait({
+          socket: physical,
+          frame: JSON.stringify({ type: "session", message }),
+          signal: session.delivery.requestSignal,
+          onHighWater: () => {
+            highWater++;
+            session.clearAgentTimelineSubscription(physical);
+            physical.terminate();
+          },
+        });
+        firstStarted.resolve();
+        await sending;
       },
     });
-    for (const socket of [source, otherSource]) {
-      session.updateClientCapabilities({ [CLIENT_CAPS.projectedSubagentTimeline]: true }, socket);
+    session.updateClientCapabilities({ [CLIENT_CAPS.projectedSubagentTimeline]: true }, physical);
+    const envelopeSchema = z.object({
+      message: z.discriminatedUnion("type", [
+        FetchAgentTimelineResponseMessageSchema,
+        ProviderSubagentTimelineResponseMessageSchema,
+      ]),
+    });
+    receiver.on("message", (data) => {
+      const { message: response } = envelopeSchema.parse(JSON.parse(data.toString()));
+      const entries =
+        response.type === "fetch_agent_timeline_response"
+          ? response.payload.entries
+          : response.payload.rows;
+      expect(entries).toMatchObject([{ item: { type: "assistant_message", text } }]);
+      received.push(response.payload.requestId);
+    });
+    let pending: Promise<void>[] = [];
+    try {
+      receiver.pause();
+      // Corking makes physical backpressure independent of OS receive-buffer sizes.
+      tcp.cork();
+      const requestIds = Array.from({ length: 12 }, (_, index) => `burst-${index}`);
+      pending = requestIds.map((requestId, index) => {
+        const request = index % 2 === 0 ? rootRequest : childRequest;
+        return session.handleMessage(
+          { ...request, requestId, direction: "tail", limit: 0 },
+          physical,
+        );
+      });
+      await firstStarted.promise;
+      const otherSource = {};
+      await session.handleMessage({ ...rootRequest, requestId: "other" }, otherSource);
+      await session.handleMessage(
+        { type: "session.events.set_subscription.request", requestId: "control", events: [] },
+        otherSource,
+      );
+      expect(otherMessages.map((message) => message.type)).toEqual([
+        "fetch_agent_timeline_response",
+        "session.events.set_subscription.response",
+      ]);
+      expect(highWater).toBe(0);
+      expect(physical.readyState).toBe(WebSocket.OPEN);
+      expect(physical.bufferedAmount).toBeGreaterThan(0);
+      expect(physical.bufferedAmount).toBeLessThan(MAX_PHYSICAL_SOCKET_BUFFERED_BYTES);
+      receiver.resume();
+      tcp.uncork();
+      await Promise.all(pending);
+      await expect.poll(() => received, { timeout: 10_000 }).toEqual(requestIds);
+      expect(highWater).toBe(0);
+      expect(physical.readyState).toBe(WebSocket.OPEN);
+    } finally {
+      session.clearAgentTimelineSubscription(physical);
+      receiver.terminate();
+      physical.terminate();
+      tcp.destroy();
+      await Promise.all(pending);
+      await session.cleanup();
+      const wsClosed = deferred();
+      wss.close(() => wsClosed.resolve());
+      await wsClosed.promise;
+      const httpClosed = deferred();
+      http.close(() => httpClosed.resolve());
+      await httpClosed.promise;
     }
-
-    const first = session.handleMessage({ ...rootRequest, requestId: "first" }, source);
-    await firstStarted.promise;
-    const second = session.handleMessage(
-      { ...rootRequest, requestId: "second", cursor: { epoch: "epoch-1", seq: 1 } },
-      source,
-    );
-    const third = session.handleMessage(childRequest, source);
-    await Promise.all([second, third]);
-    await session.handleMessage({ ...childRequest, requestId: "other" }, otherSource);
-    await session.handleMessage(
-      { type: "session.events.set_subscription.request", requestId: "events", events: [] },
-      source,
-    );
-
-    expect(rootReads).toHaveBeenCalledTimes(2);
-    expect(childReads).toHaveBeenCalledTimes(2);
-    expect(delivered.map(({ message }) => message.type)).toEqual([
-      "fetch_agent_timeline_response",
-      "fetch_agent_timeline_response",
-      "agent.provider_subagents.timeline.get.response",
-      "agent.provider_subagents.timeline.get.response",
-      "session.events.set_subscription.response",
-    ]);
-    expect(delivered.slice(0, 3).map(({ source: socket }) => socket)).toEqual([
-      source,
-      source,
-      source,
-    ]);
-    expect(
-      FetchAgentTimelineResponseMessageSchema.parse(delivered[1]?.message).payload,
-    ).toMatchObject({
-      requestId: "second",
-      entries: [
-        { item: { type: "assistant_message", text: "first answer" }, seqStart: 2, seqEnd: 2 },
-      ],
-      startCursor: { epoch: "epoch-1", seq: 2 },
-      endCursor: { epoch: "epoch-1", seq: 2 },
-      hasNewer: true,
-      error: null,
-    });
-    expect(
-      ProviderSubagentTimelineResponseMessageSchema.parse(delivered[2]?.message).payload,
-    ).toMatchObject({
-      requestId: "child",
-      rows: [
-        { item: { type: "user_message", text: "second prompt" }, seqStart: 3, seqEnd: 3 },
-        { item: { type: "assistant_message", text: "second answer" }, seqStart: 4, seqEnd: 4 },
-      ],
-      hasNewer: false,
-      error: null,
-    });
-
-    firstSend.resolve();
-    await first;
-    await session.cleanup();
   });
 
   test.each(["root", "child"] as const)(
@@ -554,9 +592,9 @@ describe("timeline request source scheduling", () => {
     },
   );
 
-  test("projects the next request while an error response send is pending", async () => {
+  test("continues catch-up after a timeline error response drains", async () => {
     const manager = new InMemoryAgentManager(rows);
-    const reads = vi.spyOn(manager, "fetchTimeline").mockImplementationOnce(() => {
+    vi.spyOn(manager, "fetchTimeline").mockImplementationOnce(() => {
       throw new Error("timeline page failed");
     });
     const started = deferred();
@@ -579,9 +617,16 @@ describe("timeline request source scheduling", () => {
     const first = session.handleMessage({ ...rootRequest, requestId: "failed" }, source);
     await started.promise;
     const next = session.handleMessage({ ...rootRequest, requestId: "next" }, source);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(reads).toHaveBeenCalledTimes(2);
-    expect(messages).toHaveLength(2);
+    await session.handleMessage(
+      { type: "session.events.set_subscription.request", requestId: "control", events: [] },
+      source,
+    );
+    expect(messages.at(-1)).toMatchObject({
+      type: "session.events.set_subscription.response",
+      payload: { requestId: "control" },
+    });
+    send.resolve();
+    await Promise.all([first, next]);
     expect(FetchAgentTimelineResponseMessageSchema.parse(messages[0]).payload).toMatchObject({
       requestId: "failed",
       entries: [],
@@ -589,21 +634,17 @@ describe("timeline request source scheduling", () => {
       endCursor: null,
       error: "timeline page failed",
     });
-    expect(FetchAgentTimelineResponseMessageSchema.parse(messages[1]).payload).toMatchObject({
+    expect(FetchAgentTimelineResponseMessageSchema.parse(messages[2]).payload).toMatchObject({
       requestId: "next",
       entries: [{ item: { text: "first prompt" } }],
       endCursor: { epoch: "epoch-1", seq: 1 },
       error: null,
     });
-
-    send.resolve();
-    await Promise.all([first, next]);
     await session.cleanup();
   });
 
   test("a rejected physical send does not strand the next timeline request", async () => {
     const manager = new InMemoryAgentManager(rows);
-    const reads = vi.spyOn(manager, "fetchTimeline");
     const started = deferred();
     const send = deferred();
     const sendError = new Error("physical send failed");
@@ -625,20 +666,8 @@ describe("timeline request source scheduling", () => {
     const first = session.handleMessage({ ...rootRequest, requestId: "failed" }, source);
     await started.promise;
     const next = session.handleMessage({ ...rootRequest, requestId: "next" }, source);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(reads).toHaveBeenCalledTimes(2);
-    expect(messages).toHaveLength(2);
-    expect(FetchAgentTimelineResponseMessageSchema.parse(messages[1]).payload).toMatchObject({
-      requestId: "next",
-      entries: [{ item: { text: "first prompt" } }],
-      startCursor: { epoch: "epoch-1", seq: 1 },
-      endCursor: { epoch: "epoch-1", seq: 1 },
-      error: null,
-    });
     send.reject(sendError);
-    await expect(first).resolves.toBeUndefined();
-    await next;
-    expect(reads).toHaveBeenCalledTimes(2);
+    await Promise.all([first, next]);
     expect(FetchAgentTimelineResponseMessageSchema.parse(messages.at(-1)).payload).toMatchObject({
       requestId: "next",
       entries: [{ item: { text: "first prompt" } }],

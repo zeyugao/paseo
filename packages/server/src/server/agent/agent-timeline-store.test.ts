@@ -142,6 +142,86 @@ describe("InMemoryAgentTimelineStore", () => {
       ],
     });
   });
+
+  it.each([
+    { epoch: "old", staleCursor: true, gap: false },
+    { epoch: "current", staleCursor: false, gap: true },
+  ])("applies byte targets to reset tails ($staleCursor, $gap)", ({ epoch, staleCursor, gap }) => {
+    const store = new InMemoryAgentTimelineStore();
+    store.initialize("agent", {
+      epoch: "current",
+      rows: Array.from({ length: 4 }, (_, index) => ({
+        seq: index + 5,
+        timestamp: "2026-02-13T00:00:00.000Z",
+        turnId: index < 2 ? "older" : "latest",
+        providerMessageId: `provider-${index}`,
+        item: { type: "user_message" as const, text: '中文🙂\\\"\n'.repeat(32) },
+      })),
+    });
+    const all = store.fetch("agent", { limit: 0 });
+    expect(all.rows).toHaveLength(4);
+    const maxBytes = Buffer.byteLength(JSON.stringify(all.rows.slice(-2)), "utf8");
+    const page = store.fetch("agent", {
+      direction: "after",
+      cursor: { epoch, seq: 1 },
+      limit: 0,
+      maxBytes,
+    });
+    expect(page.rows).toEqual(all.rows.slice(-2));
+    expect(page).toMatchObject({
+      direction: "after",
+      reset: true,
+      staleCursor,
+      gap,
+      startSeq: 7,
+      endSeq: 8,
+      hasOlder: true,
+      hasNewer: false,
+      window: { minSeq: 5, maxSeq: 8, nextSeq: 9 },
+    });
+    expect(Buffer.byteLength(JSON.stringify(page.rows), "utf8")).toBe(maxBytes);
+    const whole = store.fetch("agent", {
+      direction: "after",
+      cursor: { epoch, seq: 1 },
+      limit: 0,
+      maxBytes: 1,
+      wholeTurns: true,
+    });
+    expect(whole.rows).toEqual(all.rows.slice(-2));
+    expect(whole).toMatchObject({ reset: true, startSeq: 7, endSeq: 8 });
+  });
+
+  it("recomputes the complete projected-row size after provider metadata enrichment", () => {
+    const store = new InMemoryAgentTimelineStore();
+    store.initialize("agent", { epoch: "e" });
+    store.append("agent", { type: "user_message", text: "first", clientMessageId: "client" });
+    store.append("agent", { type: "user_message", text: "second" });
+    const all = store.fetch("agent", { limit: 0 });
+    const maxBytes = Buffer.byteLength(JSON.stringify(all.rows), "utf8");
+    expect(store.fetch("agent", { limit: 0, maxBytes }).rows).toEqual(all.rows);
+    const providerMessageId = '提供者🙂\\\"\n'.repeat(100);
+    store.enrichSubmittedUserMessage("agent", "client", providerMessageId);
+    const tail = store.fetch("agent", { limit: 0, maxBytes });
+    expect(tail.rows).toEqual(all.rows.slice(-1));
+    expect(tail).toMatchObject({ startSeq: 2, endSeq: 2, hasOlder: true });
+    const first = store.fetch("agent", {
+      direction: "after",
+      cursor: { epoch: "e", seq: 0 },
+      limit: 0,
+      maxBytes,
+    });
+    expect(first.rows).toEqual([{ ...all.rows[0], providerMessageId }]);
+    expect(first).toMatchObject({ startSeq: 1, endSeq: 1, hasNewer: true });
+    expect(Buffer.byteLength(JSON.stringify(first.rows), "utf8")).toBeGreaterThan(maxBytes);
+    const second = store.fetch("agent", {
+      direction: "after",
+      cursor: { epoch: "e", seq: first.endSeq! },
+      limit: 0,
+      maxBytes,
+    });
+    expect(second.rows).toEqual(tail.rows);
+    expect(second).toMatchObject({ startSeq: 2, endSeq: 2, hasNewer: false });
+  });
 });
 
 describe("projected timeline retention", () => {

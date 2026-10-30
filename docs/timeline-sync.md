@@ -45,7 +45,13 @@ Heartbeat is used for notification routing. It must not be used as a correctness
 
 ## Gap recovery is paged but complete
 
-Catch-up uses projected pages. Their item targets are not byte budgets: whole-turn expansion can produce a large response.
+Root and provider-child history RPCs share a soft 96 KiB budget for each page's UTF-8 JSON
+serialized projected-row array, including row metadata and array delimiters. This is separate from
+the projected-item targets: paging stops at either target when atomic boundaries permit. The
+response envelope and transport protection add overhead, so this is not a hard wire-size cap.
+No wire fields, client capabilities, or cursor semantics change; internal non-RPC reads remain
+unbudgeted unless they explicitly request a byte budget. An item limit of zero disables only the
+item target, not the RPC byte budget.
 
 Page limits are projected-item targets. A tool call lifecycle is one projected item even if it spans many source sequence numbers, and assistant/reasoning chunks are merged before counting. The response carries `seqStart`, `seqEnd`, `sourceSeqRanges`, and `collapsed` so clients can advance sequence cursors without rendering delta rows.
 
@@ -61,10 +67,13 @@ pages. Keep the bounded physical-write deadline with this pacing; otherwise an a
 can hold all later history requests indefinitely. Other sources and control requests remain independent.
 
 Opening or resuming an agent fetches the latest available turns with a soft target of 40
-projected items. Backward pages and prompt-jump windows also include whole turns, including
-all currently available rows of an active run. There is no per-turn cap: a large run can
-exceed the target. Local history mounting uses the same boundaries so revealing older rows
-does not change the collapse state of a turn already displayed.
+projected items, also subject to the history byte budget. Backward pages and prompt-jump windows
+include whole turns, including all currently available rows of an active run and the requested
+prompt-jump target. Whole turns and indivisible source-coverage groups remain atomic: at least
+one complete turn or coverage group is returned even when it exceeds either target, preserving
+progress and full contents. There is no per-turn cap, so a giant turn can still produce a giant
+response; byte budgeting does not solve that case. Local history mounting uses the same
+boundaries so revealing older rows does not change the collapse state of a turn already displayed.
 
 `wholeTurns` is a preference negotiated once at the client fetch boundary. Hosts advertising
 `features.wholeTurnTimeline` receive it; other hosts receive the existing item-based request.
@@ -153,6 +162,11 @@ uses the projected display anchor; live updates advance the source cursor withou
 Clients advertising `projected_subagent_timeline` receive child streams and projected fetches.
 Updated clients require `features.projectedSubagentTimeline` for child history; older hosts show
 an update-host notice for that pane.
+The same soft 96 KiB projected-row budget applies to child tail, backward, and forward pages,
+including forward requests whose default item limit is zero. Continue from the returned cursors
+until `hasNewer` or `hasOlder` is false; byte budgeting never truncates item contents or discards
+rows while retaining their old coverage cursors.
+
 Older clients retain child names/status and receive an upgrade message when opening a child
 conversation. This gate affects only the child transcript; it does not gate the connection,
 main conversation, or current-context forks. A legacy `canonical` root request still receives

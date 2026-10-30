@@ -302,6 +302,7 @@ interface ProjectedTimelinePageOptions {
   direction: TimelineLimitDirection;
   cursorSeq?: number;
   limit?: number;
+  maxBytes?: number;
 }
 
 /** Owns projected state; source events are consumed, never retained. */
@@ -312,6 +313,8 @@ export class TimelineProjection {
   // Disjoint source-coverage spans in display order. A tail starting inside a
   // span must include its first anchor to cover interleaved lifecycle updates.
   private readonly spans: { start: number; endSeq: number }[] = [];
+  // Entries are replaced, never mutated. Keep only sizes, not serialized copies.
+  private readonly rowBytes = new WeakMap<ProjectedTimelineRow, number>();
 
   private readonly sourceRanges: { startSeq: number; endSeq: number; rowIndex: number }[] = [];
 
@@ -423,7 +426,80 @@ export class TimelineProjection {
     }
   }
 
+  private serializedRowBytes(index: number): number {
+    const row = this.rows[index];
+    let bytes = this.rowBytes.get(row);
+    if (bytes === undefined) {
+      bytes = Buffer.byteLength(JSON.stringify(row), "utf8");
+      this.rowBytes.set(row, bytes);
+    }
+    return bytes;
+  }
+
+  private coveredWindowEnd(input: ProjectedTimelinePageOptions, end: number): number {
+    for (;;) {
+      const span = this.spanIndex(end - 1);
+      const coveredEnd = this.spans[span + 1]?.start ?? this.rows.length;
+      end = coveredEnd;
+      if (!input.wholeTurns) return end;
+      while (end < this.rows.length && continuesProjectedTurn(this.rows[end - 1], this.rows[end]))
+        end++;
+      if (end === coveredEnd) return end;
+    }
+  }
+
+  private selectBudgetedBackward(
+    input: ProjectedTimelinePageOptions,
+    end: number,
+    endSeq: number,
+  ): ProjectedTimelinePageSelection {
+    const limit = Math.max(0, Math.floor(input.limit ?? 0));
+    // Anchor the first group at the requested before target, before expanding
+    // right through source coverage and the rest of its turn.
+    let start = this.spans[this.spanIndex(end - 1)].start;
+    if (input.wholeTurns) start = this.wholeTurnWindowStart(start);
+    end = this.coveredWindowEnd(input, end);
+    endSeq = Math.max(endSeq, this.spans[this.spanIndex(end - 1)].endSeq);
+    if (input.wholeTurns)
+      endSeq = end === this.rows.length ? input.bounds.maxSeq : this.rows[end].seqStart - 1;
+    let bytes = 1; // Array brackets plus one comma per row, less the first comma.
+    for (let index = start; index < end; index++) bytes += this.serializedRowBytes(index) + 1;
+    const minStart = limit === 0 ? 0 : Math.max(0, end - limit);
+    groups: while (start > minStart && bytes < input.maxBytes!) {
+      let candidate = start;
+      let candidateBytes = bytes;
+      let groupStart = this.spans[this.spanIndex(start - 1)].start;
+      for (;;) {
+        while (candidate > groupStart) {
+          candidate--;
+          candidateBytes += this.serializedRowBytes(candidate) + 1;
+          // A rejected old turn may be enormous. Stop measuring as soon as it
+          // cannot fit, without scanning or serializing the rest of that turn.
+          if (candidateBytes > input.maxBytes!) break groups;
+        }
+        if (
+          !input.wholeTurns ||
+          candidate === 0 ||
+          !continuesProjectedTurn(this.rows[candidate - 1], this.rows[candidate])
+        )
+          break;
+        groupStart = this.spans[this.spanIndex(candidate - 1)].start;
+      }
+      bytes = candidateBytes;
+      start = candidate;
+    }
+    return {
+      entries: this.rows.slice(start, end),
+      startSeq: this.rows[start].seqStart,
+      endSeq,
+      hasOlder: start > 0,
+      hasNewer: endSeq < input.bounds.maxSeq,
+    };
+  }
+
   private selectTail(input: ProjectedTimelinePageOptions): ProjectedTimelinePageSelection {
+    if (input.maxBytes !== undefined && input.maxBytes > 0)
+      return this.selectBudgetedBackward(input, this.rows.length, input.bounds.maxSeq);
     const limit = Math.max(0, Math.floor(input.limit ?? 0));
     const requestedStart = limit === 0 ? 0 : Math.max(0, this.rows.length - limit);
     const coveredStart = this.spans[this.spanIndex(requestedStart)].start;
@@ -462,11 +538,18 @@ export class TimelineProjection {
     }
     const indexes = new Set<number>();
     const limit = Math.max(0, Math.floor(input.limit ?? 0));
+    let bytes = 1;
     for (let i = low; i < this.sourceRanges.length; i++) {
       const range = this.sourceRanges[i];
       if (range.startSeq > input.bounds.maxSeq) break;
+      if (!indexes.has(range.rowIndex) && input.maxBytes !== undefined && input.maxBytes > 0) {
+        const additionalBytes = this.serializedRowBytes(range.rowIndex) + 1;
+        if (indexes.size > 0 && bytes + additionalBytes > input.maxBytes) break;
+        bytes += additionalBytes;
+      }
       indexes.add(range.rowIndex);
       if (limit > 0 && indexes.size === limit) break;
+      if (input.maxBytes !== undefined && input.maxBytes > 0 && bytes >= input.maxBytes) break;
     }
     const entries = [...indexes].sort((a, b) => a - b).map((index) => this.rows[index]);
     const selected = selectProjectedEntriesAfter({
@@ -494,6 +577,8 @@ export class TimelineProjection {
         if (this.rows[middle].seqStart <= endSeq) low = middle + 1;
         else high = middle;
       }
+      if (low > 0 && input.maxBytes !== undefined && input.maxBytes > 0)
+        return this.selectBudgetedBackward(input, low, endSeq);
       const limit = Math.max(0, Math.floor(input.limit ?? 0));
       const requestedStart = limit === 0 ? 0 : Math.max(0, low - limit);
       const start = input.wholeTurns ? this.wholeTurnWindowStart(requestedStart) : requestedStart;

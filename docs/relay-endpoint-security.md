@@ -40,7 +40,12 @@ wire record     = (u16 BE ciphertextLength || ciphertext)+
 
 The receiver rejects a record whose metadata disagrees between chunks, whose non-final chunks are not full, whose byte total differs from `totalLength`, or that has zero chunks, trailing bytes, reserved flags, or an invalid kind. Partial plaintext never reaches the application. Transport AD is empty, as the Noise spec writes it; framing authenticity comes from the metadata being inside the ciphertext. `packages/relay/src/protected-records.ts` owns this.
 
-Frame kind is preserved on the wire the same way as legacy: text records are base64 WebSocket text, binary records are WebSocket binary when `binaryCiphertext` was negotiated.
+When `binaryCiphertext` is negotiated, the daemon sends all protected records as WebSocket binary,
+including text. The authenticated record `kind` restores the application type, so existing protected
+clients can read these text records without an update. This avoids base64's roughly one-third wire
+expansion on history JSON. Client text sends remain base64; binary sends use WebSocket binary when
+negotiated. Without that negotiation, protected records use base64 WebSocket text. Legacy framing
+is unchanged.
 
 ## Retries and failures
 

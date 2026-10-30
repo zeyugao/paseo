@@ -154,6 +154,7 @@ export class InMemoryAgentTimelineStore {
       cursorSeq: cursor?.seq,
       limit: options?.limit ?? DEFAULT_TIMELINE_FETCH_LIMIT,
       wholeTurns: options?.wholeTurns,
+      maxBytes: options?.maxBytes,
     });
     return {
       epoch: state.epoch,

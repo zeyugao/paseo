@@ -4691,9 +4691,15 @@ export class AgentManager {
       return false;
     }
 
-    // Only update timestamp for live events, not history replay
+    // Only update the timestamp for live activity. History replay and the connection
+    // metadata a resumed provider emits (usage reads, mode/model refreshes, thread
+    // startup) are not activity: stamping them rewrites `updatedAt`, which workspace
+    // `statusEnteredAt` is re-derived from on the next daemon start, so merely loading
+    // a chat would reset its workspace's sidebar timestamp.
     if (!options?.fromHistory) {
-      this.touchUpdatedAt(agent);
+      if (isActivityStreamEvent(event)) {
+        this.touchUpdatedAt(agent);
+      }
       if (this.agentStreamCoalescer.handle(agent.id, event)) {
         this.traceCoalescerBuffered(agent, event, eventTurnId);
         return false;
@@ -6137,6 +6143,19 @@ export class AgentManager {
       throw new Error(`Unknown agent '${agent.id}'`);
     }
     return agent;
+  }
+}
+
+function isActivityStreamEvent(event: AgentStreamEvent): boolean {
+  switch (event.type) {
+    case "thread_started":
+    case "usage_updated":
+    case "mode_changed":
+    case "model_changed":
+    case "thinking_option_changed":
+      return false;
+    default:
+      return true;
   }
 }
 

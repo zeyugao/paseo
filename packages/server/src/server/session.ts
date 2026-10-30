@@ -299,6 +299,9 @@ type ProviderSubagentManagerEvent = Extract<
 const LEGACY_PROVIDER_IDS = new Set(["claude", "codex", "opencode"]);
 const MIN_VERSION_ALL_PROVIDERS = "0.1.45";
 const MIN_VERSION_EXPLICIT_WORKSPACE_RECOVERY = "0.1.105";
+
+// Soft projected-row JSON budget; response envelopes and transport protection add overhead.
+const TIMELINE_HISTORY_PAGE_MAX_BYTES = 96 * 1024;
 function errorToFriendlyMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -8208,6 +8211,7 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
         direction,
         cursor,
         limit: msg.limit,
+        maxBytes: TIMELINE_HISTORY_PAGE_MAX_BYTES,
         wholeTurns: msg.wholeTurns,
       });
       const selectedTimeline = {
@@ -8479,6 +8483,7 @@ assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThis
           direction,
           cursor: msg.cursor,
           limit: msg.limit ?? (direction === "after" ? 0 : 200),
+          maxBytes: TIMELINE_HISTORY_PAGE_MAX_BYTES,
         },
       );
       const rows = timeline.rows.filter((row) => this.supportsTimelineItem(row.item, source));

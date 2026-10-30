@@ -23,9 +23,16 @@ export interface AgentTimelineFetchOptions {
   /**
    * Number of projected items to return.
    * - undefined: store default
-   * - 0: all rows in the selected window
+   * - 0: disable the projected-item count limit
    */
   limit?: number;
+  /**
+   * Soft UTF-8 JSON byte target for the projected row array, including metadata
+   * and delimiters. Omitted or nonpositive disables the byte target. One atomic
+   * source-coverage group (or complete turn) may exceed it to preserve progress.
+   * A zero count limit does not disable this target.
+   */
+  maxBytes?: number;
 }
 
 export interface AgentTimelineWindow {

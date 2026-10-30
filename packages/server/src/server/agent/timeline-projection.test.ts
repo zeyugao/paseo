@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 
 import type { AgentTimelineRow } from "./agent-manager.js";
 import {
+  TimelineProjection,
   projectTimelineRows,
   selectTimelineWindowByProjectedLimit,
 } from "./timeline-projection.js";
@@ -924,5 +925,232 @@ describe("selectProjectedTimelinePage", () => {
 
     expect(page.entries.some((entry) => entry.item.type === "tool_call")).toBe(true);
     expect(page.endSeq).toBe(501);
+  });
+});
+
+describe("projected timeline byte budgets", () => {
+  const timestamp = "2026-02-13T00:00:00.000Z";
+  const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+  const prompt = (seq: number, text = "prompt"): AgentTimelineRow => ({
+    seq,
+    timestamp,
+    item: { type: "user_message", text },
+  });
+
+  test("counts UTF-8, JSON escapes, metadata and exact array delimiters in every direction", () => {
+    const rows = Array.from({ length: 4 }, (_, index) => ({
+      ...prompt(index + 1, '\\"\n\u0000中文🙂'),
+      turnId: '回合\\"',
+      providerMessageId: "消息\n🙂",
+    }));
+    const projection = new TimelineProjection(rows);
+    const retained = projection.getRows();
+    const maxBytes = bytes(retained.slice(0, 2));
+    expect(maxBytes).toBeGreaterThan(JSON.stringify(retained.slice(0, 2)).length);
+    const bounds = { minSeq: 1, maxSeq: 4 };
+    for (const [direction, cursorSeq, anchors, startSeq, endSeq] of [
+      ["tail", undefined, [3, 4], 3, 4],
+      ["before", 3, [1, 2], 1, 2],
+      ["after", 0, [1, 2], 1, 2],
+    ] as const) {
+      const page = projection.selectPage({ bounds, direction, cursorSeq, limit: 0, maxBytes });
+      expect(page.entries.map((entry) => entry.seqStart)).toEqual(anchors);
+      expect(page).toMatchObject({ startSeq, endSeq });
+      expect(bytes(page.entries)).toBe(maxBytes);
+      const smaller = projection.selectPage({
+        bounds,
+        direction,
+        cursorSeq,
+        limit: 0,
+        maxBytes: maxBytes - 1,
+      });
+      expect(smaller.entries.map((entry) => entry.seqStart)).toEqual(
+        direction === "after" ? [1] : [anchors[1]],
+      );
+      expect(bytes(smaller.entries)).toBeLessThan(maxBytes);
+    }
+    expect(projection.selectPage({ bounds, direction: "tail", limit: 0 }).entries).toEqual(
+      retained,
+    );
+    expect(
+      projection.selectPage({ bounds, direction: "tail", limit: 0, maxBytes: 0 }).entries,
+    ).toEqual(retained);
+    expect(
+      projection.selectPage({ bounds, direction: "tail", limit: 1, maxBytes }).entries,
+    ).toEqual(retained.slice(-1));
+  });
+
+  test("reconstructs interleaved source ranges backward and incrementally forward", () => {
+    const tool = (
+      seq: number,
+      callId: string,
+      status: "running" | "completed",
+    ): AgentTimelineRow => ({
+      seq,
+      timestamp,
+      item: {
+        type: "tool_call",
+        callId,
+        name: "shell",
+        status,
+        error: null,
+        detail: { type: "plain_text", label: callId, text: "完整🙂" },
+      },
+    });
+    const projection = new TimelineProjection([
+      prompt(1),
+      tool(2, "first", "running"),
+      tool(3, "second", "running"),
+      { seq: 4, timestamp, item: { type: "assistant_message", text: "working" } },
+      tool(5, "first", "completed"),
+      prompt(6),
+      tool(7, "second", "completed"),
+      prompt(8),
+    ]);
+    const bounds = { minSeq: 1, maxSeq: 8 };
+    const tail = projection.selectPage({ bounds, direction: "tail", limit: 0, maxBytes: 1 });
+    expect(tail.entries.map((entry) => entry.seqStart)).toEqual([8]);
+    expect(tail).toMatchObject({ startSeq: 8, endSeq: 8, hasOlder: true, hasNewer: false });
+    const middle = projection.selectPage({
+      bounds,
+      direction: "before",
+      cursorSeq: tail.startSeq!,
+      limit: 0,
+      maxBytes: 1,
+    });
+    expect(middle.entries.map((entry) => entry.seqStart)).toEqual([2, 3, 4, 6]);
+    expect(middle).toMatchObject({ startSeq: 2, endSeq: 7, hasOlder: true, hasNewer: true });
+    expect(middle.entries[0]?.sourceSeqRanges).toEqual([
+      { startSeq: 2, endSeq: 2 },
+      { startSeq: 5, endSeq: 5 },
+    ]);
+    expect(bytes(middle.entries)).toBeGreaterThan(1);
+    const oldest = projection.selectPage({
+      bounds,
+      direction: "before",
+      cursorSeq: middle.startSeq!,
+      limit: 0,
+      maxBytes: 1,
+    });
+    expect(oldest).toMatchObject({ startSeq: 1, endSeq: 1, hasOlder: false });
+    expect([...oldest.entries, ...middle.entries, ...tail.entries]).toEqual(projection.getRows());
+    const wholeSpan = projection.selectPage({
+      bounds,
+      direction: "before",
+      cursorSeq: 8,
+      limit: 0,
+      maxBytes: 1,
+      wholeTurns: true,
+    });
+    expect(wholeSpan.entries.map((entry) => entry.seqStart)).toEqual([1, 2, 3, 4, 6]);
+    expect(wholeSpan).toMatchObject({ startSeq: 1, endSeq: 7, hasOlder: false, hasNewer: true });
+    // A jump inside an interleaved span must preserve all of that span too.
+    expect(
+      projection.selectPage({
+        bounds,
+        direction: "before",
+        cursorSeq: 5,
+        limit: 0,
+        maxBytes: 1,
+      }),
+    ).toEqual(middle);
+    const reconstructed = new Map<number, (typeof tail.entries)[number]>();
+    const anchors: number[][] = [];
+    for (let cursorSeq = 0; cursorSeq < 8; ) {
+      const page = projection.selectPage({
+        bounds,
+        direction: "after",
+        cursorSeq,
+        limit: 0,
+        maxBytes: 1,
+        wholeTurns: true,
+      });
+      anchors.push(page.entries.map((entry) => entry.seqStart));
+      expect(page.startSeq).toBe(cursorSeq + 1);
+      expect(page.endSeq).toBe(cursorSeq + 1);
+      expect(page.hasNewer).toBe(cursorSeq + 1 < 8);
+      for (const entry of page.entries) reconstructed.set(entry.seqStart, entry);
+      cursorSeq = page.endSeq!;
+    }
+    expect(anchors).toEqual([[1], [2], [3], [4], [2], [6], [3], [8]]);
+    expect([...reconstructed.values()].sort((a, b) => a.seqStart - b.seqStart)).toEqual(
+      projection.getRows(),
+    );
+    expect(
+      projection.selectPage({
+        bounds,
+        direction: "after",
+        cursorSeq: 8,
+        limit: 0,
+        maxBytes: 1,
+      }),
+    ).toMatchObject({ entries: [], startSeq: null, endSeq: null, hasNewer: false });
+  });
+
+  test("keeps whole tail and backward turns and the before target during right expansion", () => {
+    const rows: AgentTimelineRow[] = Array.from({ length: 22 }, (_, index) => {
+      const seq = index + 1;
+      let turnId = "latest";
+      if (seq <= 2) turnId = "old";
+      else if (seq <= 20) turnId = "target";
+      return {
+        seq,
+        timestamp,
+        turnId,
+        item: [1, 3, 21].includes(seq)
+          ? { type: "user_message", text: `prompt-${seq}` }
+          : { type: "assistant_message", messageId: String(seq), text: `answer-${seq}` },
+      };
+    });
+    const projection = new TimelineProjection(rows);
+    const bounds = { minSeq: 1, maxSeq: 22 };
+    const options = { bounds, limit: 0, maxBytes: 1, wholeTurns: true };
+    const tail = projection.selectPage({ ...options, direction: "tail" });
+    expect(tail.entries.map((entry) => entry.seqStart)).toEqual([21, 22]);
+    const target = projection.selectPage({ ...options, direction: "before", cursorSeq: 4 });
+    expect(target.entries.map((entry) => entry.seqStart)).toEqual(
+      Array.from({ length: 18 }, (_, index) => index + 3),
+    );
+    expect(target).toMatchObject({ startSeq: 3, endSeq: 20, hasOlder: true, hasNewer: true });
+    expect(
+      projection.selectPage({ ...options, direction: "before", cursorSeq: tail.startSeq! }),
+    ).toEqual(target);
+    const oldest = projection.selectPage({ ...options, direction: "before", cursorSeq: 3 });
+    expect(oldest.entries.map((entry) => entry.seqStart)).toEqual([1, 2]);
+    expect([...oldest.entries, ...target.entries, ...tail.entries]).toEqual(projection.getRows());
+    expect(projection.selectPage({ ...options, direction: "after", cursorSeq: 3 })).toMatchObject({
+      startSeq: 4,
+      endSeq: 4,
+      entries: [projection.getRows()[3]],
+    });
+  });
+
+  test("reapplies the byte budget after a retained assistant grows", () => {
+    const projection = new TimelineProjection([
+      { ...prompt(1, "old prompt"), turnId: "old" },
+      { seq: 2, timestamp, turnId: "old", item: { type: "assistant_message", text: "old answer" } },
+      { ...prompt(3, "new prompt"), turnId: "latest" },
+      { seq: 4, timestamp, turnId: "latest", item: { type: "assistant_message", text: "a" } },
+    ]);
+    const retained = projection.getRows();
+    const maxBytes = bytes(retained);
+    const options = { direction: "tail" as const, limit: 0, maxBytes, wholeTurns: true };
+    expect(projection.selectPage({ ...options, bounds: { minSeq: 1, maxSeq: 4 } }).entries).toEqual(
+      retained,
+    );
+
+    projection.append({
+      seq: 5,
+      timestamp,
+      turnId: "latest",
+      item: { type: "assistant_message", text: "中文🙂".repeat(100) },
+    });
+    const grown = projection.selectPage({ ...options, bounds: { minSeq: 1, maxSeq: 5 } });
+    expect(grown).toMatchObject({ startSeq: 3, endSeq: 5, hasOlder: true, hasNewer: false });
+    expect(grown.entries.map((entry) => entry.item)).toEqual([
+      { type: "user_message", text: "new prompt" },
+      { type: "assistant_message", text: `a${"中文🙂".repeat(100)}` },
+    ]);
+    expect(bytes(grown.entries)).toBeGreaterThan(maxBytes);
   });
 });

@@ -679,6 +679,226 @@ describe("timeline request source scheduling", () => {
   });
 });
 
+describe("timeline RPC byte budgets", () => {
+  const rows: AgentTimelineRow[] = Array.from({ length: 12 }, (_, index) => ({
+    seq: index + 1,
+    timestamp: "2026-05-02T00:00:00.000Z",
+    item: {
+      type: index % 2 === 0 ? "user_message" : "assistant_message",
+      text: `${index}:` + "界".repeat(8 * 1024),
+    },
+  }));
+
+  test.each([false, true])(
+    "root backward pages preserve every row with wholeTurns=%s",
+    async (wholeTurns) => {
+      const messages: SessionOutboundMessage[] = [];
+      const session = createSessionForWireCompatTest({ rows, messages });
+      const collected: unknown[] = [];
+      let cursor: { epoch: string; seq: number } | undefined;
+      let pages = 0;
+      try {
+        for (;;) {
+          await session.handleMessage({
+            type: "fetch_agent_timeline_request",
+            requestId: `backward-${pages}`,
+            agentId: "agent-1",
+            direction: cursor ? "before" : "tail",
+            cursor,
+            limit: 0,
+            wholeTurns,
+          });
+          const page = FetchAgentTimelineResponseMessageSchema.parse(messages.at(-1)).payload;
+          expect(page.error).toBeNull();
+          expect(page.entries.length).toBeGreaterThan(0);
+          expect(page.entries.length).toBeLessThanOrEqual(wholeTurns ? 2 : 3);
+          expect(page.hasNewer).toBe(cursor !== undefined);
+          if (wholeTurns) {
+            expect(page.entries.map((entry) => entry.item.type)).toEqual([
+              "user_message",
+              "assistant_message",
+            ]);
+          }
+          for (const entry of page.entries) {
+            expect(entry.sourceSeqRanges).toEqual([
+              { startSeq: entry.seqStart, endSeq: entry.seqEnd },
+            ]);
+          }
+          collected.unshift(...page.entries.map((entry) => entry.item));
+          expect(page.startCursor).not.toBeNull();
+          if (cursor) expect(page.startCursor!.seq).toBeLessThan(cursor.seq);
+          cursor = page.startCursor!;
+          pages += 1;
+          expect(pages).toBeLessThanOrEqual(rows.length);
+          if (!page.hasOlder) break;
+        }
+        expect(pages).toBeGreaterThan(1);
+        expect(collected).toEqual(rows.map((row) => row.item));
+        expect(cursor?.seq).toBe(1);
+      } finally {
+        await session.cleanup();
+      }
+    },
+  );
+
+  test.each(["root", "child-default", "child-zero"] as const)(
+    "%s forward catch-up remains byte-budgeted until every row is available",
+    async (kind) => {
+      const messages: SessionOutboundMessage[] = [];
+      const session = createSessionForWireCompatTest({
+        rows,
+        messages,
+        clientCapabilities: { [CLIENT_CAPS.projectedSubagentTimeline]: true },
+      });
+      const collected: unknown[] = [];
+      let cursor = { epoch: kind === "root" ? "epoch-1" : "subagent-epoch-1", seq: 0 };
+      let pages = 0;
+      try {
+        for (;;) {
+          if (kind === "root") {
+            await session.handleMessage({
+              type: "fetch_agent_timeline_request",
+              requestId: `forward-${pages}`,
+              agentId: "agent-1",
+              direction: "after",
+              cursor,
+              limit: 0,
+              wholeTurns: true,
+            });
+          } else {
+            await session.handleMessage({
+              type: "agent.provider_subagents.timeline.get.request",
+              requestId: `forward-${pages}`,
+              parentAgentId: "agent-1",
+              subagentId: "subagent-1",
+              direction: "after",
+              cursor,
+              ...(kind === "child-zero" ? { limit: 0 } : {}),
+            });
+          }
+          const response = messages.at(-1);
+          const page =
+            kind === "root"
+              ? FetchAgentTimelineResponseMessageSchema.parse(response).payload
+              : ProviderSubagentTimelineResponseMessageSchema.parse(response).payload;
+          const entries = "entries" in page ? page.entries : page.rows;
+          expect(page.error).toBeNull();
+          expect(page.reset).toBe(false);
+          expect(page.staleCursor).toBe(false);
+          expect(page.gap).toBe(false);
+          expect(entries.length).toBeGreaterThan(0);
+          expect(entries.length).toBeLessThanOrEqual(3);
+          expect(page.startCursor?.seq).toBe(cursor.seq + 1);
+          expect(page.endCursor?.seq).toBe(cursor.seq + entries.length);
+          collected.push(...entries.map((entry) => entry.item));
+          expect(page.endCursor).not.toBeNull();
+          cursor = page.endCursor!;
+          pages += 1;
+          expect(pages).toBeLessThanOrEqual(rows.length);
+          if (!page.hasNewer) break;
+        }
+        expect(pages).toBeGreaterThan(1);
+        expect(cursor.seq).toBe(rows.length);
+        expect(collected).toEqual(rows.map((row) => row.item));
+      } finally {
+        await session.cleanup();
+      }
+    },
+  );
+
+  test("child tail and backward pages preserve all rows", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const session = createSessionForWireCompatTest({
+      rows,
+      messages,
+      clientCapabilities: { [CLIENT_CAPS.projectedSubagentTimeline]: true },
+    });
+    const collected: unknown[] = [];
+    let cursor: { epoch: string; seq: number } | undefined;
+    let pages = 0;
+    try {
+      for (;;) {
+        await session.handleMessage({
+          type: "agent.provider_subagents.timeline.get.request",
+          requestId: `child-backward-${pages}`,
+          parentAgentId: "agent-1",
+          subagentId: "subagent-1",
+          direction: cursor ? "before" : "tail",
+          cursor,
+          limit: 0,
+        });
+        const page = ProviderSubagentTimelineResponseMessageSchema.parse(messages.at(-1)).payload;
+        expect(page.error).toBeNull();
+        expect(page.rows.length).toBeGreaterThan(0);
+        expect(page.rows.length).toBeLessThanOrEqual(3);
+        collected.unshift(...page.rows.map((row) => row.item));
+        expect(page.startCursor).not.toBeNull();
+        if (cursor) expect(page.startCursor!.seq).toBeLessThan(cursor.seq);
+        cursor = page.startCursor!;
+        pages += 1;
+        expect(pages).toBeLessThanOrEqual(rows.length);
+        if (!page.hasOlder) break;
+      }
+      expect(pages).toBeGreaterThan(1);
+      expect(cursor?.seq).toBe(1);
+      expect(collected).toEqual(rows.map((row) => row.item));
+    } finally {
+      await session.cleanup();
+    }
+  });
+
+  test("a whole turn larger than the budget stays intact and older history remains reachable", async () => {
+    const giantRows: AgentTimelineRow[] = rows.slice(0, 4).map((row, index) => ({
+      seq: row.seq,
+      timestamp: row.timestamp,
+      item: {
+        type: index % 2 === 0 ? "user_message" : "assistant_message",
+        text: `${index}:` + "界".repeat(20 * 1024),
+      },
+    }));
+    const messages: SessionOutboundMessage[] = [];
+    const session = createSessionForWireCompatTest({ rows: giantRows, messages });
+    try {
+      await session.handleMessage({
+        type: "fetch_agent_timeline_request",
+        requestId: "giant-tail",
+        agentId: "agent-1",
+        direction: "tail",
+        limit: 1,
+        wholeTurns: true,
+      });
+      const tail = FetchAgentTimelineResponseMessageSchema.parse(messages.at(-1)).payload;
+      expect(tail.error).toBeNull();
+      expect(tail.entries.map((entry) => entry.item)).toEqual(
+        giantRows.slice(2).map((row) => row.item),
+      );
+      expect(Buffer.byteLength(JSON.stringify(tail.entries), "utf8")).toBeGreaterThan(96 * 1024);
+      expect(tail.startCursor?.seq).toBe(3);
+      expect(tail.endCursor?.seq).toBe(4);
+      expect(tail.hasOlder).toBe(true);
+      await session.handleMessage({
+        type: "fetch_agent_timeline_request",
+        requestId: "giant-before",
+        agentId: "agent-1",
+        direction: "before",
+        cursor: tail.startCursor!,
+        limit: 1,
+        wholeTurns: true,
+      });
+      const older = FetchAgentTimelineResponseMessageSchema.parse(messages.at(-1)).payload;
+      expect(older.error).toBeNull();
+      expect(older.entries.map((entry) => entry.item)).toEqual(
+        giantRows.slice(0, 2).map((row) => row.item),
+      );
+      expect(older.startCursor?.seq).toBe(1);
+      expect(older.endCursor?.seq).toBe(2);
+      expect(older.hasOlder).toBe(false);
+    } finally {
+      await session.cleanup();
+    }
+  });
+});
+
 describe("wire compatibility", () => {
   test("sends project updates only to clients that declare support", async () => {
     const project = createPersistedProjectRecord({

@@ -574,6 +574,9 @@ describe("relay external socket reconnect behavior", () => {
       let sourceSignal: AbortSignal | undefined;
       let completed = false;
       vi.useFakeTimers();
+      const timelineSendTimeoutMs = Number(
+        process.env.PASEO_TIMELINE_RESPONSE_SEND_TIMEOUT_MS ?? "120000",
+      );
       const sending = session.delivery.request(
         socket,
         { type: "fetch_agent_timeline_request", agentId: "agent-1", requestId: "timeline-timeout" },
@@ -586,11 +589,14 @@ describe("relay external socket reconnect behavior", () => {
       await Promise.resolve();
       await Promise.resolve();
       expect(completed).toBe(false);
-      await vi.advanceTimersByTimeAsync(20_000);
-      await sending;
+      await vi.advanceTimersByTimeAsync(timelineSendTimeoutMs - 1);
+      expect(completed).toBe(false);
+      expect(socket.readyState).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
       expect(completed).toBe(true);
-      expect(sourceSignal?.aborted).toBe(true);
       expect(socket.readyState).toBe(3);
+      await sending;
+      expect(sourceSignal?.aborted).toBe(true);
       await session.delivery.request(
         sibling,
         { type: "fetch_agent_timeline_request", agentId: "agent-1", requestId: "timeline-paced" },

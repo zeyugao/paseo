@@ -29,12 +29,11 @@ import { SidebarCloseButton } from "@/components/headers/sidebar-close-button";
 import { TopBarSafeArea } from "@/components/headers/top-bar-safe-area";
 import {
   resolveSidebarFooterLayout,
+  resolveSidebarFooterBarLayout,
   resolveSidebarFooterKeyboardSpacing,
   SIDEBAR_FOOTER_GROUP_GAP,
   SIDEBAR_FOOTER_MIN_BUTTON_WIDTH,
-  SIDEBAR_FOOTER_HORIZONTAL_PADDING,
   SIDEBAR_FOOTER_ROW_PADDING,
-  SIDEBAR_FOOTER_MIN_CONTENT_WIDTH,
 } from "@/components/sidebar-footer-layout";
 import { ContentBandGeometryProbe } from "@/components/headers/content-band-geometry";
 import {
@@ -447,6 +446,7 @@ interface SidebarFooterProps {
   onMinimumWidthChange?: (width: number) => void;
   onBarHeightChange?: (height: number) => void;
   edgeInsets?: ContentBandInsets;
+  requiredMinimumWidth?: number;
   available?: boolean;
 }
 
@@ -476,7 +476,12 @@ function SidebarFooterActions({
   buttonWidth,
 }: Omit<
   SidebarFooterProps,
-  "onBeforeNavigate" | "onMinimumWidthChange" | "onBarHeightChange" | "edgeInsets" | "available"
+  | "onBeforeNavigate"
+  | "onMinimumWidthChange"
+  | "onBarHeightChange"
+  | "edgeInsets"
+  | "requiredMinimumWidth"
+  | "available"
 > & {
   buttonWidth?: number;
 }) {
@@ -547,6 +552,7 @@ function ModernSidebarFooterLine({
   onMinimumWidthChange,
   onBarHeightChange,
   edgeInsets,
+  requiredMinimumWidth,
   available = true,
   ...props
 }: Omit<SidebarFooterProps, "onBeforeNavigate">) {
@@ -575,8 +581,8 @@ function ModernSidebarFooterLine({
     [rowSize.width, rowSize.height, edgeInsets],
   );
   useEffect(() => {
-    if (available) onMinimumWidthChange?.(layout.minimumWidth);
-  }, [available, layout.minimumWidth, onMinimumWidthChange]);
+    onMinimumWidthChange?.(Math.max(layout.minimumWidth, requiredMinimumWidth ?? 0));
+  }, [layout.minimumWidth, requiredMinimumWidth, onMinimumWidthChange]);
 
   return (
     <View
@@ -653,36 +659,17 @@ function SidebarFooterRows({ onBeforeNavigate }: { onBeforeNavigate?: () => void
 function useSidebarFooterBar() {
   const [extent, setExtent] = useState(0);
   const [geometry, setGeometry] = useState<BottomBarGeometry | null>(null);
-  const placement = useMemo(
-    () =>
-      geometry?.horizontal
-        ? resolveContentBandPlacement({
-            width: geometry.bounds.width,
-            height: geometry.bar.height,
-            ...geometry.horizontal,
-            minimumInsets: {
-              left: SIDEBAR_FOOTER_HORIZONTAL_PADDING,
-              right: SIDEBAR_FOOTER_HORIZONTAL_PADDING,
-            },
-            minimumContentWidth: SIDEBAR_FOOTER_MIN_CONTENT_WIDTH,
-            direction: "up",
-          })
-        : null,
-    [geometry],
+  const insets = useSafeAreaInsets();
+  const layout = useMemo(
+    () => resolveSidebarFooterBarLayout({ geometry, safeAreaBottom: insets.bottom }),
+    [geometry, insets.bottom],
   );
-  const edgeInsets = placement?.kind === "placed" ? placement.insets : undefined;
-  const bottomPadding = geometry
-    ? Math.max(0, geometry.bounds.height - geometry.bar.y - geometry.bar.height) -
-      (placement?.kind === "placed" ? placement.offsetY : 0)
-    : 0;
   const probe =
     supportsModernWindowLayout && extent > 0 ? (
       <BottomBarGeometryProbe adaptHorizontalEdges extent={extent} onGeometryChange={setGeometry} />
     ) : null;
   return {
-    edgeInsets,
-    bottomPadding,
-    available: placement?.kind !== "unavailable",
+    ...layout,
     probe,
     onBarHeightChange: supportsModernWindowLayout ? setExtent : undefined,
   };
@@ -1117,6 +1104,7 @@ function DesktopSidebar({
 
         <SidebarFooter
           edgeInsets={footerBar.edgeInsets}
+          requiredMinimumWidth={footerBar.requiredMinimumWidth}
           onMinimumWidthChange={
             supportsModernWindowLayout ? handleFooterMinimumWidthChange : undefined
           }

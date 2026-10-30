@@ -996,7 +996,10 @@ function DesktopSidebar({
   const desktopSidebarStyle = useMemo(
     () => [
       staticStyles.desktopSidebar,
-      !active && staticStyles.desktopSidebarHidden,
+      !active &&
+        (supportsModernWindowLayout
+          ? staticStyles.desktopSidebarRetainedHidden
+          : staticStyles.desktopSidebarHidden),
       resizeAnimatedStyle,
     ],
     [active, resizeAnimatedStyle],
@@ -1159,6 +1162,15 @@ const staticStyles = RNStyleSheet.create({
   },
   desktopSidebarHidden: {
     display: "none",
+  },
+  // Native bar guides must resolve corners before the retained sidebar is opened.
+  // Keep its real width and window position, but remove it from the content row.
+  desktopSidebarRetainedHidden: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    left: 0,
+    opacity: 0,
   },
 });
 

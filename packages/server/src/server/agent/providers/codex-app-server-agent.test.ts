@@ -2458,7 +2458,7 @@ describe("Codex app-server provider", () => {
             },
           },
         },
-        excludeTurns: false,
+        excludeTurns: true,
         persistExtendedHistory: true,
       },
     ]);

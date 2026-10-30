@@ -64,7 +64,10 @@ Initialization timeouts guard lack of catch-up progress, not the full multi-page
 Pace root and provider-child history together per source, before loading or projecting the next page.
 Waiting only after each response starts sending lets a reconnect burst fill the socket with large
 pages. Keep the bounded physical-write deadline with this pacing; otherwise an abandoned socket
-can hold all later history requests indefinitely. Other sources and control requests remain independent.
+can hold all later history requests indefinitely. The default is 120 seconds;
+`PASEO_TIMELINE_RESPONSE_SEND_TIMEOUT_MS` overrides it at daemon startup. Do not reset the deadline
+from `bufferedAmount` or `bytesWritten`: neither measures partial-frame delivery to the peer. Other
+sources and control requests remain independent.
 
 Opening or resuming an agent fetches the latest available turns with a soft target of 40
 projected items, also subject to the history byte budget. Backward pages and prompt-jump windows
@@ -159,14 +162,14 @@ Child transcripts use the same projected-page reconciliation as the main convers
 retains rendered items and sequence cursors, never a second cache of source events. Pagination
 uses the projected display anchor; live updates advance the source cursor without moving tools.
 
-Clients advertising `projected_subagent_timeline` receive child streams and projected fetches.
-Updated clients require `features.projectedSubagentTimeline` for child history; older hosts show
-an update-host notice for that pane.
 The same soft 96 KiB projected-row budget applies to child tail, backward, and forward pages,
 including forward requests whose default item limit is zero. Continue from the returned cursors
 until `hasNewer` or `hasOlder` is false; byte budgeting never truncates item contents or discards
 rows while retaining their old coverage cursors.
 
+Clients advertising `projected_subagent_timeline` receive child streams and projected fetches.
+Updated clients require `features.projectedSubagentTimeline` for child history; older hosts show
+an update-host notice for that pane.
 Older clients retain child names/status and receive an upgrade message when opening a child
 conversation. This gate affects only the child transcript; it does not gate the connection,
 main conversation, or current-context forks. A legacy `canonical` root request still receives

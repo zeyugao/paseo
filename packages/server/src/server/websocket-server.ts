@@ -133,7 +133,16 @@ import {
 } from "./websocket/physical-socket.js";
 
 const WS_CLOSE_DAEMON_AUTH_FAILED = 4401;
-const TIMELINE_RESPONSE_SEND_TIMEOUT_MS = 20_000;
+const configuredTimelineResponseSendTimeoutMs = Number(
+  process.env.PASEO_TIMELINE_RESPONSE_SEND_TIMEOUT_MS,
+);
+const hasValidTimelineResponseSendTimeoutMs =
+  Number.isSafeInteger(configuredTimelineResponseSendTimeoutMs) &&
+  configuredTimelineResponseSendTimeoutMs > 0 &&
+  configuredTimelineResponseSendTimeoutMs <= 2_147_483_647;
+const TIMELINE_RESPONSE_SEND_TIMEOUT_MS = hasValidTimelineResponseSendTimeoutMs
+  ? configuredTimelineResponseSendTimeoutMs
+  : 120_000;
 
 export interface ExternalSocketMetadata {
   transport: "relay" | "hub";

@@ -16,6 +16,7 @@ import type {
   AgentResumeSessionOptions,
   AgentSession,
   AgentSessionConfig,
+  AgentStreamEvent,
 } from "./agent-sdk-types.js";
 import { createTestAgentClient, createTestAgentClients } from "../test-utils/fake-agent-client.js";
 import { attachAgentStoragePersistence } from "../persistence-hooks.js";
@@ -24,13 +25,52 @@ import {
   FileBackedWorkspaceRegistry,
 } from "../workspace-registry.js";
 
-function createPurposeCapturingClient(
-  resumeOptions: Array<AgentResumeSessionOptions | undefined>,
-): AgentClient {
+/**
+ * Providers emit connection metadata (`usage_updated` from OMP's initial usage read,
+ * `thread_started`, mode/model refreshes) as soon as the resumed session is subscribed.
+ * None of it is user or agent activity, so loading a chat must not move `updatedAt`.
+ */
+function createMetadataOnSubscribeClient(): AgentClient {
   const baseClient = createTestAgentClients().codex;
   if (!baseClient) {
     throw new Error("expected Codex test client");
   }
+  const emitMetadataOnSubscribe = (session: AgentSession): AgentSession =>
+    new Proxy(session, {
+      get(target, property) {
+        if (property === "subscribe") {
+          return (callback: (event: AgentStreamEvent) => void) => {
+            const unsubscribe = target.subscribe(callback);
+            callback({
+              type: "usage_updated",
+              provider: target.provider,
+              usage: { contextWindowUsedTokens: 1024, contextWindowMaxTokens: 200_000 },
+            });
+            return unsubscribe;
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  return {
+    provider: baseClient.provider,
+    capabilities: baseClient.capabilities,
+    createSession: async (config, launchContext) =>
+      emitMetadataOnSubscribe(await baseClient.createSession(config, launchContext)),
+    resumeSession: async (handle, overrides, launchContext, options) =>
+      emitMetadataOnSubscribe(
+        await baseClient.resumeSession(handle, overrides, launchContext, options),
+      ),
+    fetchCatalog: (options) => baseClient.fetchCatalog(options),
+    isAvailable: async () => await baseClient.isAvailable(),
+  };
+}
+
+function createPurposeCapturingClient(
+  resumeOptions: Array<AgentResumeSessionOptions | undefined>,
+): AgentClient {
+  const baseClient = createTestAgentClients().codex;
   return {
     provider: baseClient.provider,
     capabilities: baseClient.capabilities,
@@ -780,6 +820,48 @@ test("resuming a stored agent keeps its unread flag and its last-activity time",
     expect(resumed?.lastActivityAt).toBe(markedUnread);
     expect(manager.getAgent(agentId)?.attention.requiresAttention).toBe(true);
     expect(manager.getAgent(agentId)?.updatedAt.toISOString()).toBe(markedUnread);
+  } finally {
+    await manager.closeAgent(agentId).catch(() => undefined);
+    await manager.flush().catch(() => undefined);
+    await storage.flush().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("connection metadata from a resumed provider does not move the last-activity time", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-loading-metadata-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(path.join(root, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: createMetadataOnSubscribeClient() },
+    registry: storage,
+    logger,
+  });
+
+  const agentId = "00000000-0000-4000-8000-000000000402";
+  const lastActive = "2026-01-02T03:04:05.000Z";
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: root }, agentId, {});
+    await manager.closeAgent(agent.id);
+    await manager.flush();
+    await storage.flush();
+
+    const stored = await storage.get(agentId);
+    if (!stored) {
+      throw new Error("expected a stored agent");
+    }
+    await storage.upsert({ ...stored, updatedAt: lastActive, lastActivityAt: lastActive });
+
+    await ensureAgentLoaded(agentId, { agentManager: manager, agentStorage: storage, logger });
+    await manager.flush();
+    await storage.flush();
+
+    // OMP reads context usage as soon as a resumed session is subscribed. The resulting
+    // `usage_updated` event is not activity; stamping it rewrites the workspace timestamp.
+    const resumed = await storage.get(agentId);
+    expect(resumed?.updatedAt).toBe(lastActive);
+    expect(manager.getAgent(agentId)?.updatedAt.toISOString()).toBe(lastActive);
   } finally {
     await manager.closeAgent(agentId).catch(() => undefined);
     await manager.flush().catch(() => undefined);

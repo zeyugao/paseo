@@ -292,9 +292,12 @@ notification. Opening the workspace clears that attention through the normal foc
 Attention is set by the agent finishing or failing and cleared by the client's
 `workspace.clear_attention`, which fires when the user reads the chat. Loading an agent's runtime is
 neither, so resuming carries the stored attention and the stored last-activity time through
-untouched. Forging either makes a background resume look like the user read a workspace and like the
-agent worked in it just now, which rewrites the sidebar timestamp permanently — persisted
-`updatedAt` is what workspace `statusEnteredAt` is re-derived from on the next daemon start.
+untouched. Provider connection metadata is not activity either: OMP reads context usage the moment
+a resumed session is subscribed, and providers emit thread startup and mode/model refreshes, all of
+which arrive on the live event stream. Forging either makes a background resume look like the user
+read a workspace and like the agent worked in it just now, which rewrites the sidebar timestamp
+permanently — persisted `updatedAt` is what workspace `statusEnteredAt` is re-derived from on the
+next daemon start.
 
 ## The subagents track
 

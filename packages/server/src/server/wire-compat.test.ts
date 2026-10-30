@@ -455,7 +455,16 @@ describe("timeline request source scheduling", () => {
         response.type === "fetch_agent_timeline_response"
           ? response.payload.entries
           : response.payload.rows;
-      expect(entries).toMatchObject([{ item: { type: "assistant_message", text } }]);
+      // Upstream bounds every timeline item (a4f696620), so the multi-megabyte
+      // assistant row arrives truncated to the item budget with a marker.
+      expect(entries).toMatchObject([
+        {
+          item: {
+            type: "assistant_message",
+            text: expect.stringMatching(/^history.*…\[truncated [\d.]+ [KMG]B\]$/),
+          },
+        },
+      ]);
       received.push(response.payload.requestId);
     });
     let pending: Promise<void>[] = [];

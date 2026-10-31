@@ -282,6 +282,7 @@ export interface PaseoAgentTimelineRefetchOptions {
   limit?: number;
   projection?: FetchAgentTimelineProjection;
   requestId?: string;
+  onResponse?: (payload: FetchAgentTimelinePayload) => void | Promise<void>;
 }
 
 export type PaseoAgentSendOptions = SendMessageOptions;
@@ -913,13 +914,14 @@ function createAgentHandleFactory(
       },
       timeline: {
         append: (item) => daemonClient.appendAgentTimelineItem(id, item),
-        refetch: async (options) => {
-          const result = await daemonClient.fetchAgentTimeline(id, options);
-          if (result.agent) {
-            current = result.agent;
-          }
-          return result;
-        },
+        refetch: (options) =>
+          daemonClient.fetchAgentTimeline(id, {
+            ...options,
+            onResponse: async (result) => {
+              if (result.agent) current = result.agent;
+              await options?.onResponse?.(result);
+            },
+          }),
         subscribe: (handler) =>
           subscribeTimeline(id, (message) => {
             switch (message.type) {

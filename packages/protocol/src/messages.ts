@@ -1945,6 +1945,11 @@ export const FetchAgentTimelineRequestMessageSchema = z.object({
   mergeWindow: z.boolean().optional(),
 });
 
+export const AgentTimelineDeliveryAckMessageSchema = z.object({
+  type: z.literal("agent.timeline.delivery.ack"),
+  deliveryId: z.string(),
+});
+
 export const AgentTimelineSearchRequestMessageSchema = z.object({
   type: z.literal("agent.timeline.search.request"),
   agentId: z.string(),
@@ -3371,6 +3376,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   RestartServerRequestMessageSchema,
   DaemonUpdateRequestMessageSchema,
   FetchAgentTimelineRequestMessageSchema,
+  AgentTimelineDeliveryAckMessageSchema,
   AgentTimelineSearchRequestMessageSchema,
   AgentTimelineListPromptsRequestMessageSchema,
   ProviderSubagentListRequestMessageSchema,
@@ -3834,6 +3840,7 @@ export const ServerInfoStatusPayloadSchema = z
         selectiveAgentTimeline: z.boolean().optional(),
         explicitEventSubscriptions: z.boolean().optional(),
         ownedSubscriptions: z.boolean().optional(),
+        timelineDeliveryAck: z.boolean().optional(),
         workspaceSetupObservation: z.boolean().optional(),
         workspaceSortTimes: z.boolean().optional(),
         // COMPAT(canonicalSubmittedPrompts): added in v0.2.6, remove gate after 2027-01-30.
@@ -4755,6 +4762,7 @@ export const FetchAgentTimelineResponseMessageSchema = z.object({
   type: z.literal("fetch_agent_timeline_response"),
   payload: z.object({
     requestId: z.string(),
+    deliveryId: z.string().optional(),
     agentId: z.string(),
     agent: AgentSnapshotPayloadSchema.nullable(),
     direction: z.enum(["tail", "before", "after"]),
@@ -4860,6 +4868,7 @@ export const ProviderSubagentTimelineResponseMessageSchema = z.object({
   type: z.literal("agent.provider_subagents.timeline.get.response"),
   payload: z.object({
     requestId: z.string(),
+    deliveryId: z.string().optional(),
     parentAgentId: z.string(),
     subagentId: z.string(),
     provider: AgentProviderSchema.nullable(),
@@ -7722,6 +7731,7 @@ export const WSHelloMessageSchema = z.object({
     .object({
       voice: z.boolean().optional(),
       [CLIENT_CAPS.helloRejection]: z.boolean().optional(),
+      [CLIENT_CAPS.timelineDeliveryAck]: z.boolean().optional(),
       pushNotifications: z.boolean().optional(),
       [CLIENT_CAPS.explicitEventSubscriptions]: z.boolean().optional(),
       [CLIENT_CAPS.allProviders]: z.boolean().optional(),

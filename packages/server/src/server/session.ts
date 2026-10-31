@@ -1,3 +1,4 @@
+import { TimelineDeliveryWindow } from "./session/timeline-delivery.js";
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type { AgentMessageDelivery } from "./agent/agent-messages/index.js";
 import { AgentDirectory } from "./agent/directory.js";
@@ -448,6 +449,17 @@ const nodeSessionFileSystem: SessionFileSystem = {
 // Stub types for features under development (modules not yet available)
 type AgentMcpTransportFactory = () => Promise<unknown>;
 
+type TimelineResponse = Extract<
+  SessionOutboundMessage,
+  { type: "fetch_agent_timeline_response" | "agent.provider_subagents.timeline.get.response" }
+>;
+
+interface TimelineReceipt {
+  deliveryId: string;
+  acknowledged: Promise<boolean>;
+  dispose(): void;
+}
+
 export interface SessionOptions {
   connectedHosts?: ConnectedHosts;
   sourceId?: string;
@@ -458,7 +470,13 @@ export interface SessionOptions {
   appVersion?: string | null;
   clientCapabilities?: Record<string, unknown> | null;
   onMessage: (msg: SessionOutboundMessage) => void;
-  onMessageToSource?: (source: object, msg: SessionOutboundMessage) => void | Promise<void>;
+  onMessageToSource?: (
+    source: object,
+    msg: SessionOutboundMessage,
+    onPrepared?: (bytes: number) => void,
+  ) => void | Promise<void>;
+  timelineAckTimeoutMs?: number;
+  onTimelineAckTimeout?: (source: object) => void;
   onBinaryMessage?: (frame: Uint8Array) => void;
   onBinaryMessageToSource?: (source: object, frame: Uint8Array) => Promise<void>;
   getTransportBufferedAmount?: (source?: object) => number | null;
@@ -752,7 +770,13 @@ export class Session {
   private readonly projectIcons: ProjectIconReader;
   private readonly worktreesRoot: string | undefined;
   private readonly rewindInitiators = new Map<string, object | undefined>();
-  private readonly timelineRequests = new WeakMap<object, Promise<void>>();
+  private readonly timelineRequests = new WeakMap<object, TimelineDeliveryWindow>();
+  private readonly timelineReceipts = new WeakMap<
+    object,
+    Map<string, (acknowledged: boolean) => void>
+  >();
+  private readonly timelineAckTimeoutMs: number;
+  private readonly onTimelineAckTimeout: SessionOptions["onTimelineAckTimeout"];
 
   private agentManager: AgentManager;
   private readonly agentStorage: AgentStorage;
@@ -908,13 +932,16 @@ export class Session {
     this.connectedHostSession = createHostSession(options, this);
     this.onMessage = onMessage;
     this.onMessageToSource = onMessageToSource
-      ? (source, message) => this.observeSourceSend(() => onMessageToSource(source, message))
+      ? (source, message, onPrepared) =>
+          this.observeSourceSend(() => onMessageToSource(source, message, onPrepared))
       : null;
     this.onBinaryMessage = onBinaryMessage ?? null;
     this.onBinaryMessageToSource = onBinaryMessageToSource
       ? (source, frame) => this.observeSourceSend(() => onBinaryMessageToSource(source, frame))
       : null;
     this.getTransportBufferedAmount = getTransportBufferedAmount ?? (() => 0);
+    this.timelineAckTimeoutMs = options.timelineAckTimeoutMs ?? 120_000;
+    this.onTimelineAckTimeout = options.onTimelineAckTimeout;
     this.onLifecycleIntent = onLifecycleIntent ?? null;
     this.onWorkspaceRecovered = onWorkspaceRecovered ?? null;
     this.pushNotifications = pushNotifications;
@@ -2247,7 +2274,7 @@ export class Session {
       ) {
         await this.runTimelineRequest(
           () => this.handleRequest(msg, source),
-          (response) => this.emitForSource(response, source),
+          (response, onPrepared) => this.emitForSource(response, source, onPrepared),
         );
         return;
       }
@@ -2256,32 +2283,81 @@ export class Session {
   }
   private async runTimelineRequest(
     run: () => Promise<SessionOutboundMessage | undefined>,
-    emit: (response: SessionOutboundMessage) => void | Promise<void>,
+    emit: (response: TimelineResponse, onPrepared: (bytes: number) => void) => void | Promise<void>,
   ): Promise<void> {
     const source = this.delivery.currentSource!;
     const signal = this.delivery.requestSignal;
-    const previous = this.timelineRequests.get(source);
-    let release!: () => void;
-    const current = new Promise<void>((complete) => {
-      release = complete;
-    });
-    // Wait before loading or projecting the next page, not after retaining its payload.
-    // The transport's send deadline cancels stalled sources and their queued requests.
-    this.timelineRequests.set(source, current);
+    // COMPAT(timelineDeliveryAck): added in v0.14.0, remove after 2027-04-30.
+    // Older clients cannot report consumption, so retain their serial write pacing.
+    const adaptive =
+      this.onMessageToSource !== null &&
+      this.supportsForSource(CLIENT_CAPS.timelineDeliveryAck, source);
+    let window = this.timelineRequests.get(source);
+    if (!window) {
+      window = new TimelineDeliveryWindow({ signal, adaptive });
+      this.timelineRequests.set(source, window);
+    }
+    const permit = await window.acquire();
+    if (!permit) return;
+    let receipt: TimelineReceipt | undefined;
     try {
-      if (previous) await previous;
       if (signal.aborted) return;
       const response = await run();
       if (!response || signal.aborted) return;
-      try {
-        await emit(response);
-      } catch (error) {
-        this.sessionLogger.warn({ err: error }, "Failed to send timeline response");
+      if (
+        response.type !== "fetch_agent_timeline_response" &&
+        response.type !== "agent.provider_subagents.timeline.get.response"
+      )
+        return;
+      if (adaptive) {
+        receipt = this.createTimelineReceipt(source, signal);
+        response.payload.deliveryId = receipt.deliveryId;
       }
+      await emit(response, (bytes) => permit.prepared(bytes));
+      const acknowledged = receipt ? await receipt.acknowledged : true;
+      if (acknowledged && !signal.aborted) permit.complete();
+    } catch (error) {
+      this.sessionLogger.warn({ err: error }, "Failed to send timeline response");
     } finally {
-      release();
-      if (this.timelineRequests.get(source) === current) this.timelineRequests.delete(source);
+      receipt?.dispose();
+      permit.cancel();
     }
+  }
+
+  private createTimelineReceipt(source: object, signal: AbortSignal): TimelineReceipt {
+    let receipts = this.timelineReceipts.get(source);
+    if (!receipts) {
+      receipts = new Map();
+      this.timelineReceipts.set(source, receipts);
+    }
+    const sourceReceipts = receipts;
+    const deliveryId = uuidv4();
+    let acknowledge!: (received: boolean) => void;
+    const acknowledged = new Promise<boolean>((complete) => {
+      acknowledge = complete;
+    });
+    let timer: NodeJS.Timeout;
+    const finish = (received: boolean) => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      sourceReceipts.delete(deliveryId);
+      acknowledge(received);
+    };
+    const abort = () => finish(false);
+    sourceReceipts.set(deliveryId, finish);
+    signal.addEventListener("abort", abort, { once: true });
+    timer = setTimeout(() => {
+      this.sessionLogger.warn(
+        { deliveryId, timeoutMs: this.timelineAckTimeoutMs },
+        "Timeline delivery acknowledgement timed out",
+      );
+      finish(false);
+      this.onTimelineAckTimeout?.(source);
+      this.clearAgentTimelineSubscription(source);
+    }, this.timelineAckTimeoutMs);
+    timer.unref();
+    if (signal.aborted) abort();
+    return { deliveryId, acknowledged, dispose: abort };
   }
 
   private async handleRequest(
@@ -2316,6 +2392,11 @@ export class Session {
         return;
       }
       try {
+        if (msg.type === "agent.timeline.delivery.ack") {
+          const receiptSource = this.delivery.currentSource!;
+          this.timelineReceipts.get(receiptSource)?.get(msg.deliveryId)?.(true);
+          return;
+        }
         if (msg.type === "fetch_agent_timeline_request") {
           return await this.handleFetchAgentTimelineRequest(msg, source);
         }
@@ -8948,10 +9029,14 @@ export class Session {
     return pending;
   }
 
-  private emitForSource(msg: SessionOutboundMessage, source?: object): void | Promise<void> {
+  private emitForSource(
+    msg: SessionOutboundMessage,
+    source?: object,
+    onPrepared?: (bytes: number) => void,
+  ): void | Promise<void> {
     if (source && this.onMessageToSource) {
       msg = this.delivery.authorizeReply(msg, source);
-      return this.onMessageToSource(source, msg);
+      return this.onMessageToSource(source, msg, onPrepared);
     }
     this.emit(msg);
   }

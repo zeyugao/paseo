@@ -292,6 +292,21 @@ function resolveConnectionAuth(
   return chooseConnectionAuth(config, resolution);
 }
 
+function extractTimelineDeliveryId(input: unknown): string | undefined {
+  if (!input || typeof input !== "object" || !("message" in input)) return undefined;
+  if (!("type" in input) || input.type !== "session") return undefined;
+  const message = input.message;
+  if (!message || typeof message !== "object" || !("payload" in message)) return undefined;
+  if (!("type" in message)) return undefined;
+  const isTimelineResponse =
+    message.type === "fetch_agent_timeline_response" ||
+    message.type === "agent.provider_subagents.timeline.get.response";
+  if (!isTimelineResponse) return undefined;
+  const payload = message.payload;
+  if (!payload || typeof payload !== "object" || !("deliveryId" in payload)) return undefined;
+  return typeof payload.deliveryId === "string" ? payload.deliveryId : undefined;
+}
+
 function extractCorrelatedResponseIdentity(input: unknown): CorrelatedResponseIdentity | null {
   if (!input || typeof input !== "object") {
     return null;
@@ -708,6 +723,7 @@ export interface FetchAgentTimelineOptions {
   mergeWindow?: boolean;
   requestId?: string;
   timeout?: number;
+  onResponse?: (payload: FetchAgentTimelinePayload) => void | Promise<void>;
 }
 
 export interface AgentTimelineSearchOptions {
@@ -740,6 +756,7 @@ export interface FetchProviderSubagentTimelineOptions {
   limit?: number;
   requestId?: string;
   timeout?: number;
+  onResponse?: (payload: ProviderSubagentTimelinePayload) => void | Promise<void>;
 }
 
 // COMPAT(daemon-client-object-options): added in v0.1.102; remove after
@@ -1375,6 +1392,7 @@ export class DaemonClient {
   > = new Map();
   private eventListeners: Set<DaemonEventHandler> = new Set();
   private waiters: Set<Waiter<unknown>> = new Set();
+  private readonly ownedTimelineDeliveries = new WeakSet<object>();
   private checkoutStatusInFlight: Map<string, Promise<CheckoutStatusPayload>> = new Map();
   private connectionListeners: Set<(status: ConnectionState) => void> = new Set();
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -3628,6 +3646,7 @@ export class DaemonClient {
       ...(options.projection ? { projection: options.projection } : {}),
       ...(options.mergeWindow === true ? { mergeWindow: true } : {}),
     });
+    let acknowledge = () => {};
 
     const payload = await this.sendRequest({
       requestId: resolvedRequestId,
@@ -3641,15 +3660,19 @@ export class DaemonClient {
         if (msg.payload.requestId !== resolvedRequestId) {
           return null;
         }
+        this.ownedTimelineDeliveries.add(msg.payload);
+        acknowledge = this.timelineDeliveryReceipt(msg.payload.deliveryId);
         return msg.payload;
       },
     });
 
-    if (payload.error) {
-      throw new Error(payload.error);
+    try {
+      if (payload.error) throw new Error(payload.error);
+      await options.onResponse?.(payload);
+      return payload;
+    } finally {
+      acknowledge();
     }
-
-    return payload;
   }
 
   async appendAgentTimelineItem(
@@ -3753,21 +3776,30 @@ export class DaemonClient {
       ...(options.cursor ? { cursor: options.cursor } : {}),
       ...(typeof options.limit === "number" ? { limit: options.limit } : {}),
     });
+    let acknowledge = () => {};
     const payload = await this.sendRequest({
       requestId,
       message,
       timeout: options.timeout,
       options: { skipQueue: true },
-      select: (response) =>
-        response.type === "agent.provider_subagents.timeline.get.response" &&
-        response.payload.requestId === requestId
-          ? response.payload
-          : null,
+      select: (response) => {
+        if (
+          response.type !== "agent.provider_subagents.timeline.get.response" ||
+          response.payload.requestId !== requestId
+        )
+          return null;
+        this.ownedTimelineDeliveries.add(response.payload);
+        acknowledge = this.timelineDeliveryReceipt(response.payload.deliveryId);
+        return response.payload;
+      },
     });
-    if (payload.error) {
-      throw new Error(payload.error);
+    try {
+      if (payload.error) throw new Error(payload.error);
+      await options.onResponse?.(payload);
+      return payload;
+    } finally {
+      acknowledge();
     }
-    return payload;
   }
 
   observeTimeline(
@@ -6843,6 +6875,30 @@ export class DaemonClient {
     }
   }
 
+  private rejectInvalidResponse(parsedJson: unknown, errorMessage: string): void {
+    const deliveryId = extractTimelineDeliveryId(parsedJson);
+    const acknowledgeDiscard =
+      deliveryId === undefined ? undefined : this.timelineDeliveryReceipt(deliveryId);
+    this.traceInstant("paseo.ws.validation.failed");
+    const responseIdentity = extractCorrelatedResponseIdentity(parsedJson);
+    const envelopeType =
+      parsedJson != null &&
+      typeof parsedJson === "object" &&
+      "type" in parsedJson &&
+      typeof parsedJson.type === "string"
+        ? parsedJson.type
+        : "unknown";
+    const msgType = responseIdentity?.responseType ?? envelopeType;
+    this.logger.warn({ msgType, error: errorMessage }, "Message validation failed");
+    if (responseIdentity) {
+      this.rejectWaitersForRequestId(
+        responseIdentity.requestId,
+        new DaemonProtocolError(responseIdentity),
+      );
+    }
+    acknowledgeDiscard?.();
+  }
+
   private handleJsonPayload(payload: string, rawBytesLength: number | undefined): void {
     const bytes = rawBytesLength ?? payload.length;
     const startMs = perfNow();
@@ -6868,23 +6924,7 @@ export class DaemonClient {
       this.endTraceSection(validationTrace);
     }
     if (!parsed.success) {
-      this.traceInstant("paseo.ws.validation.failed");
-      const responseIdentity = extractCorrelatedResponseIdentity(parsedJson);
-      const envelopeType =
-        parsedJson != null &&
-        typeof parsedJson === "object" &&
-        "type" in parsedJson &&
-        typeof parsedJson.type === "string"
-          ? parsedJson.type
-          : "unknown";
-      const msgType = responseIdentity?.responseType ?? envelopeType;
-      this.logger.warn({ msgType, error: parsed.error.message }, "Message validation failed");
-      if (responseIdentity) {
-        this.rejectWaitersForRequestId(
-          responseIdentity.requestId,
-          new DaemonProtocolError(responseIdentity),
-        );
-      }
+      this.rejectInvalidResponse(parsedJson, parsed.error.message);
       return;
     }
 
@@ -7266,6 +7306,31 @@ export class DaemonClient {
     });
   }
 
+  private timelineDeliveryReceipt(deliveryId: string | undefined): () => void {
+    const transport = this.transport;
+    const connectionAttempt = this.traceConnectionAttempt;
+    // COMPAT(timelineDeliveryAck): added in v0.14.0, remove after 2027-04-30 once the daemon floor supports receipts.
+    const enabled =
+      this.lastServerInfoMessage?.features?.timelineDeliveryAck === true &&
+      this.config.capabilities?.[CLIENT_CAPS.timelineDeliveryAck] !== false;
+    return () => {
+      if (
+        !enabled ||
+        deliveryId === undefined ||
+        !transport ||
+        this.transport !== transport ||
+        this.traceConnectionAttempt !== connectionAttempt ||
+        this.connectionState.status !== "connected"
+      )
+        return;
+      try {
+        this.sendSessionPayload({ type: "agent.timeline.delivery.ack", deliveryId });
+      } catch (error) {
+        this.logger.warn({ err: error }, "Timeline receipt send failed");
+      }
+    };
+  }
+
   private handleSessionMessage(msg: SessionOutboundMessage): void {
     msg = this.owned.normalize(msg);
     if (
@@ -7344,6 +7409,12 @@ export class DaemonClient {
     }
     this.resolveWaiters(consumerMessage);
     this.owned.receive(consumerMessage);
+    if (
+      (consumerMessage.type === "fetch_agent_timeline_response" ||
+        consumerMessage.type === "agent.provider_subagents.timeline.get.response") &&
+      !this.ownedTimelineDeliveries.has(consumerMessage.payload)
+    )
+      this.timelineDeliveryReceipt(consumerMessage.payload.deliveryId)();
   }
 
   private resolveWaiters(msg: SessionOutboundMessage): void {

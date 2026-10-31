@@ -2807,12 +2807,16 @@ export class HostRuntimeStore {
     const directory = this.directorySyncByServer.get(serverId);
     if (!directory) throw new Error(`Unknown host runtime for serverId ${serverId}`);
     const owner = useSessionStore.getState().sessions[serverId]?.viewedTimelineSync;
-    const page = await directory.fetchTimeline(agentId, request);
-    if (owner && useSessionStore.getState().sessions[serverId]?.viewedTimelineSync === owner) {
-      owner.flushStreamAgent(agentId);
-      owner.applyTimelineResponse(page);
-    }
-    return page;
+    return directory.fetchTimeline(agentId, {
+      ...request,
+      onResponse: async (page) => {
+        if (owner && useSessionStore.getState().sessions[serverId]?.viewedTimelineSync === owner) {
+          owner.flushStreamAgent(agentId);
+          owner.applyTimelineResponse(page);
+        }
+        await request?.onResponse?.(page);
+      },
+    });
   }
 
   createViewedTimelineOwner(

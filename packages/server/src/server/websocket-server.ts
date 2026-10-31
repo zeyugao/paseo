@@ -500,7 +500,9 @@ interface SocketSessionOptions {
   permissions: readonly DaemonPermission[];
   connectionLogger: pino.Logger;
   onMessage: (message: SessionOutboundMessage) => void;
-  onMessageToSource?: (source: object, message: SessionOutboundMessage) => void | Promise<void>;
+  onMessageToSource?: SessionOptions["onMessageToSource"];
+  timelineAckTimeoutMs?: number;
+  onTimelineAckTimeout?: (source: object) => void;
   onBinaryMessage?: (frame: Uint8Array) => void;
   onBinaryMessageToSource?: (source: object, frame: Uint8Array) => Promise<void>;
   getTransportBufferedAmount?: (source?: object) => number | null;
@@ -1272,6 +1274,7 @@ export class VoiceAssistantWebSocketServer {
     reportRejection = false,
     signal?: AbortSignal,
     waitTimeoutMs?: number,
+    onPrepared?: (bytes: number) => void,
   ): void | Promise<void> {
     if (signal?.aborted) return;
     const physicalSockets = [...sockets];
@@ -1284,6 +1287,7 @@ export class VoiceAssistantWebSocketServer {
             .map((ws) => this.detachSocket(ws, {})),
         ).then(() => undefined);
       }
+      onPrepared?.(paced.bytes);
       return Promise.all(
         paced.sockets.map(async (ws) => {
           try {
@@ -1605,7 +1609,7 @@ export class VoiceAssistantWebSocketServer {
         }
         this.sendToConnection(connection, wrapSessionMessage(msg));
       },
-      onMessageToSource: async (source, msg) => {
+      onMessageToSource: async (source, msg, onPrepared) => {
         if (!connection || !connection.sockets.has(source as WebSocketLike)) {
           return;
         }
@@ -1619,9 +1623,17 @@ export class VoiceAssistantWebSocketServer {
             true,
             connection.session.delivery.requestSignal,
             TIMELINE_RESPONSE_SEND_TIMEOUT_MS,
+            onPrepared,
           );
         }
         await this.sendMessageToClientAndWait(source as WebSocketLike, wrapSessionMessage(msg));
+      },
+      timelineAckTimeoutMs: TIMELINE_RESPONSE_SEND_TIMEOUT_MS,
+      onTimelineAckTimeout: (source) => {
+        this.closePhysicalSocket({
+          ws: source as WebSocketLike,
+          logMessage: "Closing physical WebSocket after timeline acknowledgement timeout",
+        });
       },
       onBinaryMessage: (frame) => {
         if (!connection) {
@@ -1700,6 +1712,8 @@ export class VoiceAssistantWebSocketServer {
       onMessageToSource: options.onMessageToSource,
       onBinaryMessage: options.onBinaryMessage,
       onBinaryMessageToSource: options.onBinaryMessageToSource,
+      timelineAckTimeoutMs: options.timelineAckTimeoutMs,
+      onTimelineAckTimeout: options.onTimelineAckTimeout,
       getTransportBufferedAmount: options.getTransportBufferedAmount,
       onLifecycleIntent: options.onLifecycleIntent,
       logger: options.connectionLogger.child({ module: "session" }),
@@ -2184,6 +2198,7 @@ export class VoiceAssistantWebSocketServer {
         // COMPAT(projectedSubagentTimeline): added after v0.8.0, remove gates after 2027-03-14; retain advertisement.
         projectedSubagentTimeline: true,
         wholeTurnTimeline: true,
+        timelineDeliveryAck: true,
         // COMPAT(providerSubagentNesting): added in v0.7, remove gate after 2027-03-04.
         providerSubagentNesting: true,
         // COMPAT(workspacePinning): added in v0.1.107, remove gate after 2027-01-12.

@@ -378,11 +378,13 @@ export function observeProviderSubagentTimeline({
     fetching = true;
     let succeeded = false;
     try {
-      const payload = await client.fetchProviderSubagentTimeline(parentAgentId, subagentId, {
+      await client.fetchProviderSubagentTimeline(parentAgentId, subagentId, {
         direction: "tail",
         limit,
+        onResponse: (payload) => {
+          if (active) useProviderSubagentStore.getState().replaceTimeline(serverId, payload);
+        },
       });
-      if (active) useProviderSubagentStore.getState().replaceTimeline(serverId, payload);
       succeeded = true;
     } catch (error) {
       // A later stream update or reopening the pane retries a disconnected read.

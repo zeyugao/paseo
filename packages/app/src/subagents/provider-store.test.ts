@@ -1,4 +1,7 @@
-import { DaemonConnectionError } from "@getpaseo/client/internal/daemon-client";
+import {
+  DaemonConnectionError,
+  type FetchProviderSubagentTimelineOptions,
+} from "@getpaseo/client/internal/daemon-client";
 import { afterEach, describe, expect, test } from "vitest";
 import type { ProviderSubagentDescriptorPayload } from "@getpaseo/protocol/messages";
 import {
@@ -585,9 +588,15 @@ describe("projected child history", () => {
   test("recovers a live sequence gap while observed and stops fetching when closed", async () => {
     let calls = 0;
     const client = {
-      async fetchProviderSubagentTimeline() {
+      async fetchProviderSubagentTimeline(
+        _parent: string,
+        _child: string,
+        options: FetchProviderSubagentTimelineOptions = {},
+      ) {
         calls++;
-        return calls === 1 ? response("A", 1, 1) : response("ABC", 1, 3);
+        const payload = calls === 1 ? response("A", 1, 1) : response("ABC", 1, 3);
+        await options.onResponse?.(payload);
+        return payload;
       },
     };
     const errors: unknown[] = [];
@@ -620,10 +629,16 @@ describe("projected child history", () => {
     const errors: unknown[] = [];
     const stop = observeProviderSubagentTimeline({
       client: {
-        async fetchProviderSubagentTimeline() {
+        async fetchProviderSubagentTimeline(
+          _parent: string,
+          _child: string,
+          options: FetchProviderSubagentTimelineOptions = {},
+        ) {
           calls++;
           if (calls === 2) throw new DaemonConnectionError("Connection lost");
-          return calls === 1 ? response("A", 1, 1) : response("ABCD", 1, 4);
+          const payload = calls === 1 ? response("A", 1, 1) : response("ABCD", 1, 4);
+          await options.onResponse?.(payload);
+          return payload;
         },
       },
       serverId: SERVER_ID,

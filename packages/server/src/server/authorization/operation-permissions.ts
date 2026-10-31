@@ -29,6 +29,8 @@ const INBOUND_PERMISSION = {
   "agent.timeline.search.request": "workspace.read",
   "agent.timeline.list_prompts.request": "workspace.read",
   "agent.timeline.append.request": "workspace.write",
+  // Reads may be revoked while the client still owns a delivered page.
+  "agent.timeline.delivery.ack": null,
   "browser.host.register.request": ["workspace.write"],
   "subscription.release.request": null,
   "session.events.set_subscription.request": ["workspace.read", "daemon.read", "hub.execute"],

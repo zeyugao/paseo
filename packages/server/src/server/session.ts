@@ -1190,7 +1190,7 @@ export class Session {
       isPathWithinRoot: (rootPath, candidatePath) => this.isPathWithinRoot(rootPath, candidatePath),
       sessionLogger: this.sessionLogger,
       listTerminalWorkspaceRefs: () => this.listActiveWorkspaceRefs(),
-assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThisServer(cwd),
+      assertCwdWorkspaceOwnedByThisServer: (cwd) => this.assertCwdWorkspaceOwnedByThisServer(cwd),
       getClientBufferedAmount: (source) => this.getTransportBufferedAmount(source),
     });
     this.agentDirectory = new AgentDirectory({

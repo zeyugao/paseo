@@ -27,7 +27,10 @@ const gatedCiJobs = new Map([
   // Windows CI disabled: shared-home requires NFS-class flock semantics.
   // ["server-tests-windows", ...],
   // ["server-integration-windows", ...],
-  ["server-tests-macos", { name: "server-tests (macos-latest, file observation)", contract: "server" }],
+  [
+    "server-tests-macos",
+    { name: "server-tests (macos-latest, file observation)", contract: "server" },
+  ],
   ["desktop-tests-ubuntu", { name: "desktop-tests (ubuntu-latest)", contract: "desktop" }],
   // ["desktop-tests-windows", ...],
   ["app-tests", { name: "app-tests", contract: "app" }],

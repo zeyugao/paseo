@@ -783,6 +783,46 @@ function normalizeFetchAgentOptions(
   return { agentId: input, ...legacyOptions };
 }
 
+interface TimelinePageShape {
+  error: string | null;
+  epoch: string;
+  reset: boolean;
+  staleCursor: boolean;
+  gap: boolean;
+  startCursor?: FetchAgentTimelineCursor | null | undefined;
+  endCursor?: FetchAgentTimelineCursor | null | undefined;
+  hasOlder: boolean;
+  hasNewer: boolean;
+}
+
+interface TimelineDrainOptions {
+  direction?: string;
+  cursor?: FetchAgentTimelineCursor;
+  limit?: number;
+}
+
+interface TimelineDrainPlan {
+  rowsWanted: number;
+  walk: "older" | "newer";
+}
+
+// A timeline limit is a row-count contract with the caller: the server may
+// split it across byte-bounded pages, and the SDK merges those pages back
+// into one response. Without a limit the caller accepts the server's default
+// page as-is.
+function timelineDrainPlan(options: TimelineDrainOptions): TimelineDrainPlan | null {
+  if (typeof options.limit !== "number") return null;
+  const direction = options.direction ?? "tail";
+  if (options.limit === 0) {
+    if (direction === "tail" && options.cursor === undefined) {
+      return { rowsWanted: Infinity, walk: "older" };
+    }
+    return null;
+  }
+  if (direction === "tail" && options.cursor !== undefined) return null;
+  return { rowsWanted: options.limit, walk: direction === "after" ? "newer" : "older" };
+}
+
 function normalizeListCommandsOptions(
   input: ListCommandsOptions | string,
   legacyOptions?: LegacyListCommandsOptions | string,
@@ -3678,31 +3718,82 @@ export class DaemonClient {
     // Reading history predates this capability and must keep working on older hosts.
     const supportsWholeTurns = this.lastServerInfoMessage?.features?.wholeTurnTimeline === true;
     const resolvedRequestId = this.createRequestId(options.requestId);
-    const message = SessionInboundMessageSchema.parse({
-      type: "fetch_agent_timeline_request",
-      ...(supportsWholeTurns && options.wholeTurns !== undefined
-        ? { wholeTurns: options.wholeTurns }
-        : {}),
-      agentId,
-      requestId: resolvedRequestId,
-      ...(options.direction ? { direction: options.direction } : {}),
-      ...(options.cursor ? { cursor: options.cursor } : {}),
-      ...(typeof options.limit === "number" ? { limit: options.limit } : {}),
-      ...(options.projection ? { projection: options.projection } : {}),
-      ...(options.mergeWindow === true ? { mergeWindow: true } : {}),
-    });
-    let acknowledge = () => {};
+    const payload = await this.requestAgentTimelinePage(
+      {
+        type: "fetch_agent_timeline_request",
+        ...(supportsWholeTurns && options.wholeTurns !== undefined
+          ? { wholeTurns: options.wholeTurns }
+          : {}),
+        agentId,
+        requestId: resolvedRequestId,
+        ...(options.direction ? { direction: options.direction } : {}),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(typeof options.limit === "number" ? { limit: options.limit } : {}),
+        ...(options.projection ? { projection: options.projection } : {}),
+        ...(options.mergeWindow === true ? { mergeWindow: true } : {}),
+      },
+      { timeout: options.timeout, onResponse: options.onResponse },
+    );
 
+    // Servers may page large timelines by bytes, returning fewer rows than the
+    // requested limit (or a bounded first page for limit 0). Walk the remaining
+    // pages here and merge them, so every caller sees the window it asked for.
+    const plan = timelineDrainPlan(options);
+    if (!plan) return payload;
+    const pages = await this.collectTimelinePages(payload, {
+      walk: plan.walk,
+      rowsWanted: plan.rowsWanted,
+      rowCount: (page) => page.entries.length,
+      fetchPage: (cursor) =>
+        this.requestAgentTimelinePage(
+          {
+            type: "fetch_agent_timeline_request",
+            ...(supportsWholeTurns && options.wholeTurns !== undefined
+              ? { wholeTurns: options.wholeTurns }
+              : {}),
+            agentId,
+            requestId: this.createRequestId(),
+            direction: plan.walk === "older" ? "before" : "after",
+            cursor,
+            ...(typeof options.limit === "number" ? { limit: options.limit } : {}),
+            ...(options.projection ? { projection: options.projection } : {}),
+            ...(options.mergeWindow === true ? { mergeWindow: true } : {}),
+          },
+          { timeout: options.timeout, onResponse: options.onResponse },
+        ),
+    });
+    if (pages.length === 0) return payload;
+    const boundary = pages[pages.length - 1]!;
+    let entries =
+      plan.walk === "older"
+        ? pages.reduceRight((rows, page) => page.entries.concat(rows), payload.entries)
+        : pages.reduce((rows, page) => rows.concat(page.entries), payload.entries);
+    if (plan.rowsWanted !== Infinity && entries.length > plan.rowsWanted) {
+      entries =
+        plan.walk === "older" ? entries.slice(-plan.rowsWanted) : entries.slice(0, plan.rowsWanted);
+    }
+    return plan.walk === "older"
+      ? { ...payload, entries, startCursor: boundary.startCursor, hasOlder: boundary.hasOlder }
+      : { ...payload, entries, endCursor: boundary.endCursor, hasNewer: boundary.hasNewer };
+  }
+
+  private async requestAgentTimelinePage(
+    message: Extract<SessionInboundMessage, { type: "fetch_agent_timeline_request" }>,
+    delivery: {
+      timeout?: number;
+      onResponse?: (payload: FetchAgentTimelinePayload) => void | Promise<void>;
+    } = {},
+  ): Promise<FetchAgentTimelinePayload> {
+    let acknowledge = () => {};
     const payload = await this.sendRequest({
-      requestId: resolvedRequestId,
+      requestId: message.requestId,
       message,
-      timeout: options.timeout,
-      options: { skipQueue: true },
+      timeout: delivery.timeout,
       select: (msg) => {
         if (msg.type !== "fetch_agent_timeline_response") {
           return null;
         }
-        if (msg.payload.requestId !== resolvedRequestId) {
+        if (msg.payload.requestId !== message.requestId) {
           return null;
         }
         this.ownedTimelineDeliveries.add(msg.payload);
@@ -3710,10 +3801,9 @@ export class DaemonClient {
         return msg.payload;
       },
     });
-
     try {
       if (payload.error) throw new Error(payload.error);
-      await options.onResponse?.(payload);
+      await delivery.onResponse?.(payload);
       return payload;
     } finally {
       acknowledge();
@@ -3811,26 +3901,73 @@ export class DaemonClient {
     if (this.lastServerInfoMessage?.features?.projectedSubagentTimeline !== true) {
       throw new Error("Update the host to view subagent conversations.");
     }
-    const requestId = this.createRequestId(options.requestId);
-    const message = SessionInboundMessageSchema.parse({
-      type: "agent.provider_subagents.timeline.get.request",
-      parentAgentId,
-      subagentId,
-      requestId,
-      ...(options.direction ? { direction: options.direction } : {}),
-      ...(options.cursor ? { cursor: options.cursor } : {}),
-      ...(typeof options.limit === "number" ? { limit: options.limit } : {}),
+    const resolvedRequestId = this.createRequestId(options.requestId);
+    const payload = await this.requestProviderSubagentTimelinePage(
+      {
+        type: "agent.provider_subagents.timeline.get.request",
+        parentAgentId,
+        subagentId,
+        requestId: resolvedRequestId,
+        ...(options.direction ? { direction: options.direction } : {}),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(typeof options.limit === "number" ? { limit: options.limit } : {}),
+      },
+      { timeout: options.timeout, onResponse: options.onResponse },
+    );
+
+    const plan = timelineDrainPlan(options);
+    if (!plan) return payload;
+    const pages = await this.collectTimelinePages(payload, {
+      walk: plan.walk,
+      rowsWanted: plan.rowsWanted,
+      rowCount: (page) => page.rows.length,
+      fetchPage: (cursor) =>
+        this.requestProviderSubagentTimelinePage(
+          {
+            type: "agent.provider_subagents.timeline.get.request",
+            parentAgentId,
+            subagentId,
+            requestId: this.createRequestId(),
+            direction: plan.walk === "older" ? "before" : "after",
+            cursor,
+            ...(typeof options.limit === "number" ? { limit: options.limit } : {}),
+          },
+          { timeout: options.timeout, onResponse: options.onResponse },
+        ),
     });
+    if (pages.length === 0) return payload;
+    const boundary = pages[pages.length - 1]!;
+    let rows =
+      plan.walk === "older"
+        ? pages.reduceRight((merged, page) => page.rows.concat(merged), payload.rows)
+        : pages.reduce((merged, page) => merged.concat(page.rows), payload.rows);
+    if (plan.rowsWanted !== Infinity && rows.length > plan.rowsWanted) {
+      rows = plan.walk === "older" ? rows.slice(-plan.rowsWanted) : rows.slice(0, plan.rowsWanted);
+    }
+    return plan.walk === "older"
+      ? { ...payload, rows, startCursor: boundary.startCursor, hasOlder: boundary.hasOlder }
+      : { ...payload, rows, endCursor: boundary.endCursor, hasNewer: boundary.hasNewer };
+  }
+
+  private async requestProviderSubagentTimelinePage(
+    message: Extract<
+      SessionInboundMessage,
+      { type: "agent.provider_subagents.timeline.get.request" }
+    >,
+    delivery: {
+      timeout?: number;
+      onResponse?: (payload: ProviderSubagentTimelinePayload) => void | Promise<void>;
+    } = {},
+  ): Promise<ProviderSubagentTimelinePayload> {
     let acknowledge = () => {};
     const payload = await this.sendRequest({
-      requestId,
+      requestId: message.requestId,
       message,
-      timeout: options.timeout,
-      options: { skipQueue: true },
+      timeout: delivery.timeout,
       select: (response) => {
         if (
           response.type !== "agent.provider_subagents.timeline.get.response" ||
-          response.payload.requestId !== requestId
+          response.payload.requestId !== message.requestId
         )
           return null;
         this.ownedTimelineDeliveries.add(response.payload);
@@ -3840,11 +3977,42 @@ export class DaemonClient {
     });
     try {
       if (payload.error) throw new Error(payload.error);
-      await options.onResponse?.(payload);
+      await delivery.onResponse?.(payload);
       return payload;
     } finally {
       acknowledge();
     }
+  }
+
+  private async collectTimelinePages<T extends TimelinePageShape>(
+    first: T,
+    input: {
+      walk: "older" | "newer";
+      rowsWanted: number;
+      fetchPage: (cursor: FetchAgentTimelineCursor) => Promise<T>;
+      rowCount: (page: T) => number;
+    },
+  ): Promise<T[]> {
+    if (first.error !== null || first.reset || first.staleCursor || first.gap) return [];
+    const pages: T[] = [];
+    const maxPages = 10_000;
+    let collected = input.rowCount(first);
+    let frontier = first;
+    while (collected < input.rowsWanted && pages.length < maxPages) {
+      const hasBoundary = input.walk === "older" ? frontier.hasOlder : frontier.hasNewer;
+      if (!hasBoundary) break;
+      const cursor = input.walk === "older" ? frontier.startCursor : frontier.endCursor;
+      if (cursor == null) break;
+      const page = await input.fetchPage(cursor);
+      if (page.error !== null) throw new Error(page.error);
+      // A discontinuity means the remaining pages no longer describe the
+      // timeline the caller asked about; return what already drained.
+      if (page.reset || page.staleCursor || page.gap || page.epoch !== first.epoch) break;
+      pages.push(page);
+      collected += input.rowCount(page);
+      frontier = page;
+    }
+    return pages;
   }
 
   observeTimeline(

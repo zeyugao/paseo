@@ -192,10 +192,9 @@ function ProviderSubagentPanel() {
         direction: "before",
         cursor: { epoch: timeline.epoch, seq: firstSeq },
         limit: TIMELINE_FETCH_PAGE_SIZE,
-      })
-      .then((payload) => {
-        useProviderSubagentStore.getState().replaceTimeline(serverId, payload);
-        return undefined;
+        onResponse: (payload) => {
+          useProviderSubagentStore.getState().replaceTimeline(serverId, payload);
+        },
       })
       .catch(() => undefined)
       .finally(() => setIsLoadingOlder(false));

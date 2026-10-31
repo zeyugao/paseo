@@ -1,4 +1,5 @@
 export const CLIENT_CAPS = {
+  timelineDeliveryAck: "timeline_delivery_ack",
   terminalChunkedReplay: "terminal_chunked_replay",
   binaryChunkingV1: "binary_chunking_v1",
   helloRejection: "hello_rejection",

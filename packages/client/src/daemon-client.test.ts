@@ -1096,6 +1096,7 @@ test("advertises client capabilities in hello", async () => {
       explicit_event_subscriptions: true,
       owned_subscriptions: true,
       binary_chunking_v1: true,
+      timeline_delivery_ack: true,
       compact_provider_snapshots: true,
       custom_mode_icons: true,
       project_updates: true,
@@ -8924,4 +8925,350 @@ test("routed channels inherit an origin without drain support", async () => {
   )({ url: "ws://route" });
   expect(route.supportsDrain).toBe(false);
   route.close();
+});
+describe("timeline delivery receipts", () => {
+  function response(kind: "root" | "child", error: string | null = null) {
+    const common = {
+      requestId: "receipt-request",
+      deliveryId: "delivery-1",
+      direction: "tail",
+      epoch: "epoch-1",
+      reset: false,
+      staleCursor: false,
+      gap: false,
+      window: { minSeq: 0, maxSeq: 0, nextSeq: 1 },
+      startCursor: null,
+      endCursor: null,
+      hasOlder: false,
+      hasNewer: false,
+      error,
+    };
+    if (kind === "root")
+      return {
+        type: "fetch_agent_timeline_response",
+        payload: {
+          ...common,
+          agentId: "agent-1",
+          agent: null,
+          projection: "projected",
+          entries: [],
+        },
+      };
+    return {
+      type: "agent.provider_subagents.timeline.get.response",
+      payload: {
+        ...common,
+        parentAgentId: "agent-1",
+        subagentId: "child-1",
+        provider: null,
+        rows: [],
+      },
+    };
+  }
+
+  async function connect(timelineDeliveryAck: boolean | null = true, enabled = true) {
+    const mock = createMockTransport();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "timeline-receipts",
+      reconnect: { enabled: false },
+      logger: noopLogger,
+      capabilities: { [CLIENT_CAPS.timelineDeliveryAck]: enabled },
+      transportFactory: () => mock.transport,
+    });
+    clients.push(client);
+    const connected = client.connect();
+    mock.triggerOpen({
+      features: {
+        projectedSubagentTimeline: true,
+        ...(timelineDeliveryAck === null ? {} : { timelineDeliveryAck }),
+      },
+    });
+    await connected;
+    return { client, mock };
+  }
+
+  function receipts(mock: { sent: Array<string | Uint8Array | ArrayBuffer> }) {
+    return mock.sent
+      .map(parseSentFrame)
+      .filter((frame) => frame.type === "agent.timeline.delivery.ack");
+  }
+
+  test.each(["root", "child"] as const)(
+    "%s rejects invalid rows but acknowledges the discarded delivery",
+    async (kind) => {
+      const { client, mock } = await connect();
+      const onResponse = vi.fn();
+      const options = { requestId: "receipt-request", onResponse };
+      const result =
+        kind === "root"
+          ? client.fetchAgentTimeline("agent-1", options)
+          : client.fetchProviderSubagentTimeline("agent-1", "child-1", options);
+      const rejected = expect(result).rejects.toMatchObject({
+        name: "DaemonProtocolError",
+        code: "invalid_response",
+        requestId: "receipt-request",
+      });
+      const message = response(kind);
+      const malformedRows = kind === "root" ? { entries: [null] } : { rows: [null] };
+      mock.triggerMessage(
+        wrapSessionMessage({
+          ...message,
+          payload: { ...message.payload, ...malformedRows },
+        }),
+      );
+      await rejected;
+      expect(onResponse).not.toHaveBeenCalled();
+      expect(receipts(mock)).toEqual([
+        { type: "agent.timeline.delivery.ack", deliveryId: "delivery-1" },
+      ]);
+      const following =
+        kind === "root"
+          ? client.fetchAgentTimeline("agent-1", { requestId: "next" })
+          : client.fetchProviderSubagentTimeline("agent-1", "child-1", { requestId: "next" });
+      mock.triggerMessage(
+        wrapSessionMessage({
+          ...message,
+          payload: { ...message.payload, requestId: "next", deliveryId: "delivery-next" },
+        }),
+      );
+      await following;
+      expect(receipts(mock)).toEqual([
+        { type: "agent.timeline.delivery.ack", deliveryId: "delivery-1" },
+        { type: "agent.timeline.delivery.ack", deliveryId: "delivery-next" },
+      ]);
+    },
+  );
+
+  test.each(["root", "child"] as const)(
+    "%s releases an invalid delivery even when its request ID is unusable",
+    async (kind) => {
+      const { mock } = await connect();
+      const message = response(kind);
+      mock.triggerMessage(
+        wrapSessionMessage({
+          ...message,
+          payload: { ...message.payload, requestId: null },
+        }),
+      );
+      expect(receipts(mock)).toEqual([
+        { type: "agent.timeline.delivery.ack", deliveryId: "delivery-1" },
+      ]);
+    },
+  );
+
+  test.each([
+    {
+      type: "session",
+      message: { type: "fetch_agent_timeline_response", payload: { deliveryId: 42 } },
+    },
+    { type: "session", message: { type: "status", payload: { deliveryId: "not-history" } } },
+    {
+      type: "event",
+      message: { type: "fetch_agent_timeline_response", payload: { deliveryId: "not-session" } },
+    },
+  ])("does not receipt malformed or unrelated delivery metadata: %j", async (message) => {
+    const { mock } = await connect();
+    mock.triggerMessage(JSON.stringify(message));
+    expect(receipts(mock)).toEqual([]);
+  });
+
+  test.each([
+    { feature: null, enabled: true },
+    { feature: false, enabled: true },
+    { feature: true, enabled: false },
+  ])(
+    "does not receipt invalid pages without negotiation: $feature/$enabled",
+    async ({ feature, enabled }) => {
+      const { mock } = await connect(feature, enabled);
+      const message = response("root");
+      mock.triggerMessage(
+        wrapSessionMessage({
+          ...message,
+          payload: { ...message.payload, entries: [null] },
+        }),
+      );
+      expect(receipts(mock)).toEqual([]);
+    },
+  );
+
+  test("does not send a discarded delivery's receipt on a replacement connection", async () => {
+    const mock = createMockTransport();
+    const reconnected = Promise.withResolvers<void>();
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "invalid-receipt-reconnect",
+      transportFactory: () => mock.transport,
+      reconnect: { enabled: false },
+      logger: {
+        ...noopLogger,
+        warn(_fields, logMessage) {
+          if (logMessage !== "Message validation failed") return;
+          mock.triggerClose({ code: 1006, reason: "invalid response" });
+          void client.connect().then(reconnected.resolve, reconnected.reject);
+          mock.triggerOpen({ features: { timelineDeliveryAck: true } });
+        },
+      },
+    });
+    clients.push(client);
+    const connected = client.connect();
+    mock.triggerOpen({ features: { timelineDeliveryAck: true } });
+    await connected;
+    const message = response("root");
+    mock.triggerMessage(
+      wrapSessionMessage({
+        ...message,
+        payload: { ...message.payload, entries: [null] },
+      }),
+    );
+    await reconnected.promise;
+    expect(receipts(mock)).toEqual([]);
+    const result = client.fetchAgentTimeline("agent-1", { requestId: "receipt-request" });
+    mock.triggerMessage(wrapSessionMessage(message));
+    await result;
+    expect(receipts(mock)).toEqual([
+      { type: "agent.timeline.delivery.ack", deliveryId: "delivery-1" },
+    ]);
+  });
+
+  test.each(["root", "child"] as const)(
+    "%s waits for the owned merge before receipt and resolution",
+    async (kind) => {
+      const { client, mock } = await connect();
+      const { promise: merge, resolve: finish } = Promise.withResolvers<void>();
+      const { promise: entered, resolve: enter } = Promise.withResolvers<void>();
+      const onResponse = async () => {
+        enter();
+        await merge;
+      };
+      const options = { requestId: "receipt-request", onResponse };
+      const result =
+        kind === "root"
+          ? client.fetchAgentTimeline("agent-1", options)
+          : client.fetchProviderSubagentTimeline("agent-1", "child-1", options);
+      let resolved = false;
+      void result.then(() => {
+        resolved = true;
+        return undefined;
+      });
+      mock.triggerMessage(wrapSessionMessage(response(kind)));
+      await entered;
+      expect(receipts(mock)).toEqual([]);
+      expect(resolved).toBe(false);
+      finish();
+      await result;
+      expect(receipts(mock)).toEqual([
+        { type: "agent.timeline.delivery.ack", deliveryId: "delivery-1" },
+      ]);
+      expect(resolved).toBe(true);
+    },
+  );
+
+  test.each(["root", "child"] as const)(
+    "%s receipts callback failures and server errors",
+    async (kind) => {
+      const { client, mock } = await connect();
+      for (const serverError of [false, true]) {
+        const onResponse = vi.fn(() => {
+          throw new Error("merge failed");
+        });
+        const options = { requestId: "receipt-request", onResponse };
+        const result =
+          kind === "root"
+            ? client.fetchAgentTimeline("agent-1", options)
+            : client.fetchProviderSubagentTimeline("agent-1", "child-1", options);
+        const rejected = expect(result).rejects.toThrow(
+          serverError ? "server failed" : "merge failed",
+        );
+        mock.triggerMessage(
+          wrapSessionMessage(response(kind, serverError ? "server failed" : null)),
+        );
+        await rejected;
+        expect(onResponse).toHaveBeenCalledTimes(serverError ? 0 : 1);
+      }
+      expect(receipts(mock)).toEqual([
+        { type: "agent.timeline.delivery.ack", deliveryId: "delivery-1" },
+        { type: "agent.timeline.delivery.ack", deliveryId: "delivery-1" },
+      ]);
+    },
+  );
+
+  test.each([
+    { feature: null, enabled: true, expected: 0 },
+    { feature: false, enabled: true, expected: 0 },
+    { feature: true, enabled: false, expected: 0 },
+    { feature: true, enabled: true, expected: 1 },
+  ])(
+    "default readers negotiate receipts: $feature/$enabled",
+    async ({ feature, enabled, expected }) => {
+      const { client, mock } = await connect(feature, enabled);
+      const result = client.fetchAgentTimeline("agent-1", { requestId: "receipt-request" });
+      mock.triggerMessage(wrapSessionMessage(response("root")));
+      await result;
+      expect(receipts(mock)).toHaveLength(expected);
+    },
+  );
+
+  test("does not send a receipt without a delivery ID", async () => {
+    const { client, mock } = await connect();
+    const result = client.fetchAgentTimeline("agent-1", { requestId: "receipt-request" });
+    const message = response("root");
+    const { deliveryId: _deliveryId, ...payload } = message.payload;
+    mock.triggerMessage(wrapSessionMessage({ type: message.type, payload }));
+    await result;
+    expect(receipts(mock)).toEqual([]);
+  });
+
+  test.each(["root", "child"] as const)(
+    "%s discards and receipts a late timed-out response",
+    async (kind) => {
+      useHeartbeatClock();
+      const { client, mock } = await connect();
+      const onResponse = vi.fn();
+      const options = { requestId: "receipt-request", timeout: 10, onResponse };
+      const result =
+        kind === "root"
+          ? client.fetchAgentTimeline("agent-1", options)
+          : client.fetchProviderSubagentTimeline("agent-1", "child-1", options);
+      const rejected = expect(result).rejects.toThrow("Timeout waiting for message (10ms)");
+      await vi.advanceTimersByTimeAsync(10);
+      await rejected;
+      mock.triggerMessage(wrapSessionMessage(response(kind)));
+      expect(onResponse).not.toHaveBeenCalled();
+      expect(receipts(mock)).toEqual([
+        { type: "agent.timeline.delivery.ack", deliveryId: "delivery-1" },
+      ]);
+    },
+  );
+
+  test.each(["root", "child"] as const)(
+    "%s does not queue a suspended merge receipt across reconnect",
+    async (kind) => {
+      const { client, mock } = await connect();
+      const { promise: merge, resolve: finish } = Promise.withResolvers<void>();
+      const { promise: entered, resolve: enter } = Promise.withResolvers<void>();
+      const options = {
+        requestId: "receipt-request",
+        onResponse: async () => {
+          enter();
+          await merge;
+        },
+      };
+      const result =
+        kind === "root"
+          ? client.fetchAgentTimeline("agent-1", options)
+          : client.fetchProviderSubagentTimeline("agent-1", "child-1", options);
+      mock.triggerMessage(wrapSessionMessage(response(kind)));
+      await entered;
+      mock.triggerClose({ code: 1006, reason: "lost" });
+      const connected = client.connect();
+      mock.triggerOpen({
+        features: { timelineDeliveryAck: true, projectedSubagentTimeline: true },
+      });
+      await connected;
+      finish();
+      await result;
+      expect(receipts(mock)).toEqual([]);
+    },
+  );
 });

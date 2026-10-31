@@ -214,6 +214,8 @@ function createSessionForWireCompatTest(options?: {
   manager?: InMemoryAgentManager;
   onMessageToSource?: SessionOptions["onMessageToSource"];
   rows?: AgentTimelineRow[];
+  timelineAckTimeoutMs?: number;
+  onTimelineAckTimeout?: SessionOptions["onTimelineAckTimeout"];
   workspaceRegistry?: SessionOptions["workspaceRegistry"];
 }): Session {
   const messages = options?.messages ?? [];
@@ -243,6 +245,8 @@ function createSessionForWireCompatTest(options?: {
     clientId: "wire-compat-client",
     permissions: OWNER_PERMISSIONS,
     clientCapabilities: options?.clientCapabilities ?? null,
+    timelineAckTimeoutMs: options?.timelineAckTimeoutMs,
+    onTimelineAckTimeout: options?.onTimelineAckTimeout,
     onMessage: (message) => messages.push(message),
     onMessageToSource:
       options?.onMessageToSource ??
@@ -394,6 +398,267 @@ describe("timeline request source scheduling", () => {
     cursor: { epoch: "subagent-epoch-1", seq: 2 },
     limit: 0,
   } as const;
+
+  test("a sibling cannot acknowledge another socket's delivered history", async () => {
+    const source = {};
+    const sibling = {};
+    const firstSent = Promise.withResolvers<string>();
+    const secondSent = Promise.withResolvers<string>();
+    const delivered: string[] = [];
+    const session = createSessionForWireCompatTest({
+      onMessageToSource: (_source, message) => {
+        if (message.type !== "fetch_agent_timeline_response") return;
+        const { requestId, deliveryId } = message.payload;
+        if (!deliveryId) throw new Error("Missing receipt");
+        delivered.push(requestId);
+        if (requestId === "first") firstSent.resolve(deliveryId);
+        else secondSent.resolve(deliveryId);
+      },
+    });
+    session.updateClientCapabilities({ [CLIENT_CAPS.timelineDeliveryAck]: true }, source);
+    const first = session.handleMessage({ ...rootRequest, requestId: "first" }, source);
+    const firstId = await firstSent.promise;
+    const second = session.handleMessage({ ...rootRequest, requestId: "second" }, source);
+    try {
+      await session.handleMessage(
+        { type: "agent.timeline.delivery.ack", deliveryId: firstId },
+        sibling,
+      );
+      expect(delivered).toEqual(["first"]);
+      await session.handleMessage(
+        { type: "agent.timeline.delivery.ack", deliveryId: firstId },
+        source,
+      );
+      const secondId = await secondSent.promise;
+      expect(delivered).toEqual(["first", "second"]);
+      await session.handleMessage(
+        { type: "agent.timeline.delivery.ack", deliveryId: secondId },
+        source,
+      );
+      await Promise.all([first, second]);
+    } finally {
+      session.clearAgentTimelineSubscription(source);
+      await Promise.all([first, second]);
+      await session.cleanup();
+    }
+  });
+
+  test.each(["root", "child"] as const)(
+    "holds the %s window until both its own receipt and physical send complete",
+    async (kind) => {
+      const source = {};
+      const sibling = {};
+      const firstSent = Promise.withResolvers<string>();
+      const secondSent = Promise.withResolvers<string>();
+      const physicalSend = Promise.withResolvers<void>();
+      const delivered: string[] = [];
+      const session = createSessionForWireCompatTest({
+        onMessageToSource: (_source, message, onPrepared) => {
+          if (
+            message.type !== "fetch_agent_timeline_response" &&
+            message.type !== "agent.provider_subagents.timeline.get.response"
+          )
+            return;
+          const { requestId, deliveryId } = message.payload;
+          if (!deliveryId) throw new Error("Missing negotiated timeline receipt");
+          onPrepared?.(Buffer.byteLength(JSON.stringify(message)));
+          delivered.push(requestId);
+          if (requestId === "first") {
+            firstSent.resolve(deliveryId);
+            return physicalSend.promise;
+          }
+          secondSent.resolve(deliveryId);
+        },
+      });
+      session.updateClientCapabilities(
+        {
+          [CLIENT_CAPS.timelineDeliveryAck]: true,
+          [CLIENT_CAPS.projectedSubagentTimeline]: true,
+        },
+        source,
+      );
+      const firstRequest = kind === "root" ? rootRequest : childRequest;
+      const first = session.handleMessage({ ...firstRequest, requestId: "first" }, source);
+      const firstId = await firstSent.promise;
+      const second = session.handleMessage({ ...rootRequest, requestId: "second" }, source);
+      try {
+        await session.handleMessage(
+          { type: "agent.timeline.delivery.ack", deliveryId: firstId },
+          sibling,
+        );
+        await session.handleMessage(
+          { type: "agent.timeline.delivery.ack", deliveryId: "unknown" },
+          source,
+        );
+        expect(delivered).toEqual(["first"]);
+        await session.handleMessage(
+          { type: "agent.timeline.delivery.ack", deliveryId: firstId },
+          source,
+        );
+        await session.handleMessage(
+          { type: "agent.timeline.delivery.ack", deliveryId: firstId },
+          source,
+        );
+        expect(delivered).toEqual(["first"]);
+        physicalSend.resolve();
+        const secondId = await secondSent.promise;
+        expect(delivered).toEqual(["first", "second"]);
+        await session.handleMessage(
+          { type: "agent.timeline.delivery.ack", deliveryId: secondId },
+          source,
+        );
+        await Promise.all([first, second]);
+      } finally {
+        physicalSend.resolve();
+        session.clearAgentTimelineSubscription(source);
+        await Promise.all([first, second]);
+        await session.cleanup();
+      }
+    },
+  );
+
+  test.each(["root", "child"] as const)(
+    "%s receipt remains source-scoped cleanup after read permission is revoked",
+    async (kind) => {
+      vi.useFakeTimers();
+      const source = {};
+      const sibling = {};
+      const sent = Promise.withResolvers<string>();
+      const timedOut: object[] = [];
+      const messages: SessionOutboundMessage[] = [];
+      const session = createSessionForWireCompatTest({
+        timelineAckTimeoutMs: 1000,
+        onTimelineAckTimeout: (socket) => timedOut.push(socket),
+        onMessageToSource: (_source, message) => {
+          messages.push(message);
+          if (
+            message.type === "fetch_agent_timeline_response" ||
+            message.type === "agent.provider_subagents.timeline.get.response"
+          ) {
+            const { deliveryId } = message.payload;
+            if (!deliveryId) throw new Error("Missing receipt");
+            sent.resolve(deliveryId);
+          }
+        },
+      });
+      session.updateClientCapabilities(
+        {
+          [CLIENT_CAPS.timelineDeliveryAck]: true,
+          [CLIENT_CAPS.projectedSubagentTimeline]: true,
+        },
+        source,
+      );
+      const first = session.handleMessage(kind === "root" ? rootRequest : childRequest, source);
+      let completed = false;
+      const drained = first.then(() => {
+        completed = true;
+        return undefined;
+      });
+      try {
+        const deliveryId = await sent.promise;
+        session.setPermissions(["daemon.read"]);
+        await session.handleMessage({ type: "agent.timeline.delivery.ack", deliveryId }, sibling);
+        expect(completed).toBe(false);
+        await session.handleMessage({ type: "agent.timeline.delivery.ack", deliveryId }, source);
+        await drained;
+        await vi.advanceTimersByTimeAsync(1001);
+        expect(timedOut).toEqual([]);
+        await session.handleMessage({ ...rootRequest, requestId: "revoked-read" }, source);
+        expect(messages.at(-1)).toMatchObject({
+          type: "rpc_error",
+          payload: { requestId: "revoked-read", code: "access_denied" },
+        });
+        await session.handleMessage(
+          { type: "ping", requestId: "still-connected", clientSentAt: 42 },
+          source,
+        );
+        expect(messages.at(-1)).toMatchObject({
+          type: "pong",
+          payload: { requestId: "still-connected", clientSentAt: 42 },
+        });
+      } finally {
+        session.clearAgentTimelineSubscription(source);
+        await drained;
+        await session.cleanup();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  test("a missing receipt expires its source without loading queued history", async () => {
+    vi.useFakeTimers();
+    const source = {};
+    const sibling = {};
+    const sent = Promise.withResolvers<void>();
+    const closed: object[] = [];
+    const messages: SessionOutboundMessage[] = [];
+    const manager = new InMemoryAgentManager(rows);
+    const reads = vi.spyOn(manager, "fetchTimeline");
+    const session = createSessionForWireCompatTest({
+      manager,
+      timelineAckTimeoutMs: 1000,
+      onTimelineAckTimeout: (timedOut) => closed.push(timedOut),
+      onMessageToSource: (_source, message, onPrepared) => {
+        messages.push(message);
+        onPrepared?.(Buffer.byteLength(JSON.stringify(message)));
+        sent.resolve();
+      },
+    });
+    session.updateClientCapabilities({ [CLIENT_CAPS.timelineDeliveryAck]: true }, source);
+    session.updateClientCapabilities(null, sibling);
+    const first = session.handleMessage(rootRequest, source);
+    await sent.promise;
+    const queued = session.handleMessage({ ...childRequest, requestId: "queued" }, source);
+    try {
+      await session.handleMessage({ ...rootRequest, requestId: "sibling" }, sibling);
+      await session.handleMessage(
+        {
+          type: "session.events.set_subscription.request",
+          requestId: "control",
+          events: [],
+        },
+        source,
+      );
+      await vi.advanceTimersByTimeAsync(999);
+      expect(closed).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await Promise.all([first, queued]);
+      expect(closed).toEqual([source]);
+      expect(reads).toHaveBeenCalledTimes(2);
+      expect(messages.map((message) => message.type)).toEqual([
+        "fetch_agent_timeline_response",
+        "fetch_agent_timeline_response",
+        "session.events.set_subscription.response",
+      ]);
+    } finally {
+      session.clearAgentTimelineSubscription(source);
+      await Promise.all([first, queued]);
+      await session.cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  test("disconnect releases receipt waits and drops queued history", async () => {
+    const source = {};
+    const sent = Promise.withResolvers<void>();
+    const messages: SessionOutboundMessage[] = [];
+    const session = createSessionForWireCompatTest({
+      clientCapabilities: { [CLIENT_CAPS.timelineDeliveryAck]: true },
+      onMessageToSource: (_source, message) => {
+        messages.push(message);
+        sent.resolve();
+      },
+    });
+    const first = session.handleMessage(rootRequest, source);
+    await sent.promise;
+    const queued = session.handleMessage(childRequest, source);
+    session.clearAgentTimelineSubscription(source);
+    await Promise.all([first, queued]);
+    expect(messages).toMatchObject([
+      { type: "fetch_agent_timeline_response", payload: { deliveryId: expect.any(String) } },
+    ]);
+    await session.cleanup();
+  });
 
   test("a paused client receives a large timeline burst without reconnecting", async () => {
     const http = createServer();

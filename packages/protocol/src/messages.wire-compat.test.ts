@@ -8,6 +8,7 @@ import {
   AgentTimelineItemPayloadSchema,
   ServerInfoStatusPayloadSchema,
   SessionOutboundMessageSchema,
+  SessionInboundMessageSchema,
   WSHelloMessageSchema,
   WorkspaceSetupSnapshotSchema,
   WorkspaceSetupProgressMessageSchema,
@@ -587,4 +588,35 @@ test("speech config reads remain compatible with clients before features and fut
       features: { voiceMode: { stt: { provider: "future", region: "eu" } } },
     }).features?.voiceMode?.stt,
   ).toEqual({ provider: "future", region: "eu" });
+});
+
+test("timeline receipts are one-way notifications and an optional negotiated enhancement", () => {
+  expect(
+    SessionInboundMessageSchema.parse({
+      type: "agent.timeline.delivery.ack",
+      deliveryId: "physical-delivery-1",
+    }),
+  ).toEqual({ type: "agent.timeline.delivery.ack", deliveryId: "physical-delivery-1" });
+  expect(
+    WSHelloMessageSchema.parse({
+      type: "hello",
+      clientId: "client",
+      clientType: "cli",
+      protocolVersion: 1,
+      capabilities: { timeline_delivery_ack: true },
+    }).capabilities,
+  ).toEqual({ timeline_delivery_ack: true });
+  const legacy = {
+    status: "server_info",
+    serverId: "server",
+    hostname: null,
+    version: null,
+  };
+  expect(ServerInfoStatusPayloadSchema.parse(legacy)).toMatchObject(legacy);
+  expect(
+    ServerInfoStatusPayloadSchema.parse({
+      ...legacy,
+      features: { timelineDeliveryAck: true },
+    }).features,
+  ).toMatchObject({ timelineDeliveryAck: true });
 });

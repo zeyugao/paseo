@@ -128,6 +128,7 @@ export const DEFAULT_CLIENT_CAPABILITIES = {
   [CLIENT_CAPS.terminalChunkedReplay]: true,
   [CLIENT_CAPS.binaryChunkingV1]: true,
   [CLIENT_CAPS.helloRejection]: true,
+  [CLIENT_CAPS.timelineDeliveryAck]: true,
   [CLIENT_CAPS.ownedSubscriptions]: true,
   [CLIENT_CAPS.allProviders]: true,
   [CLIENT_CAPS.selectiveAgentTimeline]: true,

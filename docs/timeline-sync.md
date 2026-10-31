@@ -61,13 +61,39 @@ recovery is complete only when `hasNewer: false`.
 
 Initialization timeouts guard lack of catch-up progress, not the full multi-page sync. A successful page that queues the next `after` page refreshes the watchdog.
 
-Pace root and provider-child history together per source, before loading or projecting the next page.
-Waiting only after each response starts sending lets a reconnect burst fill the socket with large
-pages. Keep the bounded physical-write deadline with this pacing; otherwise an abandoned socket
-can hold all later history requests indefinitely. The default is 120 seconds;
-`PASEO_TIMELINE_RESPONSE_SEND_TIMEOUT_MS` overrides it at daemon startup. Do not reset the deadline
-from `bufferedAmount` or `bytesWritten`: neither measures partial-frame delivery to the peer. Other
-sources and control requests remain independent.
+Root and provider-child history share admission per physical source, before loading or projecting
+the next page. Without this admission, reconnect bursts retain materialized responses faster than
+the connection can drain them. Other sources and control RPC handlers do not enter this queue;
+already enqueued WebSocket frames can still delay control traffic on the same connection.
+
+Clients advertising `timeline_delivery_ack` negotiate receipts with
+`server_info.features.timelineDeliveryAck`. Each history response carries an optional `deliveryId`;
+the client sends the one-way `agent.timeline.delivery.ack` notification after consuming or discarding
+the page. SDK fetches await `options.onResponse` before acknowledging, so app timeline merges belong
+in that callback, not in a subsequent `.then()`. A fetch without a callback acknowledges after SDK
+processing. Late responses whose callers timed out are discarded and acknowledged. Schema-invalid
+pages still reject the fetch, but their receipt identity is validated independently so discarding
+one bad page cannot strand the source's history window. Receipts are source-scoped cleanup, not
+read authority: outstanding deliveries can still be acknowledged after read permissions are revoked.
+Receipts never cross a reconnect or enter the disconnected send queue. Older clients keep serial
+physical-write pacing, and reading history on older hosts needs no receipts.
+
+The adaptive window starts at one and probes up to eight in-flight deliveries only under sustained
+queued demand. It measures completed bytes through both physical send completion and client receipt,
+keeps useful throughput gains, rolls back a throughput plateau, and reduces admission on congestion.
+Socket write callbacks alone cannot measure client consumption, especially through a relay.
+
+A separate 2 MiB soft admission budget accounts for serialized UTF-8 response envelopes without
+serializing them again; transport protection adds overhead. Preparing pages reserve at least 96 KiB
+or the last observed page size, whichever is larger. Already preparing pages can overshoot when sizes
+change, and a single whole turn may exceed the budget. Admission pauses under byte pressure instead
+of truncating that turn; remembering its size prevents consecutive oversized pages from fanning out.
+
+Keep bounded physical-write and receipt deadlines; otherwise an abandoned source can hold its
+window indefinitely. Both default to 120 seconds; `PASEO_TIMELINE_RESPONSE_SEND_TIMEOUT_MS` overrides
+them at daemon startup. The receipt deadline covers sending and consumption together. Expiry closes
+and detaches that source, cancelling queued work. Do not reset deadlines from `bufferedAmount` or
+`bytesWritten`: neither measures partial-frame delivery to the peer.
 
 Opening or resuming an agent fetches the latest available turns with a soft target of 40
 projected items, also subject to the history byte budget. Backward pages and prompt-jump windows

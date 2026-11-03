@@ -1,14 +1,20 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const {
-  IOSConfig,
-  withAppDelegate,
-  withDangerousMod,
-  withInfoPlist,
-  withPodfile,
-} = require("expo/config-plugins");
+const { isDeepStrictEqual } = require("node:util");
+const { IOSConfig, withBaseMod, withDangerousMod, withPodfile } = require("expo/config-plugins");
 
 const BRIDGING_HEADER_IMPORT = "#import <react-native-paste-input/PasteInputModule.h>";
+const PASTE_INPUT_SCENE_MANIFEST = {
+  UIApplicationSupportsMultipleScenes: false,
+  UISceneConfigurations: {
+    UIWindowSceneSessionRoleApplication: [
+      {
+        UISceneConfigurationName: "Default Configuration",
+        UISceneDelegateClassName: "PaseoSceneDelegate",
+      },
+    ],
+  },
+};
 const SCENE_DELEGATE = `
 @objc(PaseoSceneDelegate)
 class PaseoSceneDelegate: ExpoAppSceneDelegate {
@@ -41,22 +47,41 @@ function configurePasteInputBridgingHeader(contents) {
 }
 
 function withPasteInput(config) {
-  const withDelegate = withAppDelegate(config, (modConfig) => {
-    if (modConfig.modResults.language !== "swift") {
-      throw new Error("Paste input setup requires a Swift AppDelegate");
-    }
-    modConfig.modResults.contents = configurePasteInputAppDelegate(modConfig.modResults.contents);
-    return modConfig;
+  const withDelegate = withBaseMod(config, {
+    platform: "ios",
+    mod: "appDelegate",
+    async action(modConfig) {
+      const configured = await modConfig.modRequest.nextMod(modConfig);
+      if (configured.modResults.language !== "swift") {
+        throw new Error("Paste input setup requires a Swift AppDelegate");
+      }
+      configured.modResults.contents = configurePasteInputAppDelegate(
+        configured.modResults.contents,
+      );
+      return configured;
+    },
   });
-  const withScene = withInfoPlist(withDelegate, (modConfig) => {
-    const scenes =
-      modConfig.modResults.UIApplicationSceneManifest?.UISceneConfigurations
-        ?.UIWindowSceneSessionRoleApplication;
-    if (!scenes || scenes.length !== 1) {
-      throw new Error("Paste input requires Expo's single scene configuration");
-    }
-    scenes[0].UISceneDelegateClassName = "PaseoSceneDelegate";
-    return modConfig;
+  const withScene = withBaseMod(withDelegate, {
+    platform: "ios",
+    mod: "infoPlist",
+    async action(modConfig) {
+      // Expo rejects our persisted delegate as app-owned. Let it regenerate only our manifest.
+      // Introspection reads plist dictionaries with null prototypes.
+      const previousManifest = structuredClone(modConfig.modResults.UIApplicationSceneManifest);
+      if (isDeepStrictEqual(previousManifest, PASTE_INPUT_SCENE_MANIFEST)) {
+        delete modConfig.modResults.UIApplicationSceneManifest;
+      }
+      const configured = await modConfig.modRequest.nextMod(modConfig);
+      // Expo shares its default manifest between configurations; do not mutate it.
+      const manifest = structuredClone(configured.modResults.UIApplicationSceneManifest);
+      const scenes = manifest?.UISceneConfigurations?.UIWindowSceneSessionRoleApplication;
+      if (!scenes || scenes.length !== 1) {
+        throw new Error("Paste input requires Expo's single scene configuration");
+      }
+      scenes[0].UISceneDelegateClassName = "PaseoSceneDelegate";
+      configured.modResults.UIApplicationSceneManifest = manifest;
+      return configured;
+    },
   });
   const withPods = withPodfile(withScene, (modConfig) => {
     // Paste input checks this legacy flag even though RN 0.86 only supports Fabric.
@@ -82,11 +107,8 @@ function withPasteInputBridgingHeader(config) {
 }
 
 module.exports = withPasteInput;
-module.exports.configurePasteInputAppDelegate = configurePasteInputAppDelegate;
-module.exports.configurePasteInputBridgingHeader = configurePasteInputBridgingHeader;
 
 function configurePasteInputPodfile(contents) {
   const flag = "ENV['RCT_NEW_ARCH_ENABLED'] = '1'";
   return contents.includes(flag) ? contents : `${flag}\n${contents}`;
 }
-module.exports.configurePasteInputPodfile = configurePasteInputPodfile;

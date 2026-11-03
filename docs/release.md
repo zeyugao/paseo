@@ -392,7 +392,9 @@ On macOS, copy the encoded signing files with `base64 -i distribution.p12 | pbco
 
 The API key needs an App Store Connect role supporting build upload, external tester/group management, and Beta App Review submission: use App Manager or Admin. Register **Overkite** in App Store Connect with bundle ID `me.elsanna.overkite`, and use signing assets and an API key from the Apple team that owns that app. GitHub iOS releases select the app by bundle ID, not the old upstream app's numeric Apple ID. iOS needs neither `EXPO_TOKEN` nor EAS build/signing credentials.
 
-Only the production mobile identity changes. Development stays `Paseo Debug` (`sh.paseo.debug`) so existing device automation keeps targeting the same app; the `paseo` URL scheme stays unchanged for daemon links. Expo owner/project settings are separate and remain unchanged: configure your own Expo project and push credentials before using Expo push notifications or EAS releases for this fork.
+Development stays `Paseo Debug` (`sh.paseo.debug`) so existing device automation keeps targeting the same app; the `paseo` URL scheme stays unchanged for daemon links. Expo uses the [Overkite project owned by `elsa-granger-team`](https://expo.dev/accounts/elsa-granger-team/projects/overkite). Configure its APNs push key separately with `eas credentials`; Expo push does not require uploading distribution signing credentials or the App Store Connect API key to Expo. Changing the Expo project requires a new native build; an already uploaded TestFlight build keeps its original project association. The development-client URL scheme follows the Expo slug and is now `exp+overkite`.
+
+Expo's credential manager introspects the generated native project even for push-only setup. Keep the paste-input plugin after `expo-build-properties` so it can round-trip its generated scene delegate. Do not disable `ios.enableSceneSupport` or delete the generated iOS project to work around scene-manifest errors.
 
 ### Store screenshots
 

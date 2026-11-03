@@ -174,7 +174,7 @@ AGENT_DEVICE_STATE_DIR="${STATE_DIR}" agent-device open "${APP_ID}" \
 adb shell am force-stop "${APP_ID}"
 adb shell am start \
   -a android.intent.action.VIEW \
-  -d "exp+voice-mobile://expo-development-client/?url=http%3A%2F%2F10.0.2.2%3A${METRO_PORT}" \
+  -d "exp+overkite://expo-development-client/?url=http%3A%2F%2F10.0.2.2%3A${METRO_PORT}" \
   "${APP_ID}" >/dev/null
 sleep 3
 

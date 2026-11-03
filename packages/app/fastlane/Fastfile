@@ -1,30 +1,16 @@
 require "fileutils"
+require "shellwords"
 require "tmpdir"
 
 default_platform(:ios)
 
-APP_IDENTIFIER = "sh.paseo"
+APP_IDENTIFIER = "me.elsanna.overkite"
 
 # Store screenshots are rendered into assets/store-screenshots/output; see the
 # README there. Google Play and F-Droid both read fastlane/metadata/android at
 # the repo root, whose screenshot files link to those renders.
 REPO_ROOT = File.expand_path("../../..", __dir__)
-STORE_SCREENSHOTS = File.join(REPO_ROOT, "assets/store-screenshots/output")
 ANDROID_METADATA = File.join(REPO_ROOT, "fastlane/metadata/android")
-
-# deliver reads screenshots from one folder per language and picks the device
-# slot from each image's size, so both Apple sets go into en-US together.
-def stage_app_store_screenshots
-  root = Dir.mktmpdir("app-store-screenshots")
-  locale = File.join(root, "en-US")
-  FileUtils.mkdir_p(locale)
-  { "apple" => "iphone", "apple-ipad" => "ipad" }.each do |set, device|
-    Dir.glob(File.join(STORE_SCREENSHOTS, set, "*.png")).sort.each do |file|
-      FileUtils.cp(file, File.join(locale, "#{device}-#{File.basename(file)}"))
-    end
-  end
-  root
-end
 
 # Google Play only has en-US screenshots, and some F-Droid locales in
 # ANDROID_METADATA are not Play languages (Play rejects "ja"). supply uploads
@@ -43,97 +29,71 @@ def stage_google_play_screenshots
 end
 
 platform :ios do
-  desc "Submit the latest TestFlight build to App Store Review"
-  lane :submit_review do
+  desc "Build and distribute to external TestFlight testers with Beta App Review"
+  lane :build_testflight do
+    team_id = ENV.fetch("IOS_TEAM_ID")
+    profile_name = ENV.fetch("IOS_PROVISION_PROFILE_NAME")
+    keychain_path = ENV.fetch("IOS_KEYCHAIN_PATH")
+    output_directory = ENV.fetch("IOS_OUTPUT_DIRECTORY")
     api_key = app_store_connect_api_key(
       key_id: ENV.fetch("ASC_KEY_ID"),
       issuer_id: ENV.fetch("ASC_ISSUER_ID"),
       key_filepath: ENV.fetch("ASC_KEY_P8"),
     )
 
-    require "spaceship"
-    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
-      key_id: ENV.fetch("ASC_KEY_ID"),
-      issuer_id: ENV.fetch("ASC_ISSUER_ID"),
-      filepath: ENV.fetch("ASC_KEY_P8"),
+    # Expo prebuild defaults push entitlements to development.
+    update_plist(
+      plist_path: "ios/Overkite/Overkite.entitlements",
+      block: proc { |plist| plist["aps-environment"] = "production" },
     )
-    app = Spaceship::ConnectAPI::App.find(APP_IDENTIFIER)
-    UI.user_error!("Could not find app #{APP_IDENTIFIER} on App Store Connect") if app.nil?
 
-    # The release workflow forwards the marketing version and CFBundleVersion of
-    # the binary it just built. Use them to identify the exact build, since
-    # CFBundleVersion is not unique across marketing versions in this project
-    # (the production profile resets it per app_version). The resubmit workflow
-    # leaves these unset and falls back to "most recently uploaded iOS build".
-    target_version = ENV["APP_VERSION"].to_s.strip
-    target_build = ENV["APP_BUILD_VERSION"].to_s.strip
-    target_version = nil if target_version.empty?
-    target_build = nil if target_build.empty?
+    # Keep the app's distribution profile off Pods and their resource bundles.
+    update_code_signing_settings(
+      path: "ios/Overkite.xcodeproj",
+      targets: ["Overkite"],
+      build_configurations: ["Release"],
+      use_automatic_signing: false,
+      team_id: team_id,
+      code_sign_identity: "Apple Distribution",
+      profile_name: profile_name,
+    )
 
-    if target_version
-      UI.message("Targeting App Store version #{target_version}#{target_build ? " build #{target_build}" : ""} from workflow input")
-    else
-      UI.message("No APP_VERSION provided; selecting the most recently uploaded iOS build")
-    end
+    ipa = build_app(
+      workspace: "ios/Overkite.xcworkspace",
+      scheme: "Overkite",
+      configuration: "Release",
+      destination: "generic/platform=iOS",
+      # Gym's supported name for an App Store Connect / TestFlight export.
+      export_method: "app-store",
+      export_options: {
+        signingStyle: "manual",
+        signingCertificate: "Apple Distribution",
+        teamID: team_id,
+        provisioningProfiles: { APP_IDENTIFIER => profile_name },
+        manageAppVersionAndBuildNumber: false,
+      },
+      xcargs: { OTHER_CODE_SIGN_FLAGS: "--keychain #{keychain_path.shellescape}" },
+      output_directory: output_directory,
+      output_name: "Overkite.ipa",
+      archive_path: File.join(output_directory, "Overkite.xcarchive"),
+      buildlog_path: File.join(output_directory, "logs"),
+      include_symbols: true,
+    )
 
-    valid_build = nil
-    deadline = Time.now + (30 * 60)
-    loop do
-      builds = Spaceship::ConnectAPI::Build.all(
-        app_id: app.id,
-        sort: "-uploadedDate",
-        limit: 100,
-      ).select { |b| b.pre_release_version&.platform == "IOS" }
-      builds = builds.select { |b| b.pre_release_version&.version == target_version } if target_version
-      builds = builds.select { |b| b.version == target_build } if target_build
 
-      build = builds.first
-      if build.nil?
-        UI.user_error!("Timed out waiting for build to appear on App Store Connect.") if Time.now > deadline
-        UI.message("No matching iOS build visible on App Store Connect yet; waiting...")
-        sleep(30)
-        next
-      end
-
-      state = build.processing_state
-      UI.message("Build #{build.pre_release_version.version} (#{build.version}) processing state: #{state || 'unknown'}")
-      if state == "VALID"
-        valid_build = build
-        break
-      end
-      if state == "INVALID" || state == "FAILED"
-        UI.user_error!("Build #{build.version} failed App Store processing (state: #{state}).")
-      end
-      if Time.now > deadline
-        UI.user_error!("Timed out waiting for build #{build.version} to finish processing on App Store Connect.")
-      end
-      sleep(30)
-    end
-
-    app_version = valid_build.pre_release_version.version
-    build_number = valid_build.version
-    UI.message("Submitting build #{build_number} as App Store version #{app_version} for review")
-
-    deliver(
+    # This submits only Beta App Review, never production App Store review.
+    upload_to_testflight(
       api_key: api_key,
       app_identifier: APP_IDENTIFIER,
-      app_version: app_version,
-      build_number: build_number.to_s,
-      submit_for_review: true,
-      automatic_release: true,
-      reject_if_possible: true,
-      release_notes: {
-        "en-US" => "Bug fixes and improvements.",
-      },
-      force: true,
-      skip_binary_upload: true,
-      screenshots_path: stage_app_store_screenshots,
-      overwrite_screenshots: true,
-      precheck_include_in_app_purchases: false,
-      submission_information: {
-        add_id_info_uses_idfa: false,
-        export_compliance_uses_encryption: false,
-      },
+      ipa: ipa,
+      app_version: ENV.fetch("APP_VERSION"),
+      build_number: ENV.fetch("APP_BUILD_VERSION"),
+      distribute_external: true,
+      groups: ["Overkite Beta"],
+      submit_beta_review: true,
+      notify_external_testers: true,
+      skip_submission: false,
+      skip_waiting_for_build_processing: false,
     )
   end
 end

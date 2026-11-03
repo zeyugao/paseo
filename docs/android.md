@@ -4,10 +4,10 @@
 
 Controlled by `APP_VARIANT` in `packages/app/app.config.js` (vanilla Expo, no custom Gradle plugin):
 
-| Variant       | App name    | Package ID       |
-| ------------- | ----------- | ---------------- |
-| `production`  | Paseo       | `sh.paseo`       |
-| `development` | Paseo Debug | `sh.paseo.debug` |
+| Variant       | App name    | Package ID            |
+| ------------- | ----------- | --------------------- |
+| `production`  | Overkite    | `me.elsanna.overkite` |
+| `development` | Paseo Debug | `sh.paseo.debug`      |
 
 EAS profiles: `development`, `production`, and `production-apk` in `packages/app/eas.json`.
 
@@ -101,7 +101,7 @@ npm run dev:ios         # Build/install the iOS development app
 `build:apk` writes `artifacts/paseo-dogfood-universal.apk`; `build:apk:arm64` writes
 `artifacts/paseo-dogfood-arm64.apk`. Neither command launches or installs on a device. Both enable
 `PASEO_WATCHDOG_BUILD=1`, the production React profiling renderer, and Android's shell-profileable
-flag. These builds keep the production package ID (`sh.paseo`) and release optimizations. Use this APK for
+flag. These builds keep the production package ID (`me.elsanna.overkite`) and release optimizations. Use this APK for
 personal dogfooding. Android system-trace spans require the separate `PASEO_PROFILE_BUILD=1` flag;
 watchdog recording does not send duplicate spans to that sink by default. Normal store/release
 workflows leave diagnostics disabled.
@@ -146,7 +146,7 @@ For an ordinary release APK with system trace markers only:
 PASEO_PROFILE_BUILD=1 npm run android:production
 ```
 
-Those markers emit only while a system trace records `sh.paseo` (`perfetto -a sh.paseo ...`);
+Those markers emit only while a system trace records `me.elsanna.overkite` (`perfetto -a me.elsanna.overkite ...`);
 they do not produce Downloads files.
 
 ## Running on an emulator against a worktree daemon
@@ -262,12 +262,12 @@ adb exec-out screencap -p > screenshot.png
 
 Stable tag pushes like `v0.1.0` trigger:
 
-- The EAS GitHub app on Expo servers, using `packages/app/.eas/workflows/release-mobile.yml` (iOS + Android production builds and distribution).
+- The EAS GitHub app on Expo servers, using `packages/app/.eas/workflows/release-mobile.yml` (Android Play Store build and submission).
 - `.github/workflows/android-apk-release.yml` on GitHub Actions (APK asset on GitHub Release).
 
-iOS distributes the same build to external TestFlight testers and App Store review; see [Mobile builds (EAS)](release.md#mobile-builds-eas) for the review paths. Android auto-submits to the Play Store via EAS-managed credentials.
+Android auto-submits to the Play Store via EAS-managed credentials. iOS uses GitHub-hosted macOS runners and distributes only through TestFlight; see [Mobile builds](release.md#mobile-builds).
 
-Beta tags like `v0.1.1-beta.1` trigger the GitHub APK workflow and EAS `Release iOS Beta`. They publish a GitHub prerelease APK and distribute iOS through TestFlight without submitting to production stores.
+Beta tags like `v0.1.1-beta.1` trigger the GitHub APK and `iOS TestFlight` workflows. They publish a GitHub prerelease APK and distribute iOS through TestFlight without submitting to production stores.
 
 `android-v*` tags also trigger only the GitHub APK workflow — useful when you want to ship an APK without going through stores. The GitHub APK workflow supports `workflow_dispatch` with an existing `tag` input so you can rebuild without cutting a new tag.
 

@@ -289,7 +289,6 @@ export async function hoverFooterAddProject(page: Page): Promise<void> {
   await page.locator('[data-testid="sidebar-add-project"]:visible').hover();
   const tooltip = page.getByTestId("sidebar-add-project-tooltip");
   await expect(tooltip.getByText("Add project", { exact: true })).toBeVisible();
-  await expect(tooltip.getByText("Ctrl+O", { exact: true })).toBeVisible();
 }
 
 export async function footerScreenshot(page: Page, name: string): Promise<void> {

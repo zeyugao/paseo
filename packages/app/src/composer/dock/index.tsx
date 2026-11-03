@@ -70,7 +70,8 @@ export function ComposerDock({
 }
 
 const styles = StyleSheet.create((theme) => ({
-  surface: { flex: 1, overflow: "hidden" },
+  // Overflow-hidden still terminates browser touch arbitration for fullscreen edge swipes.
+  surface: { flex: 1, overflow: "hidden", touchAction: "pan-y" },
   content: { flex: 1, justifyContent: "flex-end" },
   composer: { width: "100%", flexShrink: 1 },
   // Fixed, not absolute: a touch pan that starts inside an overflow-hidden ancestor

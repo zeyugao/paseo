@@ -263,58 +263,62 @@ const COMPACT_PANELS = [
   },
 ] as const;
 
-for (const panel of COMPACT_PANELS) {
-  test(`closing the compact ${panel.name} does not restore composer focus`, async ({ page }) => {
-    const agent = await seedMockAgentWorkspace({
-      repoPrefix: "composer-focus-panel-",
-      title: `Composer focus under ${panel.name}`,
+test.describe("compact touch panels", () => {
+  test.use({ hasTouch: true });
+
+  for (const panel of COMPACT_PANELS) {
+    test(`closing the compact ${panel.name} does not restore composer focus`, async ({ page }) => {
+      const agent = await seedMockAgentWorkspace({
+        repoPrefix: "composer-focus-panel-",
+        title: `Composer focus under ${panel.name}`,
+      });
+      const draft = "Line one\nLine two\nLine three";
+      try {
+        await resizeComposerViewport(page, "portrait");
+        await openAgentRoute(page, agent);
+        await expectComposerVisible(page);
+
+        await test.step("an untouched editor stays untouched", async () => {
+          await expectComposerNotFocused(page);
+          await panel.open(page);
+          await panel.expectOpen(page);
+          await panel.close(page);
+          await panel.expectClosed(page);
+          await expectComposerNotFocused(page);
+        });
+
+        await test.step("an inline editor blurred under the panel stays blurred", async () => {
+          await composerLocator(page).fill(draft);
+          await composerLocator(page).click();
+          await expectComposerFocused(page);
+          await panel.open(page);
+          await panel.expectOpen(page);
+          await blurComposerInput(page);
+          await panel.close(page);
+          await panel.expectClosed(page);
+          await expectComposerNotFocused(page);
+          await expectComposerDraft(page, draft);
+        });
+
+        await test.step("a fullscreen editor blurred under the panel stays blurred", async () => {
+          await composerLocator(page).click();
+          await enterComposerFullscreen(page);
+          await expectComposerFullscreenControls(page);
+          await expectComposerFocused(page);
+          await panel.open(page);
+          await panel.expectOpen(page);
+          await blurComposerInput(page);
+          await panel.close(page);
+          await panel.expectClosed(page);
+          await expectComposerNotFocused(page);
+          await expectComposerFullscreenControls(page);
+          await expectComposerDraft(page, draft);
+          await exitComposerFullscreen(page);
+          await expectWorkspaceHeaderVisible(page);
+        });
+      } finally {
+        await agent.cleanup();
+      }
     });
-    const draft = "Line one\nLine two\nLine three";
-    try {
-      await resizeComposerViewport(page, "portrait");
-      await openAgentRoute(page, agent);
-      await expectComposerVisible(page);
-
-      await test.step("an untouched editor stays untouched", async () => {
-        await expectComposerNotFocused(page);
-        await panel.open(page);
-        await panel.expectOpen(page);
-        await panel.close(page);
-        await panel.expectClosed(page);
-        await expectComposerNotFocused(page);
-      });
-
-      await test.step("an inline editor blurred under the panel stays blurred", async () => {
-        await composerLocator(page).fill(draft);
-        await composerLocator(page).click();
-        await expectComposerFocused(page);
-        await panel.open(page);
-        await panel.expectOpen(page);
-        await blurComposerInput(page);
-        await panel.close(page);
-        await panel.expectClosed(page);
-        await expectComposerNotFocused(page);
-        await expectComposerDraft(page, draft);
-      });
-
-      await test.step("a fullscreen editor blurred under the panel stays blurred", async () => {
-        await composerLocator(page).click();
-        await enterComposerFullscreen(page);
-        await expectComposerFullscreenControls(page);
-        await expectComposerFocused(page);
-        await panel.open(page);
-        await panel.expectOpen(page);
-        await blurComposerInput(page);
-        await panel.close(page);
-        await panel.expectClosed(page);
-        await expectComposerNotFocused(page);
-        await expectComposerFullscreenControls(page);
-        await expectComposerDraft(page, draft);
-        await exitComposerFullscreen(page);
-        await expectWorkspaceHeaderVisible(page);
-      });
-    } finally {
-      await agent.cleanup();
-    }
-  });
-}
+  }
+});

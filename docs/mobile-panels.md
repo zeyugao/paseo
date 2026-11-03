@@ -32,6 +32,9 @@ Navigation swipes accept touch input anywhere in the workspace, not just at its 
 check `navigator.maxTouchPoints`; the gesture's `pointerType` also excludes mouse and pen input on
 hybrid devices. Keep mouse text selection independent of navigation. Horizontal-scroll ownership and
 interactive-surface blockers still take precedence over opening the sidebar.
+Web gesture hosts and transcript scroll containers must reserve horizontal touch movement with
+`pan-y`. An outer host alone cannot prevent a nested scroll container from taking the pointer stream.
+Browser gesture tests must use a touch-enabled context and send touch events, not mouse drags.
 Returning to a dock clears the transient left target, preventing it from resurfacing on the next collapse.
 
 The UI worklet owns transient motion:

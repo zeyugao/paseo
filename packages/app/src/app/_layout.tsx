@@ -1,3 +1,4 @@
+import { useHardwareKeyboardPresent } from "@/keyboard";
 import { AddHostProvider, AddHostFlowHost } from "@/hosts/add-host";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
@@ -36,6 +37,7 @@ import { DownloadToast } from "@/components/download-toast";
 import { QuittingOverlay } from "@/components/quitting-overlay";
 import { KeyboardShortcutsDialog } from "@/components/keyboard-shortcuts-dialog";
 import { ChangelogHost } from "@/changelog";
+import { OnboardingHost } from "@/onboarding";
 import { AppDiagnosticHost } from "@/components/app-diagnostic-host";
 import { AppearanceStyleBoundary } from "@/components/appearance-style-boundary";
 import { LeftSidebar } from "@/components/left-sidebar";
@@ -100,7 +102,7 @@ import { useActiveWorktreeNewAction } from "@/hooks/use-active-worktree-new-acti
 import { useGlobalNewWorkspaceAction } from "@/hooks/use-global-new-workspace-action";
 import { useLatchedBoolean } from "@/hooks/use-latched-boolean";
 import { useFaviconStatus } from "@/hooks/use-favicon-status";
-import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
+import { useKeyboardShortcuts } from "@/keyboard/use-shortcuts";
 import { KeyboardShiftProvider } from "@/keyboard/shift";
 import { useCompactWebViewportZoomLock } from "@/hooks/use-compact-web-viewport-zoom-lock";
 import { useOpenProject } from "@/hooks/use-open-project";
@@ -345,7 +347,6 @@ export function useHostRuntimeBootstrapState(): HostRuntimeBootstrapState {
 
 const rowStyle = { flex: 1, flexDirection: "row" } as const;
 const flexStyle = { flex: 1 } as const;
-const MOBILE_WEB_GESTURE_TOUCH_ACTION = isWeb ? "auto" : "pan-y";
 
 interface AppContainerProps {
   children: ReactNode;
@@ -627,6 +628,7 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
         <WorkspacePinShortcutHandler />
         <WorkspaceRenameHost />
         <CommandCenter />
+        <OnboardingHost />
         <AddProjectFlowHost />
         <HostChooserModal />
         <HostConfirmationSheet />
@@ -681,6 +683,7 @@ function SidebarChrome({
   const isDesktopOpen = usePanelStore((state) => state.desktop.agentListOpen);
   const overlay = isCompactLayout || desktopOverlay;
   const active = visible && (overlay ? isMobileActive : isDesktopOpen);
+  const hardwareKeyboardPresent = useHardwareKeyboardPresent();
   const mobilePanelTarget = usePanelStore((state) => state.mobilePanel.target);
   const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
   useEffect(() => {
@@ -689,7 +692,10 @@ function SidebarChrome({
     }
   }, [overlay, mobilePanelTarget, showMobileAgent]);
   return (
-    <SidebarModelProvider active={active}>
+    <SidebarModelProvider
+      active={active}
+      keyboardNavigationActive={keyboardShortcutsEnabled && hardwareKeyboardPresent}
+    >
       {mounted ? <LeftSidebar active={active} desktopOverlay={desktopOverlay} /> : null}
       <WorkspaceShortcutTargetsSubscriber enabled={keyboardShortcutsEnabled} />
     </SidebarModelProvider>
@@ -723,7 +729,7 @@ function MobileGestureWrapper({
   });
 
   return (
-    <GestureDetector gesture={openGesture} touchAction={MOBILE_WEB_GESTURE_TOUCH_ACTION}>
+    <GestureDetector gesture={openGesture} touchAction="pan-y">
       <View
         collapsable={false}
         style={layoutStyles.surfaceFill}

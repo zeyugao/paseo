@@ -1225,6 +1225,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
       overflowX: "hidden",
       overflowY: scrollEnabled ? "auto" : "hidden",
       overscrollBehaviorY: "contain",
+      touchAction: "pan-y pinch-zoom",
       // The browser still anchors delayed image growth while following output.
       // Detached reading has one owner: reconcileReadingPosition.
       overflowAnchor: followOutput ? "auto" : "none",

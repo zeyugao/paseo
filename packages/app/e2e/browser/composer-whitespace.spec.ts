@@ -527,34 +527,38 @@ test("retained agent tabs preserve fullscreen editing and paste when switched aw
   }
 });
 
-test("the compact sidebar over a fullscreen editor leaves the exit action alone", async ({
-  page,
-}) => {
-  const agent = await seedMockAgentWorkspace({
-    repoPrefix: "composer-fullscreen-sidebar-",
-    title: "Fullscreen under sidebar",
+test.describe("compact touch sidebar", () => {
+  test.use({ hasTouch: true });
+
+  test("the compact sidebar over a fullscreen editor leaves the exit action alone", async ({
+    page,
+  }) => {
+    const agent = await seedMockAgentWorkspace({
+      repoPrefix: "composer-fullscreen-sidebar-",
+      title: "Fullscreen under sidebar",
+    });
+    try {
+      await resizeComposerViewport(page, "portrait");
+      await openAgentRoute(page, agent);
+      const draft = "Line one\nLine two\nLine three";
+      await writeCompactDraft(page, draft);
+      await enterComposerFullscreen(page);
+      await expectWorkspaceHeaderHidden(page);
+      // Fullscreen hides the header's menu button; the edge swipe still opens the list over it.
+      await swipeOpenMobileAgentSidebar(page);
+      await expectMobileAgentSidebarVisible(page);
+      // The list covers the pane, so the editor's exit action is not armed.
+      await page.keyboard.press("Escape");
+      await closeMobileAgentSidebar(page);
+      await expectMobileAgentSidebarHidden(page);
+      await expectComposerFullscreenControls(page);
+      await expect(composerLocator(page)).toHaveValue(draft);
+      await exitComposerFullscreen(page);
+      await expectWorkspaceHeaderVisible(page);
+    } finally {
+      await agent.cleanup();
+    }
   });
-  try {
-    await resizeComposerViewport(page, "portrait");
-    await openAgentRoute(page, agent);
-    const draft = "Line one\nLine two\nLine three";
-    await writeCompactDraft(page, draft);
-    await enterComposerFullscreen(page);
-    await expectWorkspaceHeaderHidden(page);
-    // Fullscreen hides the header's menu button; the edge swipe still opens the list over it.
-    await swipeOpenMobileAgentSidebar(page);
-    await expectMobileAgentSidebarVisible(page);
-    // The list covers the pane, so the editor's exit action is not armed.
-    await page.keyboard.press("Escape");
-    await closeMobileAgentSidebar(page);
-    await expectMobileAgentSidebarHidden(page);
-    await expectComposerFullscreenControls(page);
-    await expect(composerLocator(page)).toHaveValue(draft);
-    await exitComposerFullscreen(page);
-    await expectWorkspaceHeaderVisible(page);
-  } finally {
-    await agent.cleanup();
-  }
 });
 
 test("retained inline composers keep usable capacity through hidden tab geometry", async ({

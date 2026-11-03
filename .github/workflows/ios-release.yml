@@ -57,6 +57,25 @@ jobs:
           node scripts/ios-release-env.mjs >> "$GITHUB_ENV"
           echo "IOS_OUTPUT_DIRECTORY=$RUNNER_TEMP/ios-release" >> "$GITHUB_ENV"
 
+      - name: Resolve TestFlight test notes
+        run: |
+          node --input-type=module <<'NODE' >> "$GITHUB_ENV"
+          import { randomUUID } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          import { parseChangelogBody, parseChangelogEntries } from "./scripts/changelog-utils.mjs";
+
+          const version = process.env.SOURCE_TAG.slice(1);
+          const entry = parseChangelogEntries(readFileSync("CHANGELOG.md", "utf8"))
+            .find((entry) => entry.version === version);
+          if (!entry) throw new Error(`No changelog entry for ${version}`);
+          const notes = parseChangelogBody(entry.bodyLines).notes.join("\n\n");
+          if (!notes || notes.length > 4000) {
+            throw new Error("TestFlight needs a changelog summary of 1–4000 characters");
+          }
+          const delimiter = randomUUID();
+          console.log(`PILOT_CHANGELOG<<${delimiter}\n${notes}\n${delimiter}`);
+          NODE
+
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:

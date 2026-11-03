@@ -361,9 +361,13 @@ macOS 13 maps to Darwin 22. The two values use different version domains; do not
 
 ## Mobile builds
 
-- **iOS (TestFlight only)** — `.github/workflows/ios-release.yml` (`iOS TestFlight`) runs on GitHub-hosted `macos-latest` runners for stable and beta `v*` tag pushes, excluding release-candidate (`rc`) tags. It uses Ruby 3.3, `APP_VARIANT=production`, and `fastlane ios build_testflight` from `packages/app/` to build, upload once, distribute to the persistent `Overkite Beta` external group, and submit for Beta App Review. Both stable and beta releases go to testers; neither submits for App Store production review.
+- **iOS (TestFlight only)** — `.github/workflows/ios-release.yml` (`iOS TestFlight`) runs on GitHub-hosted `xcode-27` runners with stable Xcode 27.1 for stable and beta `v*` tag pushes, excluding release-candidate (`rc`) tags. It uses Ruby 3.3, `APP_VARIANT=production`, and `fastlane ios build_testflight` from `packages/app/` to build, upload once, distribute to the persistent `Overkite Beta` external group, and submit for Beta App Review. Both stable and beta releases go to testers; neither submits for App Store production review.
 - **Android (Play Store)** — the EAS GitHub app triggers `packages/app/.eas/workflows/release-mobile.yml` for stable tags. Its jobs are Android-only: build with profile `production`, auto-submit via `eas submit` using EAS-managed credentials, then replace Google Play screenshots through Fastlane. Beta tags do not submit to Play Store.
 - **Android APK (GitHub Release asset)** — separate, via `.github/workflows/android-apk-release.yml`.
+
+The Duo window-layout module requires the iOS 27.1 SDK. Runtime `#available` checks do not make its UIKit symbols compile with older SDKs. Keep the stable Xcode selection explicit; the `xcode-27` image also includes release candidates.
+
+The release's introductory CHANGELOG paragraphs supply TestFlight's **What to Test** through Fastlane's `PILOT_CHANGELOG`. Keep that summary between 1 and 4,000 characters; external distribution rejects a missing changelog before uploading the binary.
 
 The tag must match `packages/app/package.json`. Native version derivation remains unchanged: `packages/app/app.config.js` uses the existing `native-release-version.js` helper. Android `versionCode` is `major * 1_000_000 + minor * 1_000 + patch`. iOS reserves 1,000 build slots per app version: beta `N` uses slot `N`, and stable uses slot `999`. For example, `0.2.6-beta.2` appears in App Store Connect as version `0.2.6` build `2006002`; stable uses build `2006999`. Rebuilding the same tag produces the same native build number. Do not retry an accepted binary upload; a different binary after acceptance needs the next beta or patch, not remote auto-increment.
 

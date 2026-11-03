@@ -103,7 +103,7 @@ jobs:
           IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
 
-      - name: Build and distribute to TestFlight
+      - name: Build and distribute to Overkite Internal
         working-directory: packages/app
         run: bundle exec fastlane ios build_testflight
         env:

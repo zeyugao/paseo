@@ -248,7 +248,7 @@ npm run release:promote          # Promote X.Y.Z-beta.N to stable X.Y.Z
 
 - Beta tags are published GitHub prereleases like `v0.1.41-beta.1`
 - Betas publish npm packages with `--tag beta`, so `npm install @getpaseo/cli@beta` opts in while plain `npm install @getpaseo/cli` stays on `latest`
-- Betas publish desktop assets and APKs for testing. They also build iOS, upload it to TestFlight, add it to the `Overkite Beta` external group, and submit it for Beta App Review. They do not submit mobile builds to the production stores.
+- Betas publish desktop assets and APKs for testing. They also build iOS, upload it to TestFlight, and add it to the `Overkite Internal` internal group. They do not submit Beta App Review or mobile builds to the production stores.
 - `release:promote` creates a fresh stable tag like `v0.1.41`; the final release never reuses the beta tag
 - Desktop assets now come from the Electron package at `packages/desktop`
 - Require the Linux artifact CI checks with both restricted and usable user namespaces to pass before publication; see [packaged desktop smoke](testing.md#packaged-desktop-smoke). Keep the installed-package and AppImage checks together.
@@ -361,17 +361,17 @@ macOS 13 maps to Darwin 22. The two values use different version domains; do not
 
 ## Mobile builds
 
-- **iOS (TestFlight only)** — `.github/workflows/ios-release.yml` (`iOS TestFlight`) runs on GitHub-hosted `xcode-27` runners with stable Xcode 27.1 for stable and beta `v*` tag pushes, excluding release-candidate (`rc`) tags. It uses Ruby 3.3, `APP_VARIANT=production`, and `fastlane ios build_testflight` from `packages/app/` to build, upload once, distribute to the persistent `Overkite Beta` external group, and submit for Beta App Review. Both stable and beta releases go to testers; neither submits for App Store production review.
+- **iOS (TestFlight only)** — `.github/workflows/ios-release.yml` (`iOS TestFlight`) runs on GitHub-hosted `xcode-27` runners with stable Xcode 27.1 for stable and beta `v*` tag pushes, excluding release-candidate (`rc`) tags. It uses Ruby 3.3, `APP_VARIANT=production`, and `fastlane ios build_testflight` from `packages/app/` to build, upload once, and distribute to the persistent `Overkite Internal` internal group. Both stable and beta releases go to internal testers; neither submits Beta App Review or App Store production review.
 - **Android (Play Store)** — the EAS GitHub app triggers `packages/app/.eas/workflows/release-mobile.yml` for stable tags. Its jobs are Android-only: build with profile `production`, auto-submit via `eas submit` using EAS-managed credentials, then replace Google Play screenshots through Fastlane. Beta tags do not submit to Play Store.
 - **Android APK (GitHub Release asset)** — separate, via `.github/workflows/android-apk-release.yml`.
 
 The Duo window-layout module requires the iOS 27.1 SDK. Runtime `#available` checks do not make its UIKit symbols compile with older SDKs. Keep the stable Xcode selection explicit; the `xcode-27` image also includes release candidates.
 
-The release's introductory CHANGELOG paragraphs supply TestFlight's **What to Test** through Fastlane's `PILOT_CHANGELOG`. Keep that summary between 1 and 4,000 characters; external distribution rejects a missing changelog before uploading the binary.
+The release's introductory CHANGELOG paragraphs supply TestFlight's **What to Test** through Fastlane's `PILOT_CHANGELOG`. Keep that summary between 1 and 4,000 characters.
 
 The tag must match `packages/app/package.json`. Native version derivation remains unchanged: `packages/app/app.config.js` uses the existing `native-release-version.js` helper. Android `versionCode` is `major * 1_000_000 + minor * 1_000 + patch`. iOS reserves 1,000 build slots per app version: beta `N` uses slot `N`, and stable uses slot `999`. For example, `0.2.6-beta.2` appears in App Store Connect as version `0.2.6` build `2006002`; stable uses build `2006999`. Rebuilding the same tag produces the same native build number. Do not retry an accepted binary upload; a different binary after acceptance needs the next beta or patch, not remote auto-increment.
 
-Testers, the `Overkite Beta` group, and required TestFlight test information are managed once in App Store Connect. Beta App Review enables external TestFlight testing and is distinct from App Store production review, which this workflow never requests. [Apple says](https://developer.apple.com/help/app-store-connect/test-a-beta-version/invite-external-testers) the first submitted build requires a full TestFlight review; later builds for the same version might not. Do not assume a stable patch skips Beta App Review.
+Manage the `Overkite Internal` group and its testers in App Store Connect. [Internal testers](https://developer.apple.com/help/app-store-connect/test-a-beta-version/add-internal-testers) must be App Store Connect users with access to Overkite. CI assigns builds to the group; it does not invite testers, distribute externally, or submit either kind of review.
 
 ### iOS signing and App Store Connect credentials
 
@@ -390,7 +390,7 @@ If `production` restricts deployment branches or tags, allow release tags matchi
 
 On macOS, copy the encoded signing files with `base64 -i distribution.p12 | pbcopy` and `base64 -i profile.mobileprovision | pbcopy`. For `ASC_PRIVATE_KEY`, paste the `.p8` contents including its `BEGIN PRIVATE KEY` and `END PRIVATE KEY` lines. The workflow derives the team ID and profile name from the profile and removes signing files and its temporary keychain after the run.
 
-The API key needs an App Store Connect role supporting build upload, external tester/group management, and Beta App Review submission: use App Manager or Admin. Register **Overkite** in App Store Connect with bundle ID `me.elsanna.overkite`, and use signing assets and an API key from the Apple team that owns that app. GitHub iOS releases select the app by bundle ID, not the old upstream app's numeric Apple ID. iOS needs neither `EXPO_TOKEN` nor EAS build/signing credentials.
+The API key needs an App Store Connect role supporting build upload, TestFlight metadata, and internal group assignment: use App Manager or Admin. Register **Overkite** in App Store Connect with bundle ID `me.elsanna.overkite`, and use signing assets and an API key from the Apple team that owns that app. GitHub iOS releases select the app by bundle ID, not the old upstream app's numeric Apple ID. iOS needs neither `EXPO_TOKEN` nor EAS build/signing credentials.
 
 Development stays `Paseo Debug` (`sh.paseo.debug`) so existing device automation keeps targeting the same app; the `paseo` URL scheme stays unchanged for daemon links. Expo uses the [Overkite project owned by `elsa-granger-team`](https://expo.dev/accounts/elsa-granger-team/projects/overkite). Configure its APNs push key separately with `eas credentials`; Expo push does not require uploading distribution signing credentials or the App Store Connect API key to Expo. Changing the Expo project requires a new native build; an already uploaded TestFlight build keeps its original project association. The development-client URL scheme follows the Expo slug and is now `exp+overkite`.
 
@@ -415,7 +415,7 @@ gh run view <run-id>
 gh run view <run-id> --log-failed
 ```
 
-Check the run's requested tag and checked-out release commit, not just its workflow-dispatch branch. A successful build or accepted upload alone is not completion: require `iOS TestFlight` to finish distribution to `Overkite Beta` and Beta App Review submission. App Store Connect's TestFlight build, external group assignment, and Beta App Review state are the final ground truth. App Store production review is not a completion requirement.
+Check the run's requested tag and checked-out release commit, not just its workflow-dispatch branch. A successful upload alone is not completion: require `iOS TestFlight` to finish distribution to `Overkite Internal`. The matching build's processed state and internal group assignment in App Store Connect are the final ground truth. Neither Beta App Review nor App Store production review is requested or required.
 
 For Android, use the EAS CLI from `packages/app/`:
 
@@ -463,11 +463,11 @@ Windows, and Android APK assets are present along with the channel manifests
 `beta-mac.yml`, `beta-linux.yml`, and `beta.yml` for beta).
 
 For both stable and beta releases, confirm the GitHub `iOS TestFlight` workflow
-completed external distribution to `Overkite Beta` and Beta App Review submission
-for the release commit. Stable releases additionally require the Android EAS
-build, Play Store submission, and screenshot jobs. No release requires App Store
-production review submission. Delete the heartbeat only after every applicable
-checklist item passes, then report the release as shipped.
+completed upload and internal distribution to `Overkite Internal` for the release
+commit. Stable releases additionally require the Android EAS build, Play Store
+submission, and screenshot jobs. Neither Beta App Review nor App Store production
+review is required. Delete the heartbeat only after every applicable checklist
+item passes, then report the release as shipped.
 
 Pattern:
 
@@ -479,7 +479,7 @@ Pattern:
   "timezone": "UTC",
   "maxRuns": 120,
   "expiresIn": "24h",
-  "prompt": "Resume the vX.Y.Z release babysit for commit <sha>. Check npm tags; every GitHub Actions run for the release branch and tag; the published GitHub Release body, expected desktop/APK assets, and channel manifests; the Docker image; the matching GitHub iOS TestFlight run; and the applicable Android EAS workflow. Completion requires every applicable checklist item. Both stable and beta require iOS TestFlight upload, Overkite Beta external distribution, and Beta App Review submission; never require App Store production review. Stable also requires build_android, submit_android, and upload_android_screenshots to succeed. If work is pending, wait for the next heartbeat. If a failure can be retried safely for the same version, follow the failed-release procedure; never re-upload an accepted iOS binary. Otherwise report the blocker. When every item passes, delete THIS heartbeat, report shipped, and stop.",
+  "prompt": "Resume the vX.Y.Z release babysit for commit <sha>. Check npm tags; every GitHub Actions run for the release branch and tag; the published GitHub Release body, expected desktop/APK assets, and channel manifests; the Docker image; the matching GitHub iOS TestFlight run; and the applicable Android EAS workflow. Completion requires every applicable checklist item. Both stable and beta require iOS TestFlight upload and Overkite Internal internal distribution; never require Beta App Review or App Store production review. Stable also requires build_android, submit_android, and upload_android_screenshots to succeed. If work is pending, wait for the next heartbeat. If a failure can be retried safely for the same version, follow the failed-release procedure; never re-upload an accepted iOS binary. Otherwise report the blocker. When every item passes, delete THIS heartbeat, report shipped, and stop.",
 }
 ```
 
@@ -800,7 +800,7 @@ Every entry covers `previous stable release → release source`: first beta, lat
 - [ ] GitHub `Android APK Release` workflow for the same tag is green
 - [ ] GitHub `Docker` workflow is green and the versioned beta image is published without moving `latest`
 - [ ] GitHub `Release Notes Sync` mirrored the beta entry into the prerelease body
-- [ ] GitHub `iOS TestFlight` for the same tag is green, with the matching build uploaded once, distributed to `Overkite Beta`, and submitted for Beta App Review (not App Store production review)
+- [ ] GitHub `iOS TestFlight` for the same tag is green, with the matching build uploaded once and distributed to `Overkite Internal` (no Beta App Review or App Store production review)
 - [ ] The [reconcile PR](#reconcile-main) brought the shipped changelog entries and version into `main`
 - [ ] The release heartbeat was created after the tag push and deleted only after every item above passed
 
@@ -826,7 +826,7 @@ Every entry covers `previous stable release → release source`: first beta, lat
 - [ ] GitHub `Android APK Release` workflow for the same tag is green
 - [ ] GitHub `Docker` workflow is green and both the versioned and `latest` images are published
 - [ ] GitHub `Release Notes Sync` is green and the release body matches the stable changelog entry
-- [ ] GitHub `iOS TestFlight` for the same tag is green, with the matching build uploaded once, distributed to `Overkite Beta`, and submitted for Beta App Review (not App Store production review)
+- [ ] GitHub `iOS TestFlight` for the same tag is green, with the matching build uploaded once and distributed to `Overkite Internal` (no Beta App Review or App Store production review)
 - [ ] EAS Android-only `Release Mobile` workflow for the same tag is green
 - [ ] EAS Android `build_android` completes for the same tag
 - [ ] EAS Android `submit_android` succeeds, putting the build on its Play Store track

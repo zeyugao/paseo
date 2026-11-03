@@ -29,7 +29,7 @@ def stage_google_play_screenshots
 end
 
 platform :ios do
-  desc "Build and distribute to external TestFlight testers with Beta App Review"
+  desc "Build and distribute to the Overkite Internal TestFlight group"
   lane :build_testflight do
     team_id = ENV.fetch("IOS_TEAM_ID")
     profile_name = ENV.fetch("IOS_PROVISION_PROFILE_NAME")
@@ -81,17 +81,17 @@ platform :ios do
     )
 
 
-    # This submits only Beta App Review, never production App Store review.
+    # Keep group distribution enabled, but never submit Beta App Review or notify external testers.
     upload_to_testflight(
       api_key: api_key,
       app_identifier: APP_IDENTIFIER,
       ipa: ipa,
       app_version: ENV.fetch("APP_VERSION"),
       build_number: ENV.fetch("APP_BUILD_VERSION"),
-      distribute_external: true,
-      groups: ["Overkite Beta"],
-      submit_beta_review: true,
-      notify_external_testers: true,
+      distribute_external: false,
+      groups: ["Overkite Internal"],
+      submit_beta_review: false,
+      notify_external_testers: false,
       skip_submission: false,
       skip_waiting_for_build_processing: false,
     )

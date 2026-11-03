@@ -210,6 +210,7 @@ import {
   FileBackedWorkspaceRegistry,
   assertCwdWorkspaceOwnedByThisServer,
   isWorkspaceVisibleToServer,
+  resolveCwdWorkspaceHost,
   type WorkspaceArchiveContext,
   type WorkspaceRegistry,
 } from "./workspace-registry.js";
@@ -1587,6 +1588,7 @@ export async function createPaseoDaemon(
     archiveWorkspace: archiveScheduleWorkspaceExternal,
     assertCwdWorkspaceOwnedByThisServer: (cwd) =>
       assertCwdWorkspaceOwnedByThisServer(cwd, workspaceRegistry, serverId),
+    resolveCwdWorkspaceHost: (cwd) => resolveCwdWorkspaceHost(cwd, workspaceRegistry),
   });
   // Deferred to start() after the instance lease is held: a rejected
   // competitor must never interrupt the live daemon's schedule recovery.

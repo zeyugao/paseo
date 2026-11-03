@@ -67,6 +67,7 @@ export function toScheduleLogRow(run: ScheduleRunRecord): ScheduleLogRow {
 export function createScheduleInspectRows(schedule: ScheduleRecord): ScheduleInspectRow[] {
   return [
     { key: "Id", value: schedule.id },
+    { key: "Owner", value: schedule.hostId ?? "legacy" },
     { key: "Name", value: schedule.name ?? "null" },
     { key: "Prompt", value: schedule.prompt },
     {

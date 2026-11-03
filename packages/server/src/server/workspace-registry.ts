@@ -828,6 +828,32 @@ export function assertCwdWorkspaceRecordsOwnedByThisServer(
   }
 }
 
+// Migrating a legacy schedule needs an owner, not just permission for the current
+// host. Only a path with workspace records from exactly one host is unambiguous;
+// a host-less legacy workspace is visible everywhere and cannot pin an owner.
+export async function resolveCwdWorkspaceHost(
+  cwd: string,
+  registry: Pick<WorkspaceRegistry, "list">,
+): Promise<string | null> {
+  const target = resolveRealpathWithMissingSuffix(expandTilde(cwd));
+  let hostId: string | null = null;
+  for (const workspace of await registry.list()) {
+    const workspaceCwd = resolveRealpathWithMissingSuffix(workspace.cwd);
+    if (
+      !isSameOrDescendantPath(target, workspaceCwd) &&
+      !isSameOrDescendantPath(workspaceCwd, target)
+    )
+      continue;
+    if (workspace.hostId === undefined) return null;
+    if (hostId === null) {
+      hostId = workspace.hostId;
+    } else if (hostId !== workspace.hostId) {
+      return null;
+    }
+  }
+  return hostId;
+}
+
 function resolveRealpathWithMissingSuffix(path: string): string {
   const suffix: string[] = [];
   let candidate = path;

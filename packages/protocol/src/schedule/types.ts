@@ -57,6 +57,12 @@ export type ScheduleRun = z.infer<typeof ScheduleRunSchema>;
 
 export const StoredScheduleSchema = z.object({
   id: z.string(),
+  /**
+   * `serverId` of the daemon that owns this schedule when PASEO_HOME is shared.
+   * Absent on records written before host ownership; those stay visible to every
+   * daemon sharing the home and keep the claim-based execution path.
+   */
+  hostId: z.string().optional(),
   name: z.string().nullable(),
   prompt: z.string().min(1),
   cadence: ScheduleCadenceSchema,

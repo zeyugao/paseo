@@ -577,7 +577,17 @@ describe("ScheduleService", () => {
       now: () => nowB,
       runner: runnerB,
     });
-    const created = await serviceA.create({
+    // Legacy host-less records stay shared, so the claim lease is their only
+    // mutual exclusion; host-owned schedules are serialized by ownership.
+    const legacyService = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => nowA,
+    });
+    const created = await legacyService.create({
       prompt: "Manual run under clock skew",
       cadence: { type: "every", everyMs: 60_000 },
       target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
@@ -630,6 +640,622 @@ describe("ScheduleService", () => {
       "agent is owned by host srv-foreign",
     );
     expect(await service.list()).toEqual([]);
+  });
+
+  test("stamps the creating host and lists only owned plus legacy schedules", async () => {
+    const target = {
+      type: "new-agent" as const,
+      config: { provider: "claude" as const, cwd: tempDir },
+    };
+    const cadence = { type: "cron" as const, expression: "0 3 * * *" };
+    const serviceA = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "unexpected" }),
+    });
+    const serviceB = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-b",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "unexpected" }),
+    });
+    const legacyService = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "unexpected" }),
+    });
+
+    const ownedA = await serviceA.create({ prompt: "on a", cadence, target });
+    const ownedB = await serviceB.create({ prompt: "on b", cadence, target });
+    const legacy = await legacyService.create({ prompt: "legacy", cadence, target });
+
+    expect(ownedA.hostId).toBe("srv-a");
+    expect(ownedB.hostId).toBe("srv-b");
+    expect(legacy.hostId).toBeUndefined();
+    expect((await serviceA.list()).map((schedule) => schedule.id).sort()).toEqual(
+      [ownedA.id, legacy.id].sort(),
+    );
+    expect((await serviceB.list()).map((schedule) => schedule.id).sort()).toEqual(
+      [ownedB.id, legacy.id].sort(),
+    );
+  });
+
+  test("rejects mutations on a schedule owned by another host", async () => {
+    const owner = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "unexpected" }),
+    });
+    const foreign = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-b",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "unexpected" }),
+    });
+    const created = await owner.create({
+      prompt: "owned",
+      cadence: { type: "cron", expression: "0 3 * * *" },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+
+    for (const mutate of [
+      () => foreign.pause(created.id),
+      () => foreign.resume(created.id),
+      () => foreign.update({ id: created.id, prompt: "hijacked" }),
+      () => foreign.runOnce(created.id),
+      () => foreign.delete(created.id),
+    ]) {
+      await expect(mutate()).rejects.toThrow("owned by host srv-a");
+    }
+
+    await expect(foreign.inspect(created.id)).resolves.toMatchObject({ hostId: "srv-a" });
+    await expect(foreign.logs(created.id)).resolves.toEqual([]);
+    await expect(owner.inspect(created.id)).resolves.toMatchObject({
+      prompt: "owned",
+      status: "active",
+    });
+  });
+
+  test("does not run a due schedule owned by another host", async () => {
+    const runnerA = vi.fn(async () => ({ agentId: null, output: "ran-on-a" }));
+    const runnerB = vi.fn(async () => ({ agentId: null, output: "ran-on-b" }));
+    const serviceA = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: runnerA,
+    });
+    const serviceB = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-b",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: runnerB,
+    });
+    const created = await serviceA.create({
+      prompt: "due on a",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+
+    now = new Date(now.getTime() + 60_000);
+    await serviceB.tick();
+    expect(runnerB).not.toHaveBeenCalled();
+    expect((await serviceB.inspect(created.id)).runs).toHaveLength(0);
+
+    await serviceA.tick();
+    expect(runnerA).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not claim a schedule whose ownership changes after the tick snapshot", async () => {
+    const runner = vi.fn(async () => ({ agentId: null, output: "unexpected" }));
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    const legacyService = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const created = await legacyService.create({
+      prompt: "ownership changes mid-tick",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+    now = new Date(now.getTime() + 60_000);
+
+    const snapshot = await service.list();
+    expect(snapshot.map((schedule) => schedule.id)).toEqual([created.id]);
+    const store = new ScheduleStore(join(tempDir, "schedules"), createTestLogger());
+    await store.update(created.id, (schedule) => ({ ...schedule, hostId: "srv-other" }));
+
+    const listSpy = vi.spyOn(service, "list").mockResolvedValueOnce(snapshot);
+    await service.tick();
+    listSpy.mockRestore();
+
+    expect(runner).not.toHaveBeenCalled();
+    const after = await store.get(created.id);
+    expect(after).toMatchObject({
+      hostId: "srv-other",
+      nextRunAt: created.nextRunAt,
+      runs: [],
+    });
+  });
+
+  test("does not start a manual run when ownership changes after the pre-read", async () => {
+    const runner = vi.fn(async () => ({ agentId: null, output: "unexpected" }));
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    const legacyService = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const created = await legacyService.create({
+      prompt: "ownership changes before manual append",
+      cadence: { type: "cron", expression: "0 3 * * *" },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+    const snapshot = await service.inspect(created.id);
+    const store = new ScheduleStore(join(tempDir, "schedules"), createTestLogger());
+    await store.update(created.id, (schedule) => ({ ...schedule, hostId: "srv-other" }));
+
+    const inspectSpy = vi.spyOn(service, "inspect").mockResolvedValueOnce(snapshot);
+    await expect(service.runOnce(created.id)).rejects.toThrow("owned by host srv-other");
+    inspectSpy.mockRestore();
+
+    expect(runner).not.toHaveBeenCalled();
+    expect((await store.get(created.id))?.runs).toEqual([]);
+  });
+
+  test("leaves a legacy schedule shared while another host holds its claim", async () => {
+    const legacyService = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const legacy = await legacyService.create({
+      prompt: "claimed legacy schedule",
+      cadence: { type: "cron", expression: "0 3 * * *" },
+      target: { type: "new-agent", config: { provider: "claude", cwd: "/workspace/only-a" } },
+    });
+    const store = new ScheduleStore(join(tempDir, "schedules"), createTestLogger());
+    await store.update(legacy.id, (schedule) => ({
+      ...schedule,
+      runs: [
+        {
+          id: "live-run",
+          scheduledFor: now.toISOString(),
+          startedAt: now.toISOString(),
+          endedAt: null,
+          status: "running",
+          agentId: null,
+          output: null,
+          error: null,
+        },
+      ],
+    }));
+    await writeFile(
+      join(tempDir, "schedules", `${legacy.id}.claim`),
+      JSON.stringify({
+        runId: "live-run",
+        kind: "due",
+        serverId: "srv-other",
+        scheduledFor: now.toISOString(),
+        claimedAt: now.toISOString(),
+      }),
+      "utf8",
+    );
+
+    const serviceA = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      resolveCwdWorkspaceHost: async () => "srv-a",
+    });
+    await serviceA.start();
+    await serviceA.stop();
+
+    expect((await serviceA.inspect(legacy.id)).hostId).toBeUndefined();
+  });
+
+  test("recovers an interrupted legacy run before adopting it to another host", async () => {
+    const legacyService = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const legacy = await legacyService.create({
+      prompt: "crash leftover before adoption",
+      cadence: { type: "cron", expression: "0 3 * * *" },
+      target: { type: "new-agent", config: { provider: "claude", cwd: "/workspace/only-b" } },
+    });
+    const store = new ScheduleStore(join(tempDir, "schedules"), createTestLogger());
+    await store.update(legacy.id, (schedule) => ({
+      ...schedule,
+      runs: [
+        {
+          id: "crash-run",
+          scheduledFor: now.toISOString(),
+          startedAt: now.toISOString(),
+          endedAt: null,
+          status: "running",
+          agentId: null,
+          output: null,
+          error: null,
+        },
+      ],
+    }));
+    await writeFile(
+      join(tempDir, "schedules", `${legacy.id}.claim`),
+      JSON.stringify({
+        runId: "crash-run",
+        kind: "due",
+        serverId: "srv-a",
+        scheduledFor: now.toISOString(),
+        claimedAt: now.toISOString(),
+      }),
+      "utf8",
+    );
+
+    const serviceA = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      resolveCwdWorkspaceHost: async () => "srv-b",
+    });
+    await serviceA.start();
+    await serviceA.stop();
+
+    const after = await store.get(legacy.id);
+    expect(after?.hostId).toBe("srv-b");
+    expect(after?.runs[0]).toMatchObject({
+      status: "failed",
+      error: "Daemon restarted before the scheduled run completed",
+    });
+  });
+
+  test("fails an abandoned run behind a stale claim before adopting a foreign record", async () => {
+    const serviceB = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-b",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const created = await serviceB.create({
+      prompt: "crashed on the previous owner",
+      cadence: { type: "cron", expression: "0 3 * * *" },
+      target: { type: "new-agent", config: { provider: "claude", cwd: "/workspace/only-a" } },
+    });
+    expect(created.hostId).toBe("srv-b");
+    const store = new ScheduleStore(join(tempDir, "schedules"), createTestLogger());
+    await store.update(created.id, (schedule) => ({
+      ...schedule,
+      runs: [
+        {
+          id: "abandoned-run",
+          scheduledFor: now.toISOString(),
+          startedAt: now.toISOString(),
+          endedAt: null,
+          status: "running",
+          agentId: null,
+          output: null,
+          error: null,
+        },
+      ],
+    }));
+    const claimPath = join(tempDir, "schedules", `${created.id}.claim`);
+    await writeFile(
+      claimPath,
+      JSON.stringify({
+        runId: "abandoned-run",
+        kind: "due",
+        serverId: "srv-b",
+        scheduledFor: now.toISOString(),
+        claimedAt: now.toISOString(),
+      }),
+      "utf8",
+    );
+    const staleMtime = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+    await utimes(claimPath, staleMtime, staleMtime);
+
+    const serviceA = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      resolveCwdWorkspaceHost: async () => "srv-a",
+    });
+    await serviceA.start();
+    await serviceA.stop();
+
+    const after = await store.get(created.id);
+    expect(after?.hostId).toBe("srv-a");
+    expect(after?.runs[0]).toMatchObject({
+      status: "failed",
+      error: "Schedule claim became stale before the run completed",
+    });
+    await expect(readFile(claimPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("adopts a legacy schedule from its cwd's single owning host on start", async () => {
+    const legacyService = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const legacy = await legacyService.create({
+      prompt: "legacy cwd schedule",
+      cadence: { type: "cron", expression: "0 3 * * *" },
+      target: { type: "new-agent", config: { provider: "claude", cwd: "/workspace/only-a" } },
+    });
+
+    const serviceA = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      resolveCwdWorkspaceHost: async (cwd) => (cwd === "/workspace/only-a" ? "srv-a" : null),
+    });
+    await serviceA.start();
+    await serviceA.stop();
+
+    expect((await serviceA.inspect(legacy.id)).hostId).toBe("srv-a");
+    const serviceB = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-b",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    expect(await serviceB.list()).toEqual([]);
+  });
+
+  test("leaves a legacy schedule shared when its cwd has no single owning host", async () => {
+    const legacyService = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const legacy = await legacyService.create({
+      prompt: "ambiguous cwd schedule",
+      cadence: { type: "cron", expression: "0 3 * * *" },
+      target: { type: "new-agent", config: { provider: "claude", cwd: "/workspace/shared" } },
+    });
+
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      resolveCwdWorkspaceHost: async () => null,
+    });
+    await service.start();
+    await service.stop();
+
+    expect((await service.inspect(legacy.id)).hostId).toBeUndefined();
+    expect((await service.list()).map((schedule) => schedule.id)).toEqual([legacy.id]);
+  });
+
+  test("reassigns an owned new-agent schedule when its cwd's owning host changes", async () => {
+    const serviceA = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const created = await serviceA.create({
+      prompt: "owned before the cwd moved",
+      cadence: { type: "cron", expression: "0 3 * * *" },
+      target: { type: "new-agent", config: { provider: "claude", cwd: "/workspace/only-b" } },
+    });
+    expect(created.hostId).toBe("srv-a");
+
+    const reconciling = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      resolveCwdWorkspaceHost: async () => "srv-b",
+    });
+    await reconciling.start();
+    await reconciling.stop();
+
+    expect((await reconciling.inspect(created.id)).hostId).toBe("srv-b");
+    const serviceB = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-b",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    expect((await serviceB.list()).map((schedule) => schedule.id)).toEqual([created.id]);
+  });
+
+  test("reassigns ownership after a run releases its claim", async () => {
+    const runner = vi.fn(async () => ({ agentId: null, output: "ran" }));
+    const serviceA = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+      resolveCwdWorkspaceHost: async () => "srv-b",
+    });
+    const created = await serviceA.create({
+      prompt: "run then move",
+      cadence: { type: "cron", expression: "0 3 * * *" },
+      target: { type: "new-agent", config: { provider: "claude", cwd: "/workspace/only-b" } },
+    });
+    expect(created.hostId).toBe("srv-a");
+
+    const finished = await serviceA.runOnce(created.id);
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(finished).toMatchObject({
+      hostId: "srv-b",
+      runs: [expect.objectContaining({ status: "succeeded", output: "ran" })],
+    });
+
+    const serviceB = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-b",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    expect((await serviceB.list()).map((schedule) => schedule.id)).toEqual([created.id]);
+  });
+
+  test("adopts a legacy heartbeat from its target agent's host on start", async () => {
+    const agentId = "00000000-0000-0000-0000-0000000000cc";
+    const timestamp = now.toISOString();
+    await agentStorage.upsert({
+      id: agentId,
+      provider: "claude",
+      cwd: tempDir,
+      hostId: "srv-a",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      lastStatus: "closed",
+      labels: {},
+    });
+    const store = new ScheduleStore(join(tempDir, "schedules"), createTestLogger());
+    const legacy = await store.create({
+      name: null,
+      prompt: "legacy heartbeat",
+      cadence: { type: "cron", expression: "0 3 * * *" },
+      target: { type: "agent", agentId },
+      status: "active",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      nextRunAt: "2026-01-02T03:00:00.000Z",
+      lastRunAt: null,
+      pausedAt: null,
+      expiresAt: null,
+      maxRuns: null,
+      runs: [],
+    });
+
+    const serviceA = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-a",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    await serviceA.start();
+    await serviceA.stop();
+
+    expect((await serviceA.inspect(legacy.id)).hostId).toBe("srv-a");
+    const serviceB = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-b",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    expect(await serviceB.list()).toEqual([]);
   });
 
   test("does not run or advance a schedule whose target agent is owned by another host", async () => {
@@ -700,7 +1326,52 @@ describe("ScheduleService", () => {
     expect(foreignAfter.status).toBe("active");
   });
 
-  test("does not claim or manually run a new-agent schedule in a foreign workspace", async () => {
+  test("rejects creating or updating a new-agent schedule with a foreign cwd", async () => {
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "unexpected" }),
+      assertCwdWorkspaceOwnedByThisServer: async (cwd) => {
+        if (cwd === "/foreign/workspace") {
+          throw new Error("Workspace ws-foreign is owned by host srv-foreign");
+        }
+      },
+    });
+    const input = {
+      prompt: "Foreign new-agent schedule",
+      cadence: { type: "every" as const, everyMs: 60_000 },
+      target: {
+        type: "new-agent" as const,
+        config: { provider: "claude" as const, cwd: "/foreign/workspace" },
+      },
+    };
+
+    await expect(service.create(input)).rejects.toThrow(
+      "Workspace ws-foreign is owned by host srv-foreign",
+    );
+
+    const owned = await service.create({
+      ...input,
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+    await expect(
+      service.update({
+        id: owned.id,
+        newAgentConfig: { cwd: "/foreign/workspace" },
+      }),
+    ).rejects.toThrow("Workspace ws-foreign is owned by host srv-foreign");
+    expect((await service.inspect(owned.id)).target).toMatchObject({
+      config: { cwd: tempDir },
+    });
+  });
+
+  test("does not claim or manually run a schedule whose cwd becomes foreign after creation", async () => {
+    let foreign = false;
     const runner = vi.fn(async () => ({ agentId: null, output: "unexpected" }));
     const service = createScheduleService({
       paseoHome: tempDir,
@@ -712,7 +1383,7 @@ describe("ScheduleService", () => {
       now: () => now,
       runner,
       assertCwdWorkspaceOwnedByThisServer: async (cwd) => {
-        if (cwd === "/foreign/workspace") {
+        if (foreign && cwd === "/foreign/workspace") {
           throw new Error("Workspace ws-foreign is owned by host srv-foreign");
         }
       },
@@ -723,6 +1394,7 @@ describe("ScheduleService", () => {
       target: { type: "new-agent", config: { provider: "claude", cwd: "/foreign/workspace" } },
     });
     const nextRunAt = schedule.nextRunAt;
+    foreign = true;
 
     now = new Date(now.getTime() + 60_000);
     await service.tick();
@@ -757,7 +1429,17 @@ describe("ScheduleService", () => {
       now: () => now,
       runner,
     });
-    const created = await serviceA.create({
+    // A legacy host-less record is the only case where a second host can observe
+    // (and try to reclaim) another host's claim.
+    const legacyService = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const created = await legacyService.create({
       prompt: "Long running schedule",
       cadence: { type: "every", everyMs: 60_000 },
       target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },

@@ -20,6 +20,7 @@ import {
   createPersistedWorkspaceRecord,
   FileBackedProjectRegistry,
   FileBackedWorkspaceRegistry,
+  resolveCwdWorkspaceHost,
   resolveWorkspaceDisplayName,
   resolveWorkspaceName,
   type WorkspaceMutation,
@@ -795,4 +796,53 @@ describe("workspace registries", () => {
       ).rejects.toThrow("owned by host srv-other");
     },
   );
+});
+
+describe("resolveCwdWorkspaceHost", () => {
+  const record = (workspaceId: string, cwd: string, hostId?: string) =>
+    createPersistedWorkspaceRecord({
+      workspaceId,
+      projectId: "proj-1",
+      cwd,
+      kind: "local_checkout",
+      displayName: workspaceId,
+      hostId,
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+
+  test("returns the only host covering the path", async () => {
+    const registry = {
+      list: async () => [
+        record("ws-a", "/workspace/repo", "srv-a"),
+        record("ws-b", "/workspace", "srv-a"),
+      ],
+    };
+    await expect(resolveCwdWorkspaceHost("/workspace/repo/sub", registry)).resolves.toBe("srv-a");
+  });
+
+  test("returns null when overlapping records name different hosts", async () => {
+    const registry = {
+      list: async () => [
+        record("ws-a", "/workspace/repo", "srv-a"),
+        record("ws-b", "/workspace", "srv-b"),
+      ],
+    };
+    await expect(resolveCwdWorkspaceHost("/workspace/repo", registry)).resolves.toBeNull();
+  });
+
+  test("returns null when a legacy host-less record overlaps", async () => {
+    const registry = {
+      list: async () => [
+        record("ws-a", "/workspace/repo", "srv-a"),
+        record("ws-legacy", "/workspace"),
+      ],
+    };
+    await expect(resolveCwdWorkspaceHost("/workspace/repo", registry)).resolves.toBeNull();
+  });
+
+  test("returns null when nothing overlaps", async () => {
+    const registry = { list: async () => [record("ws-a", "/elsewhere", "srv-a")] };
+    await expect(resolveCwdWorkspaceHost("/workspace/repo", registry)).resolves.toBeNull();
+  });
 });

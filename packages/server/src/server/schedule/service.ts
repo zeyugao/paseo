@@ -47,6 +47,13 @@ export class ScheduleNotFoundError extends Error {
   }
 }
 
+export class ScheduleOwnershipError extends Error {
+  constructor(id: string, hostId: string) {
+    super(`Schedule ${id} is owned by host ${hostId}`);
+    this.name = "ScheduleOwnershipError";
+  }
+}
+
 export class ScheduleStateConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -267,6 +274,8 @@ export interface ScheduleServiceOptions {
   ) => Promise<CreatePaseoWorktreeWorkflowResult>;
   archiveWorkspace: (workspaceId: string) => Promise<void>;
   assertCwdWorkspaceOwnedByThisServer?: (cwd: string) => Promise<void>;
+  /** Infers the single host owning workspace records overlapping a cwd. */
+  resolveCwdWorkspaceHost?: (cwd: string) => Promise<string | null>;
   now?: () => Date;
   runner?: (schedule: StoredSchedule, runId: string) => Promise<ScheduleExecutionResult>;
 }
@@ -288,6 +297,7 @@ export class ScheduleService {
   ) => Promise<CreatePaseoWorktreeWorkflowResult>;
   private readonly archiveWorkspace: (workspaceId: string) => Promise<void>;
   private readonly assertCwdWorkspaceOwnedByThisServer: ((cwd: string) => Promise<void>) | null;
+  private readonly resolveCwdWorkspaceHost: ((cwd: string) => Promise<string | null>) | null;
   private readonly runner: (
     schedule: StoredSchedule,
     runId: string,
@@ -310,14 +320,16 @@ export class ScheduleService {
     this.createPaseoWorktreeWorkspace = options.createPaseoWorktreeWorkspace;
     this.archiveWorkspace = options.archiveWorkspace;
     this.assertCwdWorkspaceOwnedByThisServer = options.assertCwdWorkspaceOwnedByThisServer ?? null;
+    this.resolveCwdWorkspaceHost = options.resolveCwdWorkspaceHost ?? null;
     this.now = options.now ?? (() => new Date());
     this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
   }
 
   async start(): Promise<void> {
     await this.recoverInterruptedRuns();
-    await this.sweepOrphanedSchedules();
     await this.sweepStaleScheduleClaims();
+    await this.reconcileScheduleOwnership();
+    await this.sweepOrphanedSchedules();
     if (this.tickTimer) {
       return;
     }
@@ -337,10 +349,74 @@ export class ScheduleService {
     }
   }
 
+  // Ownership follows the target. A legacy record is adopted when its agent or cwd
+  // identifies exactly one host; a new-agent record is reassigned when its cwd's
+  // sole owning host has changed. Ambiguous host-less records keep the legacy
+  // shared/claim-based behavior, ambiguous owned records keep their owner, and a
+  // live claim is left alone until its run finishes.
+  private async reconcileScheduleOwnership(): Promise<void> {
+    if (this.serverId === undefined) return;
+    const schedules = await this.store.list();
+    await Promise.all(
+      schedules.map(async (schedule) => {
+        try {
+          const claimStat = await stat(join(this.claimsDir, `${schedule.id}.claim`)).catch(
+            (error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return null;
+              throw error;
+            },
+          );
+          if (claimStat) return;
+          const hostId = await this.inferScheduleOwner(schedule);
+          if (hostId === null || hostId === schedule.hostId) return;
+          await this.store.update(schedule.id, (current) =>
+            current.hostId === schedule.hostId ? { ...current, hostId } : current,
+          );
+        } catch (error) {
+          this.logger.warn(
+            { err: error, scheduleId: schedule.id },
+            "Failed to reconcile schedule host ownership",
+          );
+        }
+      }),
+    );
+  }
+
+  private async inferScheduleOwner(schedule: StoredSchedule): Promise<string | null> {
+    if (schedule.target.type === "agent") {
+      return (
+        (await this.agentStorage.getFresh(schedule.target.agentId))?.hostId ??
+        this.agentManager.getAgent(schedule.target.agentId)?.hostId ??
+        null
+      );
+    }
+    return this.resolveCwdWorkspaceHost
+      ? this.resolveCwdWorkspaceHost(schedule.target.config.cwd)
+      : null;
+  }
+
+  private async reconcileScheduleOwnershipFor(scheduleId: string): Promise<void> {
+    if (this.serverId === undefined) return;
+    try {
+      const schedule = await this.store.get(scheduleId);
+      if (!schedule) return;
+      const hostId = await this.inferScheduleOwner(schedule);
+      if (hostId === null || hostId === schedule.hostId) return;
+      await this.store.update(scheduleId, (current) =>
+        current.hostId === schedule.hostId ? { ...current, hostId } : current,
+      );
+    } catch (error) {
+      this.logger.warn(
+        { err: error, scheduleId },
+        "Failed to reconcile schedule host ownership after run",
+      );
+    }
+  }
+
   async create(input: CreateScheduleInput): Promise<StoredSchedule> {
     const prompt = normalizePrompt(input.prompt);
     validateScheduleCadence(input.cadence);
-    await this.assertAgentTargetOwnedByThisHost(input.target);
+    await this.assertScheduleTargetOwnedByThisHost(input.target);
     return this.createScheduleRecord(input, {
       name: trimOptionalName(input.name),
       prompt,
@@ -363,6 +439,7 @@ export class ScheduleService {
     const runOnCreate = input.runOnCreate ?? input.cadence.type === "every";
     const nextRunAt = runOnCreate ? now : computeNextRunAt(input.cadence, now);
     return {
+      hostId: this.serverId,
       name: fields.name,
       prompt: fields.prompt,
       cadence: input.cadence,
@@ -386,13 +463,14 @@ export class ScheduleService {
     const name = trimOptionalName(input.name);
     const prompt = normalizePrompt(input.prompt);
     validateScheduleCadence(input.cadence);
-    await this.assertAgentTargetOwnedByThisHost(input.target);
+    await this.assertScheduleTargetOwnedByThisHost(input.target);
     if (name === null) {
       return this.createScheduleRecord(input, { name, prompt, target: input.target });
     }
 
     const inputTarget = input.target;
     return this.store.upsertByNameAndTarget(name, inputTarget, {
+      hostId: this.serverId,
       create: async () => {
         return this.buildScheduleRecord(input, { name, prompt, target: inputTarget });
       },
@@ -403,6 +481,7 @@ export class ScheduleService {
         const nextRunAt = runOnCreate ? now : computeNextRunAt(cadence, now);
         return {
           ...current,
+          hostId: current.hostId ?? this.serverId,
           name,
           prompt,
           cadence,
@@ -419,12 +498,34 @@ export class ScheduleService {
   }
 
   async list(): Promise<StoredSchedule[]> {
-    return this.store.list();
+    const schedules = await this.store.list();
+    if (this.serverId === undefined) return schedules;
+    return schedules.filter(
+      (schedule) => schedule.hostId === undefined || schedule.hostId === this.serverId,
+    );
   }
 
   async inspect(id: string): Promise<StoredSchedule> {
     const schedule = await this.store.get(id);
     return requireSchedule(schedule, id);
+  }
+
+  private assertOwnedByThisServer(schedule: Pick<StoredSchedule, "id" | "hostId">): void {
+    const foreignHost = this.foreignScheduleHost(schedule);
+    if (foreignHost !== null) {
+      throw new ScheduleOwnershipError(schedule.id, foreignHost);
+    }
+  }
+
+  private foreignScheduleHost(schedule: Pick<StoredSchedule, "hostId">): string | null {
+    if (
+      this.serverId === undefined ||
+      schedule.hostId === undefined ||
+      schedule.hostId === this.serverId
+    ) {
+      return null;
+    }
+    return schedule.hostId;
   }
 
   async logs(id: string): Promise<ScheduleRun[]> {
@@ -434,6 +535,7 @@ export class ScheduleService {
 
   async pause(id: string): Promise<StoredSchedule> {
     const paused = await this.store.update(id, (schedule) => {
+      this.assertOwnedByThisServer(schedule);
       if (schedule.status === "completed") {
         throw new ScheduleStateConflictError(`Schedule ${id} is already completed`);
       }
@@ -454,6 +556,7 @@ export class ScheduleService {
 
   async resume(id: string): Promise<StoredSchedule> {
     const resumed = await this.store.update(id, (schedule) => {
+      this.assertOwnedByThisServer(schedule);
       if (schedule.status === "completed") {
         throw new ScheduleStateConflictError(`Schedule ${id} is already completed`);
       }
@@ -474,6 +577,7 @@ export class ScheduleService {
 
   async update(input: UpdateScheduleInput): Promise<StoredSchedule> {
     const next = await this.store.update(input.id, async (schedule) => {
+      this.assertOwnedByThisServer(schedule);
       const now = this.now();
       let updated: StoredSchedule = schedule;
 
@@ -498,6 +602,9 @@ export class ScheduleService {
           throw new Error("new-agent config updates are only valid for new-agent target schedules");
         }
         const patchedTarget = applyNewAgentConfig(updated.target, input.newAgentConfig);
+        if (input.newAgentConfig.cwd !== undefined && this.assertCwdWorkspaceOwnedByThisServer) {
+          await this.assertCwdWorkspaceOwnedByThisServer(patchedTarget.config.cwd);
+        }
         updated = {
           ...updated,
           target: patchedTarget,
@@ -518,12 +625,16 @@ export class ScheduleService {
   }
 
   async delete(id: string): Promise<void> {
-    await this.store.delete(id);
+    await this.store.delete(id, (schedule) => {
+      if (schedule) {
+        this.assertOwnedByThisServer(schedule);
+      }
+    });
   }
 
   async completeForAgent(agentId: string): Promise<number> {
     const now = this.now();
-    const schedules = await this.store.list();
+    const schedules = await this.list();
     const matches = schedules.filter(
       (schedule) =>
         schedule.target.type === "agent" &&
@@ -574,16 +685,14 @@ export class ScheduleService {
 
   async runOnce(id: string): Promise<StoredSchedule> {
     const schedule = await this.inspect(id);
+    this.assertOwnedByThisServer(schedule);
     if (schedule.status === "completed") {
       throw new ScheduleStateConflictError(`Schedule ${id} is already completed`);
     }
     if (this.runningScheduleIds.has(id)) {
       throw new ScheduleStateConflictError(`Schedule ${id} is already running`);
     }
-    await this.assertAgentTargetOwnedByThisHost(schedule.target);
-    if (schedule.target.type === "new-agent" && this.assertCwdWorkspaceOwnedByThisServer) {
-      await this.assertCwdWorkspaceOwnedByThisServer(schedule.target.config.cwd);
-    }
+    await this.assertScheduleTargetOwnedByThisHost(schedule.target);
     const now = this.now();
     const runId = randomUUID();
     const claimPath = await this.tryClaimSchedule(schedule, runId, now, "manual");
@@ -596,6 +705,7 @@ export class ScheduleService {
     } finally {
       this.runningClaims.delete(id);
       if (claimPath) await this.releaseScheduleClaim(claimPath, runId);
+      await this.reconcileScheduleOwnershipFor(id);
     }
     return this.inspect(id);
   }
@@ -603,7 +713,7 @@ export class ScheduleService {
   async tick(): Promise<void> {
     const now = this.now();
     await this.renewRunningClaims(now);
-    const schedules = await this.store.list();
+    const schedules = await this.list();
     for (const schedule of schedules) {
       if (schedule.status !== "active" || !schedule.nextRunAt) continue;
       if (this.runningScheduleIds.has(schedule.id)) continue;
@@ -624,6 +734,7 @@ export class ScheduleService {
       } finally {
         this.runningClaims.delete(schedule.id);
         if (claimPath) await this.releaseScheduleClaim(claimPath, runId);
+        await this.reconcileScheduleOwnershipFor(schedule.id);
       }
     }
   }
@@ -644,6 +755,13 @@ export class ScheduleService {
     const foreignHost = await this.foreignAgentTargetHost({ target });
     if (foreignHost !== null) {
       throw new Error(`agent is owned by host ${foreignHost}`);
+    }
+  }
+
+  private async assertScheduleTargetOwnedByThisHost(target: ScheduleTarget): Promise<void> {
+    await this.assertAgentTargetOwnedByThisHost(target);
+    if (target.type === "new-agent" && this.assertCwdWorkspaceOwnedByThisServer) {
+      await this.assertCwdWorkspaceOwnedByThisServer(target.config.cwd);
     }
   }
 
@@ -669,6 +787,7 @@ export class ScheduleService {
       const current = await this.store.get(schedule.id);
       if (
         !current ||
+        this.foreignScheduleHost(current) !== null ||
         current.status !== "active" ||
         current.nextRunAt !== schedule.nextRunAt ||
         new Date(current.nextRunAt ?? "").getTime() > this.now().getTime()
@@ -833,7 +952,8 @@ export class ScheduleService {
   private async sweepStaleScheduleClaims(): Promise<void> {
     await withReclaimLock(this.claimsLockPath, async () => {
       const entries = await readdir(this.claimsDir, { withFileTypes: true });
-      const nowMs = this.now().getTime();
+      const now = this.now();
+      const nowMs = now.getTime();
       await Promise.all(
         entries
           .filter((entry) => entry.isFile() && entry.name.endsWith(".claim"))
@@ -844,6 +964,19 @@ export class ScheduleService {
               throw error;
             });
             if (!claimStat || nowMs - claimStat.mtimeMs <= SCHEDULE_CLAIM_STALE_MS) return;
+            // A stale claim means no live run owns it. Fail the run it left behind,
+            // including on records this daemon does not own yet; reconciliation may
+            // adopt them right after this sweep.
+            const claim = await this.readScheduleClaim(claimPath);
+            const scheduleId = entry.name.slice(0, -".claim".length);
+            try {
+              await this.failAbandonedRunningRuns(scheduleId, claim?.runId, now);
+            } catch (error) {
+              this.logger.warn(
+                { err: error, claimPath, scheduleId },
+                "Failed to fail an abandoned schedule run while sweeping a stale claim",
+              );
+            }
             await unlink(claimPath).catch((error) => {
               if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
             });
@@ -867,7 +1000,7 @@ export class ScheduleService {
   }
 
   private async recoverInterruptedRuns(): Promise<void> {
-    const schedules = await this.store.list();
+    const schedules = await this.list();
     const now = this.now();
     await Promise.all(
       schedules.map((schedule) => this.recoverInterruptedSchedule(schedule.id, now)),
@@ -985,7 +1118,7 @@ export class ScheduleService {
   // them on startup so they stop ticking and surface as ended in the UI.
   private async sweepOrphanedSchedules(): Promise<void> {
     const now = this.now();
-    const schedules = await this.store.list();
+    const schedules = await this.list();
     await Promise.all(schedules.map((schedule) => this.sweepOrphanedSchedule(schedule.id, now)));
   }
 
@@ -1026,7 +1159,8 @@ export class ScheduleService {
           output: null,
           error: null,
         };
-        scheduleWithRun = await this.appendRunningRun(schedule.id, runningRun);
+        const appended = await this.appendRunningRun(schedule.id, runningRun);
+        scheduleWithRun = appended;
       } else {
         const claimed = await this.claimDueRun(schedule.id, now, claimedRunId);
         if (!claimed) {
@@ -1074,6 +1208,7 @@ export class ScheduleService {
   ): Promise<{ schedule: StoredSchedule; runId: string } | null> {
     let claimed: { schedule: StoredSchedule; runId: string } | null = null;
     const updatedSchedule = await this.store.update(scheduleId, (schedule) => {
+      if (this.foreignScheduleHost(schedule) !== null) return schedule;
       if (
         schedule.status !== "active" ||
         !schedule.nextRunAt ||
@@ -1122,12 +1257,19 @@ export class ScheduleService {
     scheduleId: string,
     runningRun: ScheduleRun,
   ): Promise<StoredSchedule> {
-    const updated = await this.store.update(scheduleId, (schedule) => ({
-      ...schedule,
-      updatedAt: runningRun.startedAt,
-      runs: [...schedule.runs, runningRun],
-    }));
-    return requireSchedule(updated, scheduleId);
+    const updated = await this.store.update(scheduleId, (schedule) =>
+      this.foreignScheduleHost(schedule) !== null
+        ? schedule
+        : {
+            ...schedule,
+            updatedAt: runningRun.startedAt,
+            runs: [...schedule.runs, runningRun],
+          },
+    );
+    if (!updated) throw new ScheduleNotFoundError(scheduleId);
+    const foreignHost = this.foreignScheduleHost(updated);
+    if (foreignHost !== null) throw new ScheduleOwnershipError(scheduleId, foreignHost);
+    return updated;
   }
 
   private async finishRun(params: {

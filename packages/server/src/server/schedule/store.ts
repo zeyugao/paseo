@@ -18,6 +18,11 @@ type ScheduleUpdater = (schedule: StoredSchedule) => StoredSchedule | Promise<St
 interface ScheduleNameTargetUpsert {
   create: () => Omit<StoredSchedule, "id"> | Promise<Omit<StoredSchedule, "id">>;
   update: ScheduleUpdater;
+  /**
+   * When set, only records this host owns and legacy host-less records are
+   * candidates. A schedule owned by another daemon is never rewritten.
+   */
+  hostId?: string;
 }
 
 function canonicalize(value: unknown): unknown {
@@ -78,7 +83,11 @@ function matchesNameAndTarget(
   schedule: StoredSchedule,
   name: string,
   target: ScheduleTarget,
+  hostId?: string,
 ): boolean {
+  if (hostId !== undefined && schedule.hostId !== undefined && schedule.hostId !== hostId) {
+    return false;
+  }
   const scheduleName = normalizeOptionalScheduleName(schedule.name);
   return (
     schedule.status !== "completed" &&
@@ -176,10 +185,14 @@ export class ScheduleStore {
       if (next === current) {
         return current;
       }
-      if (next.id !== id) {
+      const owned =
+        next.hostId === undefined && current.hostId !== undefined
+          ? { ...next, hostId: current.hostId }
+          : next;
+      if (owned.id !== id) {
         throw new Error(`Schedule update cannot change id: ${id}`);
       }
-      const updated = StoredScheduleSchema.parse(next);
+      const updated = StoredScheduleSchema.parse(owned);
       await this.write(updated);
       return updated;
     });
@@ -194,21 +207,27 @@ export class ScheduleStore {
     return this.serializeIdentityMutation(identity, async () => {
       while (true) {
         const existing = (await this.list()).find((schedule) =>
-          matchesNameAndTarget(schedule, name, target),
+          matchesNameAndTarget(schedule, name, target, options.hostId),
         );
         if (!existing) {
           const created = StoredScheduleSchema.parse({
             ...(await options.create()),
             id: generateScheduleId(),
           });
-          if (!matchesNameAndTarget(created, name, target)) {
+          if (!matchesNameAndTarget(created, name, target, options.hostId)) {
             throw new Error("Created schedule does not match requested identity");
           }
           await this.write(created);
           return created;
         }
 
-        const updated = await this.updateMatchedSchedule(existing.id, name, target, options.update);
+        const updated = await this.updateMatchedSchedule(
+          existing.id,
+          name,
+          target,
+          options.update,
+          options.hostId,
+        );
         if (updated) {
           return updated;
         }
@@ -221,8 +240,12 @@ export class ScheduleStore {
     await writeJsonFileAtomic(this.filePath(schedule.id), schedule);
   }
 
-  async delete(id: string): Promise<void> {
+  async delete(
+    id: string,
+    beforeDelete?: (schedule: StoredSchedule | null) => void,
+  ): Promise<void> {
     await this.serializeScheduleMutation(id, async () => {
+      beforeDelete?.(await this.get(id));
       await this.ensureDir();
       await rm(this.filePath(id), { force: true });
     });
@@ -264,18 +287,23 @@ export class ScheduleStore {
     name: string,
     target: ScheduleTarget,
     updater: ScheduleUpdater,
+    hostId?: string,
   ): Promise<StoredSchedule | null> {
     return this.serializeScheduleMutation(id, async () => {
       const current = await this.get(id);
-      if (!current || !matchesNameAndTarget(current, name, target)) {
+      if (!current || !matchesNameAndTarget(current, name, target, hostId)) {
         return null;
       }
       const next = await updater(current);
       if (next.id !== id) {
         throw new Error(`Schedule update cannot change id: ${id}`);
       }
-      const updated = StoredScheduleSchema.parse(next);
-      if (!matchesNameAndTarget(updated, name, target)) {
+      const owned =
+        next.hostId === undefined && current.hostId !== undefined
+          ? { ...next, hostId: current.hostId }
+          : next;
+      const updated = StoredScheduleSchema.parse(owned);
+      if (!matchesNameAndTarget(updated, name, target, hostId)) {
         throw new Error("Updated schedule does not match requested identity");
       }
       await this.write(updated);

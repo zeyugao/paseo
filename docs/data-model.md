@@ -384,27 +384,37 @@ options from the previous variant.
 
 **Path:** `$PASEO_HOME/schedules/{id}.json`
 
-One file per schedule. ID is 8 hex characters. Before a run executes, the daemon
-O_EXCL-creates `schedules/{scheduleId}.claim` so two daemons sharing a home fire that
-schedule occurrence once; the lease renews while the run is live and is reclaimed when
-stale for over an hour. The claim suffix keeps it out of the store's `*.json` enumeration.
+One file per schedule. ID is 8 hex characters. Each record carries the owning daemon's
+`serverId` in `hostId` — the creating or replacing daemon, unless startup reconciliation
+assigned a different owner. A daemon lists and mutates only its own records plus legacy
+host-less ones; `inspect` and `logs` stay readable cross-host. Before a run executes, the
+daemon O_EXCL-creates `schedules/{scheduleId}.claim` so two daemons sharing a home fire
+that occurrence once; the lease renews while the run is live and is reclaimed when stale
+for over an hour, failing the run it left behind. The claim suffix keeps it out of the
+store's `*.json` enumeration.
+Startup reconciliation adopts a host-less record when its target agent or cwd workspace
+identifies exactly one host, and reassigns a new-agent record when its cwd's sole owning
+host changed. It skips records with a claim file; an ambiguous host-less record stays
+shared and keeps claim-based execution, while an ambiguous owned record keeps its current
+owner.
 
-| Field       | Type                                  | Description                      |
-| ----------- | ------------------------------------- | -------------------------------- |
-| `id`        | `string`                              | 8-char hex ID                    |
-| `name`      | `string?`                             | Human-readable name              |
-| `prompt`    | `string`                              | The prompt to send               |
-| `cadence`   | `ScheduleCadence`                     | Timing (see below)               |
-| `target`    | `ScheduleTarget`                      | What to run (see below)          |
-| `status`    | `"active" \| "paused" \| "completed"` | Current state                    |
-| `createdAt` | `string` (ISO 8601)                   |                                  |
-| `updatedAt` | `string` (ISO 8601)                   |                                  |
-| `nextRunAt` | `string?` (ISO 8601)                  | Next scheduled execution         |
-| `lastRunAt` | `string?` (ISO 8601)                  | Last execution time              |
-| `pausedAt`  | `string?` (ISO 8601)                  | When paused                      |
-| `expiresAt` | `string?` (ISO 8601)                  | Auto-expire time                 |
-| `maxRuns`   | `number?`                             | Max executions before completing |
-| `runs`      | `ScheduleRun[]`                       | Execution history                |
+| Field       | Type                                  | Description                                                 |
+| ----------- | ------------------------------------- | ----------------------------------------------------------- |
+| `id`        | `string`                              | 8-char hex ID                                               |
+| `hostId`    | `string?`                             | Owning daemon's `serverId`; absent on legacy shared records |
+| `name`      | `string?`                             | Human-readable name                                         |
+| `prompt`    | `string`                              | The prompt to send                                          |
+| `cadence`   | `ScheduleCadence`                     | Timing (see below)                                          |
+| `target`    | `ScheduleTarget`                      | What to run (see below)                                     |
+| `status`    | `"active" \| "paused" \| "completed"` | Current state                                               |
+| `createdAt` | `string` (ISO 8601)                   |                                                             |
+| `updatedAt` | `string` (ISO 8601)                   |                                                             |
+| `nextRunAt` | `string?` (ISO 8601)                  | Next scheduled execution                                    |
+| `lastRunAt` | `string?` (ISO 8601)                  | Last execution time                                         |
+| `pausedAt`  | `string?` (ISO 8601)                  | When paused                                                 |
+| `expiresAt` | `string?` (ISO 8601)                  | Auto-expire time                                            |
+| `maxRuns`   | `number?`                             | Max executions before completing                            |
+| `runs`      | `ScheduleRun[]`                       | Execution history                                           |
 
 ### Nested: ScheduleCadence (discriminated union on `type`)
 

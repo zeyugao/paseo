@@ -46,6 +46,7 @@ export interface ScheduleRunRecord {
 
 export interface ScheduleRecord {
   id: string;
+  hostId?: string;
   name: string | null;
   prompt: string;
   cadence: ScheduleCadence;

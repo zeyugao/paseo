@@ -3,6 +3,7 @@ import { Pressable, StyleSheet } from "react-native";
 import { GestureDetector, type GestureType } from "react-native-gesture-handler";
 import Animated, { useAnimatedStyle } from "react-native-reanimated";
 import { isWeb } from "@/constants/platform";
+import { supportsModernWindowLayout } from "@/constants/modern-window-layout";
 import { WindowChromeRootRegion } from "@/utils/desktop-window";
 import { usePanelStore, type MobilePanelView } from "@/stores/panel-store";
 import { getMobilePanelFrame } from "./model";
@@ -16,6 +17,7 @@ interface MobilePanelOverlayProps {
   panel: OverlayPanel;
   presentation?: "overlay" | "dock";
   dockVisible?: boolean;
+  width?: number;
   frameStyle?: ComponentProps<typeof Animated.View>["style"];
   panelStyle?: ComponentProps<typeof Animated.View>["style"];
   /** Measures the stationary host, outside the panel's gesture translation. */
@@ -30,9 +32,11 @@ export function MobilePanelOverlay({
   presentation = "overlay",
   dockVisible = false,
   frameStyle,
+  width: requestedWidth,
   probe,
 }: MobilePanelOverlayProps) {
   const { position, windowWidth } = useMobilePanelsRuntime();
+  const width = requestedWidth ?? windowWidth;
   const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
   const overlayOpen = useIsMobilePanelActive(panel);
   const docked = presentation === "dock";
@@ -42,16 +46,16 @@ export function MobilePanelOverlay({
 
   const sidebarAnimatedStyle = useAnimatedStyle(() => {
     if (docked) return { transform: [{ translateX: 0 }] };
-    const frame = getMobilePanelFrame(position.value, windowWidth);
+    const frame = getMobilePanelFrame(position.value, width);
     return {
       transform: [{ translateX: isLeft ? frame.leftTranslateX : frame.rightTranslateX }],
     };
-  }, [docked, isLeft, windowWidth]);
+  }, [docked, isLeft, width]);
 
   const backdropAnimatedStyle = useAnimatedStyle(() => {
-    const frame = getMobilePanelFrame(position.value, windowWidth);
+    const frame = getMobilePanelFrame(position.value, width);
     return { opacity: isLeft ? frame.leftBackdropOpacity : frame.rightBackdropOpacity };
-  }, [isLeft, windowWidth]);
+  }, [isLeft, width]);
 
   const overlayAnimatedStyle = useAnimatedStyle(() => {
     if (docked) return { opacity: 1, display: "flex" as const, pointerEvents: "box-none" as const };
@@ -76,11 +80,11 @@ export function MobilePanelOverlay({
     () => [
       docked ? styles.dockedPanel : styles.panel,
       !docked && positionedPanelStyle,
-      !docked && { width: windowWidth },
+      !docked && { width },
       panelStyle,
       sidebarAnimatedStyle,
     ],
-    [docked, panelStyle, positionedPanelStyle, sidebarAnimatedStyle, windowWidth],
+    [docked, panelStyle, positionedPanelStyle, sidebarAnimatedStyle, width],
   );
   let overlayPointerEvents: "auto" | "box-none" | "none";
   if (!isWeb) {
@@ -102,7 +106,9 @@ export function MobilePanelOverlay({
         style={[
           docked ? styles.dock : styles.overlay,
           frameStyle,
-          docked && !dockVisible && { display: "none" },
+          docked &&
+            !dockVisible &&
+            (supportsModernWindowLayout ? styles.retainedHiddenDock : { display: "none" }),
         ]}
       >
         {probe}
@@ -133,6 +139,13 @@ export function MobilePanelOverlay({
 // native node after Fabric commits.
 const styles = StyleSheet.create({
   dock: { flexShrink: 0, minHeight: 0 },
+  retainedHiddenDock: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    left: 0,
+    opacity: 0,
+  },
   dockedPanel: { flex: 1, minHeight: 0, overflow: "hidden" },
   overlay: {
     ...StyleSheet.absoluteFill,

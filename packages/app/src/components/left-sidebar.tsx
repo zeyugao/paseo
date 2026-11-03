@@ -155,9 +155,16 @@ interface MobileSidebarProps extends SidebarSharedProps {
 interface DesktopSidebarProps extends SidebarSharedProps {
   insetsTop: number;
   active: boolean;
+  overlay: boolean;
 }
 
-export const LeftSidebar = memo(function LeftSidebar({ active }: { active: boolean }) {
+export const LeftSidebar = memo(function LeftSidebar({
+  active,
+  desktopOverlay,
+}: {
+  active: boolean;
+  desktopOverlay: boolean;
+}) {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
@@ -295,11 +302,14 @@ export const LeftSidebar = memo(function LeftSidebar({ active }: { active: boole
           {...sharedProps}
           insetsTop={insets.top}
           active={active}
+          overlay={desktopOverlay}
           handleOpenProject={handleOpenProjectDesktop}
           handleImportSession={openImportSession}
-          handleSettings={handleSettingsDesktop}
-          handleAddHost={handleAddHostDesktop}
-          handleOpenHostSettings={handleOpenHostSettingsDesktop}
+          handleSettings={desktopOverlay ? handleSettingsMobile : handleSettingsDesktop}
+          handleAddHost={desktopOverlay ? handleAddHostMobile : handleAddHostDesktop}
+          handleOpenHostSettings={
+            desktopOverlay ? handleOpenHostSettingsMobile : handleOpenHostSettingsDesktop
+          }
         />
       </RetainedPanelActivity>
       {importSessionSheet}
@@ -910,6 +920,7 @@ function DesktopSidebar({
   handleOpenHostSettings,
   insetsTop,
   active,
+  overlay,
 }: DesktopSidebarProps) {
   const ownsTopLeft = useOwnsWindowChromeCorner("top-left");
   const divisionLayout = useContext(DesktopSidebarDivisionContext);
@@ -946,6 +957,12 @@ function DesktopSidebar({
     viewportWidth,
     minimumWidth: sidebarMinimumWidth,
   });
+  const closeSidebar = usePanelStore((state) => state.showMobileAgent);
+  const { gesture: closeGesture, gestureRef: closeGestureRef } = useCloseAgentListGesture({
+    enabled: overlay,
+    panelWidth: visibleSidebarWidth,
+  });
+  const onBeforeNavigate = overlay ? closeSidebar : undefined;
 
   const startWidth = useSharedValue(visibleSidebarWidth);
   const resizeWidth = useSharedValue(visibleSidebarWidth);
@@ -1004,33 +1021,29 @@ function DesktopSidebar({
   );
   const columnWidth = divisionLayout?.sidebarWidth ?? visibleSidebarWidth;
 
-  // Keep one UI-thread width writer; a React width can be overwritten by the
-  // previously attached drag style when fold ownership changes.
+  // Keep one UI-thread width writer across fold ownership and live resizing.
   const resizeAnimatedStyle = useAnimatedStyle(
-    () => ({
-      width: divisionLayout ? divisionLayout.sidebarWidth : resizeWidth.value,
-    }),
+    () => ({ width: divisionLayout ? divisionLayout.sidebarWidth : resizeWidth.value }),
     [divisionLayout],
   );
-
+  // The overlay backdrop covers the window; the dock includes its physical fold gap.
+  const frameAnimatedStyle = useAnimatedStyle(() => {
+    if (overlay) return { width: windowWidth };
+    if (divisionLayout) return { width: divisionLayout.sidebarWidth + divisionLayout.gap };
+    return { width: resizeWidth.value };
+  }, [overlay, windowWidth, divisionLayout]);
   const desktopSidebarStyle = useMemo(
     () => [
       staticStyles.desktopSidebar,
-      !active &&
-        (supportsModernWindowLayout
-          ? staticStyles.desktopSidebarRetainedHidden
-          : staticStyles.desktopSidebarHidden),
       resizeAnimatedStyle,
-      { marginRight: divisionLayout && active ? divisionLayout.gap : 0 },
-      // Match the shell allocation immediately; an actual resize gesture
-      // releases these bounds for the UI-thread drag width.
+      { marginRight: divisionLayout ? divisionLayout.gap : 0 },
       supportsModernWindowLayout &&
         (divisionLayout !== null || !resizePressed) && {
           minWidth: columnWidth,
           maxWidth: columnWidth,
         },
     ],
-    [active, columnWidth, divisionLayout, resizeAnimatedStyle, resizePressed],
+    [columnWidth, divisionLayout, resizeAnimatedStyle, resizePressed],
   );
   const desktopSidebarBorderStyle = useMemo(
     () => [
@@ -1083,82 +1096,90 @@ function DesktopSidebar({
       ) : (
         <TitlebarDragRegion />
       )}
-      <SidebarNavRows style={sidebarHeaderGroupStyle} />
+      <SidebarNavRows style={sidebarHeaderGroupStyle} onBeforeNavigate={onBeforeNavigate} />
     </View>
   );
   return (
-    <Animated.View
-      accessibilityElementsHidden={!active}
-      importantForAccessibility={active ? "auto" : "no-hide-descendants"}
-      pointerEvents={active ? "auto" : "none"}
-      style={desktopSidebarStyle}
+    <MobilePanelOverlay
+      panel="agent-list"
+      presentation={overlay ? "overlay" : "dock"}
+      dockVisible={active}
+      closeGesture={closeGesture}
+      width={visibleSidebarWidth}
+      frameStyle={frameAnimatedStyle}
     >
-      <View style={desktopSidebarBorderStyle}>
-        {footerBar.probe}
-        {supportsModernWindowLayout ? (
-          <TopBarSafeArea
-            contentHeight={navigationHeight}
-            primaryRowHeight={HEADER_INNER_HEIGHT}
-            horizontalContentPadding={theme.spacing[2]}
-            navigationGroup
-          >
-            {sidebarNavigation}
-          </TopBarSafeArea>
-        ) : (
-          sidebarNavigation
-        )}
+      <Animated.View style={desktopSidebarStyle}>
+        <View style={desktopSidebarBorderStyle}>
+          {footerBar.probe}
+          {supportsModernWindowLayout ? (
+            <TopBarSafeArea
+              contentHeight={navigationHeight}
+              primaryRowHeight={HEADER_INNER_HEIGHT}
+              horizontalContentPadding={theme.spacing[2]}
+              navigationGroup
+            >
+              {sidebarNavigation}
+            </TopBarSafeArea>
+          ) : (
+            sidebarNavigation
+          )}
 
-        {isInitialLoad && !hasActiveHostFilter ? (
-          <SidebarAgentListSkeleton />
-        ) : (
-          <SidebarWorkspaceList
-            collapsedProjectKeys={collapsedProjectKeys}
-            onToggleProjectCollapsed={toggleProjectCollapsed}
-            shortcutIndexByWorkspaceKey={shortcutIndexByWorkspaceKey}
-            groupMode={groupMode}
-            workspaceGroups={workspaceGroups}
-            projectIconTargets={projectIconTargets}
-            pinnedGroups={pinnedGroups}
-            projects={projects}
-            hasProjectsBeforeFilter={hasProjectsBeforeFilter}
-            hasActiveProjectFilter={hasActiveProjectFilter}
-            workspaceEntriesByKey={workspaceEntriesByKey}
-            isRefreshing={isManualRefresh && isRevalidating}
-            onRefresh={handleRefresh}
-            onAddProject={handleOpenProject}
-            onImportSession={handleImportSession}
-            listHeaderComponent={workspacesSectionHeaderElement}
+          {isInitialLoad && !hasActiveHostFilter ? (
+            <SidebarAgentListSkeleton />
+          ) : (
+            <SidebarWorkspaceList
+              collapsedProjectKeys={collapsedProjectKeys}
+              onToggleProjectCollapsed={toggleProjectCollapsed}
+              shortcutIndexByWorkspaceKey={shortcutIndexByWorkspaceKey}
+              groupMode={groupMode}
+              workspaceGroups={workspaceGroups}
+              projectIconTargets={projectIconTargets}
+              pinnedGroups={pinnedGroups}
+              projects={projects}
+              hasProjectsBeforeFilter={hasProjectsBeforeFilter}
+              hasActiveProjectFilter={hasActiveProjectFilter}
+              workspaceEntriesByKey={workspaceEntriesByKey}
+              isRefreshing={isManualRefresh && isRevalidating}
+              onRefresh={handleRefresh}
+              onAddProject={handleOpenProject}
+              onImportSession={handleImportSession}
+              onWorkspacePress={onBeforeNavigate}
+              parentGestureRef={overlay ? closeGestureRef : undefined}
+              dragGestureHostActive={active}
+              listHeaderComponent={workspacesSectionHeaderElement}
+            />
+          )}
+
+          <SidebarCalloutSlot />
+
+          <SidebarFooter
+            edgeInsets={footerBar.edgeInsets}
+            requiredMinimumWidth={footerBar.requiredMinimumWidth}
+            onMinimumWidthChange={
+              supportsModernWindowLayout ? handleFooterMinimumWidthChange : undefined
+            }
+            onBarHeightChange={footerBar.onBarHeightChange}
+            handleOpenProject={handleOpenProject}
+            handleSettings={handleSettings}
+            available={footerBar.available}
+            labels={labels}
+            handleAddHost={handleAddHost}
+            handleOpenHostSettings={handleOpenHostSettings}
+            onBeforeNavigate={onBeforeNavigate}
           />
-        )}
+          {supportsModernWindowLayout ? <Animated.View style={footerKeyboardStyle} /> : null}
 
-        <SidebarCalloutSlot />
-
-        <SidebarFooter
-          edgeInsets={footerBar.edgeInsets}
-          requiredMinimumWidth={footerBar.requiredMinimumWidth}
-          onMinimumWidthChange={
-            supportsModernWindowLayout ? handleFooterMinimumWidthChange : undefined
-          }
-          onBarHeightChange={footerBar.onBarHeightChange}
-          handleOpenProject={handleOpenProject}
-          handleSettings={handleSettings}
-          available={footerBar.available}
-          labels={labels}
-          handleAddHost={handleAddHost}
-          handleOpenHostSettings={handleOpenHostSettings}
-        />
-        {supportsModernWindowLayout ? <Animated.View style={footerKeyboardStyle} /> : null}
-
-        {divisionLayout === null ? (
-          <SidebarResizeHandle
-            edge="right"
-            gesture={resizeGesture}
-            pressed={resizePressed}
-            testID="left-sidebar-resize-handle"
-          />
-        ) : null}
-      </View>
-    </Animated.View>
+          {!overlay && divisionLayout === null ? (
+            <SidebarResizeHandle
+              edge="right"
+              gesture={resizeGesture}
+              pressed={resizePressed}
+              testID="left-sidebar-resize-handle"
+            />
+          ) : null}
+        </View>
+      </Animated.View>
+    </MobilePanelOverlay>
   );
 }
 
@@ -1189,18 +1210,7 @@ const workspacesSectionHeaderElement = <WorkspacesSectionHeader />;
 const staticStyles = RNStyleSheet.create({
   desktopSidebar: {
     position: "relative" as const,
-  },
-  desktopSidebarHidden: {
-    display: "none",
-  },
-  // Native bar guides must resolve corners before the retained sidebar is opened.
-  // Keep its real width and window position, but remove it from the content row.
-  desktopSidebarRetainedHidden: {
-    position: "absolute",
-    top: 0,
-    bottom: 0,
-    left: 0,
-    opacity: 0,
+    flex: 1,
   },
 });
 

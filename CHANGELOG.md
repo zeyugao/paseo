@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.15.0-beta.1 - 2026-11-01
+## 0.15.0-beta.2 - 2026-11-04
+
+Overkite uses its own Expo notification project. Push-credential setup now works with an existing generated iOS project.
 
 Daemon restarts now keep terminal programs running and automatically resume interrupted agents in their existing conversations.
 

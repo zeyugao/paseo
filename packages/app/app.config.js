@@ -201,6 +201,6 @@ export default {
         projectId: "a84e29d0-dad8-4136-8d22-22333db92371",
       },
     },
-    owner: "elsa-granger-team",
+    owner: "elsagranger",
   },
 };

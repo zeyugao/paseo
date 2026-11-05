@@ -13,15 +13,19 @@ supervisor (paseo.pid) ──► daemon worker ──► launcher ──► term
 - The worker talks to one daemon at a time over a local socket (named pipe on Windows). Losing the daemon means "no controller", not exit: PTYs keep running, events are dropped, and the headless terminal keeps the screen for the next daemon's `listTerminals`.
 - A socket disconnect triggers reconnection to the same worker and a screen replay. Only confirmed process death retires its sessions; the next terminal creation shares one replacement launch. Dead-worker cleanup stays scoped to that worker, so a healthy draining peer keeps running. Shutdown and detach suppress recovery.
 - The worker exits on its own when it has no controller and no terminals, on `shutdown`, on SIGTERM (killing its terminals), and when its record disappears (a deleted `$PASEO_HOME`: nobody can ever reach it again).
-- Its stderr goes to `$PASEO_HOME/terminal-worker.log`. No pipe to the daemon survives the daemon.
+- Its stderr goes to `$PASEO_HOME/daemons/{serverId}/terminal-worker.log`. No pipe to the daemon survives the daemon.
 
 The worker retains a fixed 10,000 history rows plus the screen in its existing xterm. Replay uses `@xterm/addon-serialize` 0.14 against headless xterm 6; no second cell grid or lifetime byte log is retained. The serializer boundary owns cursor position, visibility and explicit program-selected presentation; the addon alone does not preserve all three. An unset program style leaves each client’s configured cursor defaults intact. It also restores SGR mouse encoding: the addon preserves mouse tracking but omits its encoding, so switching away and back otherwise sends legacy wheel reports that Copilot CLI cannot use. These missing modes require xterm's internal services because its public modes API omits them. Standard modes come from the serializer; the existing input-mode tracker retains protocol modes such as Kitty and Win32 input. Commit that tracker with parsed output so replay bytes and metadata describe the same cut.
 
 Which triggers keep terminals and which close them is owned by the stop reason (`keepTerminals`) that flows from the request through the supervisor to `stop()`. The kill side always ends in the reaper (`terminal-worker-reaper.ts`), the only path that signals terminal processes outside a connected daemon.
 
+Constructing the daemon does not connect, adopt, launch or reap workers. Activation starts
+only after acquiring its instance lease, so a rejected same-ID contender cannot take over
+the live daemon's terminal controller.
+
 ## Record, socket and secret
 
-The worker writes `$PASEO_HOME/terminal-worker/<pid>.json` (owner-only) with its pid, protocol version, socket path, random secret, runtime copy and terminal programs. One daemon holds the home's pid lock. Its records and sockets belong to that home.
+The worker writes `$PASEO_HOME/daemons/{serverId}/terminal-worker/<pid>.json` (owner-only) with its pid, protocol version, socket path, random secret, runtime copy and terminal programs. Records and sockets belong to that daemon identity. This state namespace never replaces the shell's root `PASEO_HOME`.
 
 - The first frame must be `hello` with the secret; anything else closes the connection. Anyone authenticated can type into every shell, so the record and Unix socket are `0600` inside a `0700` directory.
 - New socket names include the record id. A stale record whose pid belongs to a newer worker cannot reach that newer worker. Existing records keep their recorded paths. Legacy paths use only the home and pid, so force-killing through one also requires successful authentication. A legacy socket that cannot authenticate stays unconfirmed.
@@ -31,6 +35,16 @@ The worker writes `$PASEO_HOME/terminal-worker/<pid>.json` (owner-only) with its
 - Unix socket paths have a byte budget (103 on macOS, 107 on Linux). Long dev homes use an owner-only fallback under `$TMPDIR/paseo-<uid>/` or `/tmp/paseo-<uid>/`. An existing directory must be a real `0700` directory owned by you; a shared root is never chmodded.
 - A kill cleanup that cannot confirm every process gone writes `closing-<recordId>.json` beside the worker record. The worker rewrites its own record whenever a terminal starts or exits, so the kill intent has to live in a file it never writes. A closing record is never adopted; the next stop or start retries it.
 - An unreadable record of either kind makes `daemon status` and a kill restart fail with its path: a kill cleanup that met it could not check what it names, and leaves nothing else behind. A read that fails with `EPERM`, `EBUSY` or `EACCES` is retried for 250ms first: on Windows, opening a record while the worker renames its new copy over it fails that way for a moment.
+
+Adoption, worker counts, pruning, daemon stop, supervisor exit and CLI cleanup all stay
+inside the selected instance namespace. Root-level legacy records are eligible only when
+the original home identity, current boot and local process environment identify the selected
+daemon, and socket authentication confirms that same live pid. Birth times bracket the
+environment read to reject pid reuse; legacy worker identity fields are ignored.
+Machine-bound receipts bind the proven record id, pid, boot, creation time and socket path
+for later cleanup even after the worker dies. Ambiguous or foreign legacy workers are left
+untouched, including unclaimed legacy workers on Windows where their process environment
+cannot be inspected.
 
 ## Protocol versions
 
@@ -43,7 +57,7 @@ The worker writes `$PASEO_HOME/terminal-worker/<pid>.json` (owner-only) with its
 | two or more older                  | shuts it down; its terminals close (logged)                                                                                                                 |
 | newer, or a version it cannot read | leaves it running, undriven; `list_terminals` and `create_terminal` answer `rpc_error` `terminal_worker_incompatible`, and `paseo daemon status` prints why |
 
-Never more than two workers run. A new worker launches only when none is current, none is incompatible and fewer than two run. The count comes from the records, so an unreachable worker counts, as does one whose socket probe is inconclusive, and one a cleanup could not confirm gone. When two run, the daemon starts with no current worker, and the first terminal created after one of them exits launches it.
+Never more than two workers run per daemon identity. A new worker launches only when none is current, none is incompatible and fewer than two run in that instance namespace. Unreachable workers, inconclusive socket probes and unconfirmed cleanups count toward that limit. Sibling daemons' workers do not count. When two run, the daemon starts with no current worker, and the first terminal created after one exits launches it.
 
 **The frozen envelope never changes across versions:** the frame format (4-byte length + `v8.serialize`), `hello`/`helloAck`, the `listTerminals` info fields and `shutdown`. That is what lets any daemon close any worker: a kill stop sends `shutdown` to a newer worker it cannot otherwise drive. Protocol 5 hard cuts unreleased protocols 1 through 4, including the acknowledgement-based replay contract: those workers are obsolete and close. For future versions, keep a previous-version adapter so the draining worker can still be driven, and drop the adapter for the version before that.
 
@@ -66,7 +80,7 @@ The SDK advertises `terminal_chunked_replay` only because it decodes begin/data/
 A worker outlives the installation that started it. An npm or desktop update replaces that installation's files, and the next terminal the old worker creates would load node-pty's `spawn-helper` and the zsh integration from paths that no longer exist. So a built daemon does not launch the worker from its install:
 
 - `npm run build` bundles the worker with esbuild (`packages/server/scripts/build-terminal-worker.mjs`) into `dist/server/terminal-worker/` with its `shell-integration/` beside it. Only node-pty stays external. A package loaded through a module-local `createRequire` is invisible to esbuild and would be missing at run time; `terminal-worker-runtime.test.ts` fails if the bundle loads anything but built-ins and node-pty.
-- Before launching, the daemon copies the bundle, the shell integration and node-pty (this platform's native build only) into `$PASEO_HOME/terminal-worker/<paseoVersion>-<hash>/` and launches from there. The hash covers the bundle and node-pty, so a local rebuild of the same version gets its own copy.
+- Before launching, the daemon copies the bundle, shell integration and this platform's node-pty into `$PASEO_HOME/daemons/{serverId}/terminal-worker/<paseoVersion>-<hash>/`. The hash covers the bundle and node-pty, so a local rebuild of the same version gets its own copy.
 - A copy is deleted once no record names it: after a draining worker exits, after a kill cleanup, and at daemon start. The daemon and the reaper delete copies, never the worker itself, so a worker exiting cannot remove a copy a new worker is about to launch from.
 - Dev (`.ts` source) launches from source and copies nothing.
 

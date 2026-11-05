@@ -31,6 +31,7 @@ import { tmpdir } from "node:os";
 import pino from "pino";
 import {
   createWorkerTerminalManager,
+  createDeferredWorkerTerminalManager,
   startWorkerTerminalManager,
   type DaemonTerminalManager,
 } from "./worker-terminal-manager.js";
@@ -64,6 +65,7 @@ import {
   terminalWorkerRecordPath,
   writeTerminalWorkerRecord,
   writeTerminalCleanupRecord,
+  terminalWorkerHome,
   type TerminalWorkerRecord,
 } from "./terminal-worker-record.js";
 import {
@@ -78,6 +80,10 @@ import { connectTerminalWorker } from "./terminal-worker-client.js";
 import { launchTerminalWorker, TerminalWorkerLaunchError } from "./terminal-worker-launch.js";
 import { currentBootId } from "../server/pid-lock.js";
 import { spawn } from "node:child_process";
+import {
+  registerDaemonInstance,
+  DaemonInstanceRegistryError,
+} from "../server/daemon-instance-registry.js";
 
 type TerminalRow = TerminalState["grid"][number];
 
@@ -194,11 +200,13 @@ async function startRealWorkerManager(
     getTerminalActivityUrl?: () => string | null;
     requestTimeoutMs?: number;
     paseoHome?: string;
+    serverId?: string;
   } = {},
 ): Promise<DaemonTerminalManager> {
   const { paseoHome = createTemporaryHome(), ...rest } = options;
   return startWorkerTerminalManager({
     paseoHome,
+    serverId: "srv_test",
     paseoVersion: "0.0.0-test",
     logger: pino({ level: "silent" }),
     ...rest,
@@ -253,6 +261,253 @@ afterEach(async () => {
   }
 });
 
+it("constructs a deferred manager without worker effects and rejects operations before activation", async () => {
+  const paseoHome = createTemporaryHome();
+  const deferred = createDeferredWorkerTerminalManager({
+    paseoHome,
+    serverId: "srv_deferred",
+    paseoVersion: "0.0.0-test",
+    logger: pino({ level: "silent" }),
+  });
+  const unsubscribeChanged = deferred.subscribeTerminalsChanged(() => {});
+  const unsubscribeActivity = deferred.subscribeTerminalActivity(() => {});
+  const unsubscribeContribution = deferred.subscribeTerminalWorkspaceContributionChanged(() => {});
+  expect(existsSync(terminalWorkerHome(paseoHome, "srv_deferred"))).toBe(false);
+  for (const operation of [
+    () => deferred.getUnavailableError?.(),
+    () => deferred.getTerminal("missing"),
+    () => deferred.listDirectories(),
+    () => deferred.registerCwdEnv({ cwd: paseoHome, env: {} }),
+    () => deferred.validateTerminalActivityToken("missing", "token"),
+    () => deferred.setTerminalTitle("missing", "title"),
+    () => deferred.killTerminal("missing"),
+    () => deferred.killAll(),
+    () => deferred.closeTerminals(),
+  ])
+    expect(operation).toThrow("Terminal manager has not been activated");
+  for (const operation of [
+    () => deferred.getTerminals(paseoHome),
+    () => deferred.createTerminal({ cwd: paseoHome, workspaceId: "ws-deferred" }),
+    () => deferred.replayTerminal("missing", undefined, () => {}),
+    () => deferred.captureTerminal("missing"),
+    () => deferred.killTerminalAndWait("missing"),
+    () => deferred.setTerminalActivity("missing", "attention"),
+    () => deferred.clearTerminalAttention("missing"),
+    () => deferred.adoptTerminals(),
+    () => deferred.detach(),
+  ])
+    await expect(operation()).rejects.toThrow("Terminal manager has not been activated");
+  unsubscribeChanged();
+  unsubscribeActivity();
+  unsubscribeContribution();
+  expect(existsSync(terminalWorkerHome(paseoHome, "srv_deferred"))).toBe(false);
+});
+
+it("activates once after the instance lease and leaves a rejected same-ID contender inert", async () => {
+  const paseoHome = createTemporaryHome();
+  const serverId = "srv_activation";
+  const stateHome = terminalWorkerHome(paseoHome, serverId);
+  const options = {
+    paseoHome,
+    serverId,
+    paseoVersion: "0.0.0-test",
+    logger: pino({ level: "silent" }),
+  };
+  const owner = createDeferredWorkerTerminalManager(options);
+  const changed: string[][] = [];
+  owner.subscribeTerminalsChanged((event) =>
+    changed.push(event.terminals.map((terminal) => terminal.id)),
+  );
+  const lease = await registerDaemonInstance(paseoHome, serverId);
+  let active = false;
+  try {
+    expect(existsSync(terminalWorkerDirectory(stateHome))).toBe(false);
+    await Promise.all([owner.activate(), owner.activate()]);
+    active = true;
+    const terminal = await owner.createTerminal({
+      cwd: paseoHome,
+      workspaceId: "ws-activation",
+      ...nodeTerminalCommand("process.stdin.resume()"),
+    });
+    await waitForCondition(() => changed.some((ids) => ids.includes(terminal.id)), 10000);
+    const before = await listTerminalWorkerRecords(stateHome);
+    expect(before).toHaveLength(1);
+
+    const contender = createDeferredWorkerTerminalManager(options);
+    const unsubscribe = contender.subscribeTerminalsChanged(() => {});
+    try {
+      await expect(registerDaemonInstance(paseoHome, serverId)).rejects.toBeInstanceOf(
+        DaemonInstanceRegistryError,
+      );
+      expect(() => contender.getTerminal(terminal.id)).toThrow("not been activated");
+      expect(() => contender.closeTerminals()).toThrow("not been activated");
+      expect(await listTerminalWorkerRecords(stateHome)).toEqual(before);
+      expect(owner.getTerminal(terminal.id)).toBe(terminal);
+      expect(await readReplay(owner, terminal.id)).not.toBeNull();
+      await owner.activate();
+      expect(await listTerminalWorkerRecords(stateHome)).toEqual(before);
+    } finally {
+      unsubscribe();
+    }
+  } finally {
+    if (active) await owner.closeTerminals();
+    else await reapTerminalWorkers({ paseoHome: stateHome, gracefulMs: 0 });
+    await lease.release();
+  }
+}, 60000);
+
+it("isolates shared-home workers, adopts only its own restart, and scopes stop", async () => {
+  const paseoHome = createTemporaryHome();
+  const alphaHome = terminalWorkerHome(paseoHome, "srv_alpha");
+  const betaHome = terminalWorkerHome(paseoHome, "srv_beta");
+  writeFileSync(join(paseoHome, "server-id"), "srv_alpha\n");
+  const beta = await startRealWorkerManager({ paseoHome, serverId: "srv_beta" });
+  let alpha: DaemonTerminalManager | null = null;
+  try {
+    const betaTerminal = await beta.createTerminal({
+      cwd: paseoHome,
+      workspaceId: "ws-beta",
+      ...nodeTerminalCommand("process.stdin.resume()"),
+    });
+    const betaFiles = await listTerminalWorkerRecords(betaHome);
+    const betaFile = betaFiles.find((file) => "record" in file);
+    if (!betaFile || !("record" in betaFile)) throw new Error("Missing beta worker");
+    // Foreign unreadable state and an old-boot legacy record cannot affect alpha's worker
+    // limit or status/stop, nor authorize removing beta's socket.
+    const foreignUnreadable = join(terminalWorkerDirectory(betaHome), "99999999.json");
+    writeFileSync(foreignUnreadable, "{ unreadable");
+    const legacyPath = writeTerminalWorkerRecord(paseoHome, {
+      ...betaFile.record,
+      bootId: "foreign-old-boot",
+      createdAt: "1970-01-01T00:00:00.000Z",
+    });
+    alpha = await startRealWorkerManager({ paseoHome, serverId: "srv_alpha" });
+    expect(await alpha.getTerminals(paseoHome)).toEqual([]);
+    const alphaTerminal = await alpha.createTerminal({
+      cwd: paseoHome,
+      workspaceId: "ws-alpha",
+      ...nodeTerminalCommand("process.stdin.resume()"),
+    });
+    const [alphaFile] = await listTerminalWorkerRecords(alphaHome);
+    if (!alphaFile || !("record" in alphaFile)) throw new Error("Missing alpha worker");
+    expect(alphaFile.record.socketPath).not.toBe(betaFile.record.socketPath);
+    await alpha.detach();
+    alpha = await startRealWorkerManager({ paseoHome, serverId: "srv_alpha" });
+    expect(alpha.getTerminal(alphaTerminal.id)).toBeDefined();
+    expect(alpha.getTerminal(betaTerminal.id)).toBeUndefined();
+    expect(beta.getTerminal(betaTerminal.id)).toBeDefined();
+    expect(await readUnconfirmedTerminalCleanup(alphaHome)).toEqual([]);
+    await alpha.closeTerminals();
+    expect(existsSync(betaFile.path)).toBe(true);
+    expect(existsSync(legacyPath)).toBe(true);
+    expect(existsSync(foreignUnreadable)).toBe(true);
+    expect(await readReplay(beta, betaTerminal.id)).not.toBeNull();
+  } finally {
+    rmSync(join(terminalWorkerDirectory(betaHome), "99999999.json"), { force: true });
+    await alpha?.closeTerminals();
+    await beta.closeTerminals();
+  }
+}, 60000);
+
+// Windows cannot inspect a legacy worker's environment; its unclaimed records stay ambiguous.
+it.skipIf(isPlatform("win32")).each([
+  ["srv_legacy", true],
+  ["srv_foreign", false],
+] as const)(
+  "attributes legacy worker override %s to only the persisted home identity",
+  async (workerServerId, adopts) => {
+    const paseoHome = createTemporaryHome();
+    writeFileSync(join(paseoHome, "server-id"), "srv_legacy\n");
+    const previousServerId = process.env.PASEO_SERVER_ID;
+    const launched = await (async () => {
+      try {
+        process.env.PASEO_SERVER_ID = workerServerId;
+        return await launchTerminalWorker({ paseoHome, paseoVersion: "0.0.0-test" });
+      } finally {
+        if (previousServerId === undefined) delete process.env.PASEO_SERVER_ID;
+        else process.env.PASEO_SERVER_ID = previousServerId;
+      }
+    })();
+    expect(launched.record.identity).toBeUndefined();
+    const legacy = createWorkerTerminalManager({
+      worker: await connectTerminalWorker({
+        socketPath: launched.record.socketPath,
+        secret: launched.record.secret,
+      }),
+    });
+    let foreign: DaemonTerminalManager | null = null;
+    try {
+      const terminal = await legacy.createTerminal({
+        cwd: paseoHome,
+        workspaceId: "ws-legacy",
+        ...nodeTerminalCommand(
+          "process.on('SIGHUP', () => {}); require('node:net').createServer().listen(0, '127.0.0.1'); console.log('LEGACY_READY')",
+        ),
+      });
+      await waitForCondition(async () => {
+        const replay = await readReplay(legacy, terminal.id);
+        return replay !== null && getRenderedTextFromState(replay.state).includes("LEGACY_READY");
+      }, 10000);
+      await legacy.detach();
+      foreign = await startRealWorkerManager({ paseoHome, serverId: "srv_foreign" });
+      expect(foreign.getTerminal(terminal.id)).toBeUndefined();
+      await foreign.closeTerminals();
+      expect(existsSync(launched.recordPath)).toBe(true);
+      if (adopts) {
+        const record = await readTerminalWorkerRecord(launched.recordPath);
+        const stateHome = terminalWorkerHome(paseoHome, "srv_legacy");
+        // Even a live pid with the right environment is ambiguous without its socket secret.
+        writeTerminalWorkerRecord(paseoHome, { ...record, secret: "not-the-worker-secret" });
+        try {
+          expect(await listTerminalWorkerRecords(stateHome)).toEqual([]);
+          expect(await reapTerminalWorkers({ paseoHome: stateHome, gracefulMs: 0 })).toMatchObject({
+            signaled: [],
+          });
+          expect(existsSync(launched.recordPath)).toBe(true);
+          expect(isProcessAlive(record.pid)).toBe(true);
+          expect(
+            existsSync(
+              join(terminalWorkerDirectory(stateHome), `legacy-owner-${record.recordId}.json`),
+            ),
+          ).toBe(false);
+        } finally {
+          writeTerminalWorkerRecord(paseoHome, record);
+        }
+      }
+      manager = await startRealWorkerManager({ paseoHome, serverId: "srv_legacy" });
+      expect(manager.getTerminal(terminal.id) !== undefined).toBe(adopts);
+      if (adopts) {
+        expect(await readReplay(manager, terminal.id)).not.toBeNull();
+        const record = await readTerminalWorkerRecord(launched.recordPath);
+        const program = record.terminals.find((entry) => entry.id === terminal.id)!;
+        await manager.detach();
+        process.kill(record.pid, "SIGKILL");
+        await waitForCondition(() => !isProcessAlive(record.pid), 10000);
+        // The persisted local proof must still authorize orphan cleanup after worker death.
+        manager = await startRealWorkerManager({ paseoHome, serverId: "srv_legacy" });
+        expect(manager.getTerminal(terminal.id)).toBeUndefined();
+        expect(
+          classifyTerminalProgramProcess(
+            program,
+            await createTerminalWorkerProcessInspector().inspect(program.pid),
+          ).status,
+        ).not.toBe("owned");
+      }
+      await manager.closeTerminals();
+      expect(existsSync(launched.recordPath)).toBe(!adopts);
+      expect(
+        readdirSync(terminalWorkerDirectory(terminalWorkerHome(paseoHome, "srv_legacy"))).filter(
+          (name) => name.startsWith("legacy-owner-"),
+        ),
+      ).toEqual([]);
+    } finally {
+      await foreign?.closeTerminals();
+      await reapTerminalWorkers({ paseoHome, gracefulMs: 0 });
+    }
+  },
+  60000,
+);
+
 it("retires a killed worker's sessions and shares one replacement across concurrent creates", async () => {
   const paseoHome = createTemporaryHome();
   manager = await startRealWorkerManager({ paseoHome });
@@ -264,7 +519,7 @@ it("retires a killed worker's sessions and shares one replacement across concurr
       "process.stdin.on('data', chunk => process.stdout.write('echo:' + process.env.QA_RECOVERY_ENV + ':' + chunk)); setInterval(() => {}, 1000)",
     ),
   });
-  const records = await listTerminalWorkerRecords(paseoHome);
+  const records = await listTerminalWorkerRecords(terminalWorkerHome(paseoHome, "srv_test"));
   const file = records.find((entry) => !("error" in entry));
   if (!file || "error" in file) throw new Error("Missing worker record");
   const changes: string[][] = [];
@@ -297,9 +552,9 @@ it("retires a killed worker's sessions and shares one replacement across concurr
     await waitForCondition(() => output.join("").includes("echo:retained:recovered"), 10000);
   }
   expect(await manager.getTerminals(paseoHome)).toHaveLength(4);
-  const remaining = (await listTerminalWorkerRecords(paseoHome)).filter(
-    (entry) => !("error" in entry),
-  );
+  const remaining = (
+    await listTerminalWorkerRecords(terminalWorkerHome(paseoHome, "srv_test"))
+  ).filter((entry) => !("error" in entry));
   expect(remaining).toHaveLength(1);
 }, 30000);
 
@@ -807,7 +1062,7 @@ function isProcessAlive(pid: number): boolean {
 // The terminals the worker itself recorded, read from its own record file.
 async function recordedTerminalPids(paseoHome: string): Promise<Map<string, number>> {
   const pids = new Map<string, number>();
-  const directory = terminalWorkerDirectory(paseoHome);
+  const directory = terminalWorkerDirectory(terminalWorkerHome(paseoHome, "srv_test"));
   for (const name of readdirSync(directory).filter((entry) => /^\d+\.json$/.test(entry))) {
     for (const entry of (await readTerminalWorkerRecord(join(directory, name))).terminals) {
       pids.set(entry.id, entry.pid);
@@ -852,7 +1107,7 @@ it.each([false, true])(
     // Seed a retained cleanup through the same record interface the reaper writes. Windows
     // does not read program birth times, so a process-table failure cannot create this state.
     const inspector = createTerminalWorkerProcessInspector();
-    await writeTerminalCleanupRecord(paseoHome, {
+    await writeTerminalCleanupRecord(terminalWorkerHome(paseoHome, "srv_test"), {
       ...record!,
       closing: {
         unresolved: [
@@ -865,13 +1120,18 @@ it.each([false, true])(
         ],
       },
     });
-    expect((await readUnconfirmedTerminalCleanup(paseoHome)).length).toBeGreaterThan(0);
+    expect(
+      (await readUnconfirmedTerminalCleanup(terminalWorkerHome(paseoHome, "srv_test"))).length,
+    ).toBeGreaterThan(0);
 
     // Keep an ordinary reader open until the worker delivers the terminal exit.
     // Windows cannot replace the record while this handle is open. The exit must
     // still reach the controller, and publication must recover after release.
     const recordFd = holdReader
-      ? openSync(terminalWorkerRecordPath(paseoHome, record!.pid), "r")
+      ? openSync(
+          terminalWorkerRecordPath(terminalWorkerHome(paseoHome, "srv_test"), record!.pid),
+          "r",
+        )
       : null;
     try {
       writeFileSync(exitRequestPath, "");
@@ -896,14 +1156,18 @@ it.each([false, true])(
       async () => !(await recordedTerminalPids(paseoHome)).has(ending.id),
       10000,
     );
-    expect((await readUnconfirmedTerminalCleanup(paseoHome)).length).toBeGreaterThan(0);
+    expect(
+      (await readUnconfirmedTerminalCleanup(terminalWorkerHome(paseoHome, "srv_test"))).length,
+    ).toBeGreaterThan(0);
 
     await first.detach();
     manager = await startRealWorkerManager({ paseoHome });
 
     expect(manager.getTerminal(remaining.id)).toBeUndefined();
     expect(await manager.getTerminals(cwd)).toEqual([]);
-    expect(await readUnconfirmedTerminalCleanup(paseoHome)).toEqual([]);
+    expect(await readUnconfirmedTerminalCleanup(terminalWorkerHome(paseoHome, "srv_test"))).toEqual(
+      [],
+    );
     const original = record!.terminals.find((entry) => entry.id === remaining.id)!;
     // Startup can launch a new worker after cleanup and Windows can reuse the old PID.
     // Require the original process to be gone, not the numeric PID to remain unused.
@@ -1594,8 +1858,8 @@ it("rejects createTerminal and registers nothing when the worker cannot start th
 
 // The live worker records in a home, by worker pid.
 async function workerRecords(paseoHome: string): Promise<TerminalWorkerRecord[]> {
-  return (await listTerminalWorkerRecords(paseoHome)).flatMap((file) =>
-    "record" in file && !file.record.closing ? [file.record] : [],
+  return (await listTerminalWorkerRecords(terminalWorkerHome(paseoHome, "srv_test"))).flatMap(
+    (file) => ("record" in file && !file.record.closing ? [file.record] : []),
   );
 }
 
@@ -1650,7 +1914,9 @@ it.each([1, 4])(
 
     manager = await startRealWorkerManager({ paseoHome });
 
-    expect(await readUnconfirmedTerminalCleanup(paseoHome)).toEqual([]);
+    expect(await readUnconfirmedTerminalCleanup(terminalWorkerHome(paseoHome, "srv_test"))).toEqual(
+      [],
+    );
     // Startup launches a replacement worker after cleanup. Either old PID may already
     // belong to another process, so verify that the recorded birth identities are gone.
     await waitForCondition(() => !isProcessAlive(record!.pid), 10000);
@@ -1709,7 +1975,10 @@ async function launchDetachedWorkerWithTerminal(
   }
   let launched: Awaited<ReturnType<typeof launchTerminalWorker>>;
   try {
-    launched = await launchTerminalWorker({ paseoHome, paseoVersion: "0.0.0-test" });
+    launched = await launchTerminalWorker({
+      paseoHome: terminalWorkerHome(paseoHome, "srv_test"),
+      paseoVersion: "0.0.0-test",
+    });
   } finally {
     if (previous === undefined) delete process.env[TERMINAL_WORKER_PROTOCOL_OVERRIDE_ENV];
     else process.env[TERMINAL_WORKER_PROTOCOL_OVERRIDE_ENV] = previous;
@@ -1731,7 +2000,7 @@ async function launchDetachedWorkerWithTerminal(
 
 // Worker pids alive in a home, from every record, closing ones included.
 async function liveWorkerPids(paseoHome: string): Promise<number[]> {
-  return (await listTerminalWorkerRecords(paseoHome))
+  return (await listTerminalWorkerRecords(terminalWorkerHome(paseoHome, "srv_test")))
     .flatMap((file) => ("record" in file ? [file.record.pid] : []))
     .filter(isProcessAlive)
     .sort();
@@ -1748,14 +2017,16 @@ it.skipIf(isPlatform("win32"))(
     const inspector = createTerminalWorkerProcessInspector();
     await expect(
       reapTerminalWorkers({
-        paseoHome,
+        paseoHome: terminalWorkerHome(paseoHome, "srv_test"),
         gracefulMs: 0,
         inspector: { ...inspector, listProcesses: () => Promise.reject(new Error("ps timed out")) },
       }),
     ).rejects.toBeInstanceOf(TerminalCleanupNotConfirmedError);
-    expect((await readUnconfirmedTerminalCleanup(paseoHome)).map((entry) => entry.role)).toContain(
-      "worker",
-    );
+    expect(
+      (await readUnconfirmedTerminalCleanup(terminalWorkerHome(paseoHome, "srv_test"))).map(
+        (entry) => entry.role,
+      ),
+    ).toContain("worker");
 
     // The daemon's own retry fails the same way: only the full process table is unreadable.
     const realPs = (process.env.PATH ?? "")
@@ -2795,7 +3066,7 @@ it("closes terminals and their worker through authenticated shutdown", async () 
 
   // The worker closed its terminals before it answered; it stops listening as it exits.
   expect(isProcessAlive(programPid)).toBe(false);
-  expect(await listTerminalWorkerRecords(paseoHome)).toEqual([]);
+  expect(await listTerminalWorkerRecords(terminalWorkerHome(paseoHome, "srv_test"))).toEqual([]);
   await waitForCondition(() => !isProcessAlive(record!.pid), 5000);
 }, 30000);
 
@@ -2812,11 +3083,14 @@ it("force closes a worker from cleanup without a grace period", async () => {
   const programPid = record!.terminals[0]!.pid;
   await previous.detach();
 
-  const result = await reapTerminalWorkers({ paseoHome, gracefulMs: 0 });
+  const result = await reapTerminalWorkers({
+    paseoHome: terminalWorkerHome(paseoHome, "srv_test"),
+    gracefulMs: 0,
+  });
 
   expect(result.signaled).toContain(record!.pid);
   expect(isProcessAlive(programPid)).toBe(false);
-  expect(await listTerminalWorkerRecords(paseoHome)).toEqual([]);
+  expect(await listTerminalWorkerRecords(terminalWorkerHome(paseoHome, "srv_test"))).toEqual([]);
   await waitForCondition(() => !isProcessAlive(record!.pid), 5000);
 }, 30000);
 
@@ -2831,7 +3105,7 @@ it("launches past stale records without signaling an unrelated live pid", async 
   });
   try {
     for (const pid of [exited.pid!, reused.pid!]) {
-      writeTerminalWorkerRecord(paseoHome, {
+      writeTerminalWorkerRecord(terminalWorkerHome(paseoHome, "srv_test"), {
         recordId: `dead-worker-${pid}`,
         pid,
         bootId: currentBootId(),

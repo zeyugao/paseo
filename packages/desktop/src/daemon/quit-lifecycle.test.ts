@@ -59,7 +59,7 @@ describe("quit-lifecycle", () => {
 
     const stopped = await stopDesktopManagedDaemonOnQuitIfNeeded({
       settingsStore: { get: async () => SETTINGS_KEEP_RUNNING },
-      isDesktopManagedDaemonRunning: () => {
+      isDesktopManagedDaemonRunning: async () => {
         events.push("inspect");
         return true;
       },
@@ -80,7 +80,7 @@ describe("quit-lifecycle", () => {
 
     const stopped = await stopDesktopManagedDaemonOnQuitIfNeeded({
       settingsStore: { get: async () => SETTINGS_STOP_ON_QUIT },
-      isDesktopManagedDaemonRunning: () => false,
+      isDesktopManagedDaemonRunning: async () => false,
       stopDaemon: async () => {
         events.push("stop");
       },
@@ -98,7 +98,7 @@ describe("quit-lifecycle", () => {
 
     const stopped = await stopDesktopManagedDaemonOnQuitIfNeeded({
       settingsStore: { get: async () => SETTINGS_STOP_ON_QUIT },
-      isDesktopManagedDaemonRunning: () => true,
+      isDesktopManagedDaemonRunning: async () => true,
       stopDaemon: async () => {
         events.push("stop");
       },
@@ -109,6 +109,27 @@ describe("quit-lifecycle", () => {
 
     expect(stopped).toBe(true);
     expect(events).toEqual(["feedback", "stop"]);
+  });
+
+  it("does not stop a daemon before its asynchronous ownership check completes", async () => {
+    const ownership = deferred<boolean>();
+    const events: string[] = [];
+    const stopped = stopDesktopManagedDaemonOnQuitIfNeeded({
+      settingsStore: { get: async () => SETTINGS_STOP_ON_QUIT },
+      isDesktopManagedDaemonRunning: () => ownership.promise,
+      stopDaemon: async () => {
+        events.push("stop");
+      },
+      showShutdownFeedback: () => {
+        events.push("feedback");
+      },
+    });
+
+    await waitForQuitLifecycle();
+    expect(events).toEqual([]);
+    ownership.resolve(false);
+    await expect(stopped).resolves.toBe(false);
+    expect(events).toEqual([]);
   });
 
   it("revalidates updates after daemon shutdown before exiting", async () => {

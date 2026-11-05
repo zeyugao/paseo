@@ -40,6 +40,11 @@ foreign workspaces, are never repaired, captured for shutdown recovery, or resum
 | Attention push notifications                          | Sent only by the owning daemon, so a shared token list does not double-notify                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Workspace label edits                                 | Serialized across daemons by a cross-process file lock (`projects/.labels.lock`) with an on-disk catalog re-read inside the lock, so concurrent edits from two daemons both survive. Assignment writes are host-scoped; a rename or delete is rejected when it would rewrite an assignment on another host's workspace.                                                                                                                                                                                                                                                                                                                              |
 
+The original home owner (the persisted root `server-id`) adopts host-less legacy
+workspaces at startup unless an agent record attributes that workspace or cwd to another
+host. This restores missing-directory cleanup for single-host upgrades. Other hosts and
+ambiguous records stay unclaimed; a missing path alone never proves ownership.
+
 ## Identity and per-instance state
 
 `$PASEO_HOME/daemons/{serverId}/` holds per-daemon state: `instance.json` (O_EXCL lock

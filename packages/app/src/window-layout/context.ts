@@ -3,6 +3,8 @@ import { useAppWindowSize } from "@/hooks/use-app-window-size";
 import type { WindowLayout } from "./model";
 
 export const WindowLayoutContext = createContext<WindowLayout | null>(null);
+// Physical shell edges, independent of desktop window-control ownership.
+export const WindowLayoutContentEdgesContext = createContext({ left: true, right: true });
 
 export function useWindowLayout(): WindowLayout | null {
   const layout = useContext(WindowLayoutContext);

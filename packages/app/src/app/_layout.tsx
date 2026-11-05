@@ -7,6 +7,7 @@ import {
   useWindowLayout,
   resolveDesktopDivisionLayout,
 } from "@/window-layout";
+import { WindowLayoutContentEdgesContext } from "@/window-layout/context";
 import { AddHostProvider, AddHostFlowHost } from "@/hosts/add-host";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
@@ -387,6 +388,20 @@ interface AppContainerProps {
 
 const WINDOW_SIDEBAR_TOGGLE_HORIZONTAL_PADDING = 12;
 
+function WindowLayoutContentFrame({
+  edges,
+  children,
+}: {
+  edges: { left: boolean; right: boolean };
+  children: ReactNode;
+}) {
+  return (
+    <WindowLayoutContentEdgesContext.Provider value={edges}>
+      <View style={flexStyle}>{children}</View>
+    </WindowLayoutContentEdgesContext.Provider>
+  );
+}
+
 function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppContainerProps) {
   const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const daemons = useHosts();
@@ -502,6 +517,13 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   if (isWeb) {
     themedSidebarChrome = <AppearanceStyleBoundary>{sidebarChrome}</AppearanceStyleBoundary>;
   }
+  const contentEdges = useMemo(
+    () => ({ left: !desktopSidebarVisible, right: true }),
+    [desktopSidebarVisible],
+  );
+  const workspaceContent = (
+    <WindowLayoutContentFrame edges={contentEdges}>{children}</WindowLayoutContentFrame>
+  );
   const workspaceChrome = (
     <WindowLayoutSurface compact={isCompactLayout} style={rowStyle}>
       <WorkspaceLayoutModePublisher />
@@ -519,7 +541,7 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
         <WindowChromeRegion
           corners={isCompactLayout && chromeEnabled ? "both" : appChromeLayout.contentCorners}
         >
-          <View style={flexStyle}>{children}</View>
+          {workspaceContent}
         </WindowChromeRegion>
       </WorkspaceExplorerOpenGesture>
     </WindowLayoutSurface>

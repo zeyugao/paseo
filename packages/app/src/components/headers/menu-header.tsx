@@ -5,6 +5,7 @@ import { ScreenTitle } from "./screen-title";
 import { CompactHeader } from "./compact-header";
 import { SidebarMenuToggle } from "./sidebar-menu-toggle";
 import { useIsCompactFormFactor } from "@/constants/layout";
+import { WindowTopChrome } from "@/window-layout/top-chrome";
 
 interface MenuHeaderProps {
   title?: string;
@@ -18,17 +19,19 @@ export function MenuHeader({ title, rightContent, borderless }: MenuHeaderProps)
     return <CompactHeader navigation="menu" title={title} actions={rightContent} />;
   }
   return (
-    <ScreenHeader
-      left={
-        <>
-          <SidebarMenuToggle />
-          {title && <ScreenTitle>{title}</ScreenTitle>}
-        </>
-      }
-      right={rightContent}
-      leftStyle={styles.left}
-      borderless={borderless}
-    />
+    <WindowTopChrome>
+      <ScreenHeader
+        left={
+          <>
+            <SidebarMenuToggle />
+            {title && <ScreenTitle>{title}</ScreenTitle>}
+          </>
+        }
+        right={rightContent}
+        leftStyle={styles.left}
+        borderless={borderless}
+      />
+    </WindowTopChrome>
   );
 }
 

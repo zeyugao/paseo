@@ -4,6 +4,7 @@ import { requireNativeViewManager } from "expo-modules-core";
 import { SafeAreaInsetsContext, useSafeAreaInsets } from "react-native-safe-area-context";
 import { WindowLayoutContext, useWindowLayout } from "./context";
 import { resolveSafeAreaInsets, type WindowLayout } from "./model";
+import { HEADER_INNER_HEIGHT } from "@/constants/layout";
 
 export { useWindowLayout } from "./context";
 export { WindowLayoutActions, WindowLayoutActionsHost } from "./actions";
@@ -17,6 +18,7 @@ export type { DesktopDivisionLayout, WindowLayout, WindowLayoutRect } from "./mo
 
 const GeometryProbe = requireNativeViewManager<
   ViewProps & {
+    topChromeRowHeight: number;
     onGeometryChange: (event: NativeSyntheticEvent<WindowLayout>) => void;
   }
 >("PaseoWindowLayout");
@@ -33,6 +35,7 @@ export function WindowLayoutProvider({ children }: { children: ReactNode }) {
         <GeometryProbe
           pointerEvents="none"
           style={StyleSheet.absoluteFill}
+          topChromeRowHeight={HEADER_INNER_HEIGHT}
           onGeometryChange={onGeometryChange}
         />
         <WindowSafeAreaInsets>{children}</WindowSafeAreaInsets>

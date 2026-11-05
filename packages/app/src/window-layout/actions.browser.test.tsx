@@ -16,6 +16,42 @@ import { WindowLayoutContext } from "./context";
 import { WindowLayoutActions, WindowLayoutActionsHost } from "./actions";
 import { WindowLayoutDivisionGap } from "./surface";
 import { lightTheme } from "@/styles/theme";
+import { SafeAreaInsetsContext } from "react-native-safe-area-context";
+import { MenuHeader } from "@/components/headers/menu-header";
+const headerInsets = { top: 84, left: 0, right: 0, bottom: 0 };
+const headerAction = <Text testID="header-action">Action</Text>;
+
+it("reclaims the page header top band and restores safe-area clearance when it disappears", async () => {
+  const topBand: WindowLayout = {
+    ...geometry,
+    topChrome: { x: 6, y: 0, width: window.innerWidth - 150, height: 44 },
+  };
+  async function renderHeader(layout: WindowLayout | null) {
+    await act(async () =>
+      root.render(
+        <PortalProvider>
+          <SafeAreaInsetsContext.Provider value={headerInsets}>
+            <WindowLayoutContext.Provider value={layout}>
+              <MenuHeader title="History" rightContent={headerAction} />
+            </WindowLayoutContext.Provider>
+          </SafeAreaInsetsContext.Provider>
+        </PortalProvider>,
+      ),
+    );
+  }
+  const header = () =>
+    container.querySelector('[data-testid="composer-dock-header"]') as HTMLElement;
+  await renderHeader(null);
+  const normalHeight = header().getBoundingClientRect().height;
+  await renderHeader(topBand);
+  expect(header().getBoundingClientRect().height).toBe(normalHeight - headerInsets.top);
+  const action = container.querySelector('[data-testid="header-action"]') as HTMLElement;
+  expect(action.getBoundingClientRect().right).toBeLessThanOrEqual(
+    container.getBoundingClientRect().left + window.innerWidth - 144,
+  );
+  await renderHeader({ ...topBand, topChrome: null });
+  expect(header().getBoundingClientRect().height).toBe(normalHeight);
+});
 
 vi.stubGlobal("React", React);
 const layout = { sidebarWidth: 465, gap: 21, contentWidth: 381 };

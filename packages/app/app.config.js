@@ -185,6 +185,7 @@ export default {
           },
         },
       ],
+      withPasteInput.withPasteInputSceneManifest,
       ...buildProfile.fdroidPlugins,
       ...(isProfileBuild || isWatchdogBuild ? [withAndroidProfileable] : []),
     ],

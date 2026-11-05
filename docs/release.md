@@ -384,6 +384,10 @@ Stable tags run `Release Mobile`; beta tags run `Release iOS Beta`. Both distrib
 
 Stable iOS releases use one binary for two Apple review paths: Beta App Review for external TestFlight distribution and App Store review. [Apple says](https://developer.apple.com/help/app-store-connect/test-a-beta-version/invite-external-testers) the first submitted build requires a full TestFlight review; later builds for the same version might not. Do not assume a stable patch skips review.
 
+Production iOS uses `me.elsanna.overkite` and display name Overkite. Android remains Paseo / `sh.paseo`;
+development remains Paseo Debug / `sh.paseo.debug`. The shared Expo name and generated production
+Xcode project, workspace, scheme and target remain Paseo. Expo uses owner `elsagranger`, slug
+`overkite`, and project `a84e29d0-dad8-4136-8d22-22333db92371`.
 There is no mobile-release workflow under `.github/workflows`. The EAS GitHub app reads the workflows under `packages/app/.eas/workflows` and handles tag triggering directly.
 
 ### Store screenshots

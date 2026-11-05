@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +31,7 @@ test("recovery saves intent before normalization, clears before dispatch, and re
     const dispatched: string[] = [];
     const recovery = createRestartRecovery({
       storage,
+      mutable: async () => true,
       settings: () => ({ enabled: true, prompt: "Continue verbatim.\n" }),
       eligible: async () => true,
       dispatch: async (id, prompt) => {
@@ -84,6 +85,7 @@ test("opt-out consumes pending recovery and excludes archived, private, owned an
     const dispatched: string[] = [];
     const recovery = createRestartRecovery({
       storage,
+      mutable: async () => true,
       settings: () => ({ enabled, prompt: "Resume working." }),
       eligible: async (record) => record.workspaceId !== "archived",
       dispatch: async (id) => {
@@ -99,6 +101,66 @@ test("opt-out consumes pending recovery and excludes archived, private, owned an
     recovery.resumePending();
     expect(dispatched).toEqual([]);
     expect((await storage.listAll()).every((record) => !record.resumeOnStartup)).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("shared-home recovery never rewrites foreign running records and still resumes local agents", async () => {
+  const root = await mkdtemp(join(tmpdir(), "restart-recovery-shared-"));
+  try {
+    const storage = new AgentStorage(root, createTestLogger());
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    for (const [id, hostId] of [
+      ["foreign", "other"],
+      ["local", "here"],
+      ["transferred", "here"],
+    ] as const) {
+      await storage.upsert(
+        parseStoredAgentRecord({
+          id,
+          hostId,
+          lastStatus: "running",
+          resumeOnStartup: true,
+          provider: "codex",
+          cwd: root,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    }
+    const foreign = await storage.getFresh("foreign");
+    const writes = vi.spyOn(storage, "upsert");
+    const dispatched: string[] = [];
+    const recovery = createRestartRecovery({
+      storage,
+      mutable: async (record) => record.hostId === undefined || record.hostId === "here",
+      settings: () => ({ enabled: true, prompt: "Continue." }),
+      eligible: async () => true,
+      dispatch: async (id) => {
+        dispatched.push(id);
+      },
+      report: () => {},
+    });
+    await recovery.captureRunningAgents();
+    await recovery.prepareStartup();
+    expect(await storage.getFresh("foreign")).toEqual(foreign);
+    expect(await storage.getFresh("local")).toMatchObject({
+      lastStatus: "closed",
+      resumeOnStartup: true,
+    });
+    expect(writes.mock.calls.every(([record]) => record.id !== "foreign")).toBe(true);
+    const transferred = { ...(await storage.getFresh("transferred"))!, hostId: "other" };
+    await storage.upsert(transferred);
+    writes.mockClear();
+    recovery.resumePending();
+    await recovery.waitForResume("local", new AbortController().signal);
+    await recovery.waitForResume("transferred", new AbortController().signal);
+    expect(dispatched).toEqual(["local"]);
+    expect(await storage.getFresh("foreign")).toEqual(foreign);
+    expect(await storage.getFresh("local")).toMatchObject({ resumeOnStartup: false });
+    expect(await storage.getFresh("transferred")).toEqual(transferred);
+    expect(writes.mock.calls.every(([record]) => record.id === "local")).toBe(true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

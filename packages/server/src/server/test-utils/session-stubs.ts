@@ -38,6 +38,7 @@ export function asAgentManager(stub: {
     listProviderSubagentActivity: () => [],
     getRetiredInternalAgent: () => null,
     getAgentBackgroundWorkSummary: () => undefined,
+    assertAgentMutable: async () => {},
     ...stub,
   });
 }

@@ -235,6 +235,7 @@ type ScheduleAgentManager = Pick<
 > &
   Pick<
     AgentManager,
+    | "serverId"
     | "createAgent"
     | "getRegisteredProviderIds"
     | "hydrateTimelineFromProvider"

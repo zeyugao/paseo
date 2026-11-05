@@ -362,9 +362,13 @@ macOS 13 maps to Darwin 22. The two values use different version domains; do not
 - **Bootstrap caveat.** Clients running a build older than the rollout feature ignore `rolloutHours` and admit immediately. Rollout protection only applies to clients running the rollout-aware version or later.
 - **Up to ~30 min automatic admission latency.** Renderer polls every 30 minutes, so a stable user may take up to that long to be evaluated against the rollout window. Clicking **Check** is manual and bypasses rollout admission.
 
-## Mobile builds (EAS)
+## GitHub tarballs
 
-iOS and Android store builds are not in `.github/workflows`. They are triggered by the EAS GitHub app the moment the `v*` tag is pushed:
+`CLI Tarball Release` publishes seven packages: highlight, relay, protocol, client, plugin, server
+and CLI. Version tags use the matching release; pushes to `main` update `cli-latest`. Rolling
+dependency asset names and package versions include the source commit so Bun cannot reuse a
+previous rolling dependency. Dependencies upload before the CLI entry tarball. The workflow
+smoke-installs over the previous rolling CLI and checks the installed server's commit.
 
 - **Android (Play Store)** — EAS builds with profile `production` and auto-submits to the Play Store via `eas submit` (EAS-managed credentials). A Fastlane lane then replaces the store screenshots.
 - **iOS (TestFlight + App Store)** — EAS builds with profile `production`, uploads once through a `testflight` job, distributes the build to the `Paseo Beta` external group with Beta App Review submission, and a Fastlane lane uploads the store screenshots and submits that same build for App Store review.

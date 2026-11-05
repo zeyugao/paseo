@@ -8,9 +8,9 @@ This is server-side behavior. Clients need no changes: each daemon has its own
 `serverId`, so the app's existing multi-host support shows one host per machine.
 
 Schedule ownership is persisted privately by the server and is omitted from RPC and MCP
-schedule responses. Startup recovery acquires the daemon instance lease before repairing
-running statuses or recording resume intent. Foreign agent records, including records in
-foreign workspaces, are never repaired, captured for shutdown recovery, or resumed here.
+schedule responses. Startup acquires the instance lease before activating terminal
+workers, repairing running statuses or recording resume intent. Foreign agent records,
+including records in foreign workspaces, are never repaired or resumed as writers here.
 
 ## Setup
 

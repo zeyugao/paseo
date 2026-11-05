@@ -1417,6 +1417,7 @@ describe("terminal MCP tools", () => {
         const home = await mkdtemp(join(tmpdir(), "mcp-terminal-keys-home-"));
         const manager = await startWorkerTerminalManager({
           paseoHome: home,
+          serverId: "srv_mcp_test",
           paseoVersion: "0.0.0-test",
           logger,
         });

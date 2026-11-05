@@ -25,6 +25,7 @@ export class TerminalWorkerLaunchError extends Error {
  * Resolves with the record the worker wrote; a failed start leaves no worker behind.
  */
 export async function launchTerminalWorker(input: {
+  /** Worker state home; the inherited shell/CLI environment keeps the shared PASEO_HOME. */
   paseoHome: string;
   paseoVersion: string;
   timeoutMs?: number;

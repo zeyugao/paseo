@@ -8,6 +8,7 @@ import {
   resolveTerminalWorkerSocketPath,
   TerminalWorkerSocketPathError,
 } from "./terminal-worker-socket-path.js";
+import { terminalWorkerHome } from "./terminal-worker-record.js";
 
 const temporaryDirs: string[] = [];
 
@@ -59,6 +60,27 @@ describe.skipIf(isPlatform("win32"))("terminal worker socket path", () => {
     });
     expect(path.dirname(socketPath)).toBe(`/tmp/paseo-${uid}`);
     expect(Buffer.byteLength(socketPath, "utf8")).toBeLessThanOrEqual(103);
+  });
+
+  it("names fallback sockets by stable server identity even when worker PIDs match", () => {
+    const root = longHome(makeDir("tw-shared-sock-"));
+    const input = { workerPid: 4242, platform: "darwin" as const };
+    const alpha = resolveTerminalWorkerSocketPath({
+      ...input,
+      paseoHome: terminalWorkerHome(root, "srv_alpha"),
+    });
+    const beta = resolveTerminalWorkerSocketPath({
+      ...input,
+      paseoHome: terminalWorkerHome(root, "srv_beta"),
+    });
+    expect(path.dirname(alpha)).toBe(path.dirname(beta));
+    expect(alpha).not.toBe(beta);
+    expect(
+      resolveTerminalWorkerSocketPath({
+        ...input,
+        paseoHome: terminalWorkerHome(root, "srv_alpha"),
+      }),
+    ).toBe(alpha);
   });
 
   it("rejects a shared-root directory that is a symlink, has another mode, or is not a directory", () => {

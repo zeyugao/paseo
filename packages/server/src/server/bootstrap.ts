@@ -237,7 +237,7 @@ import {
 import { setupAutoArchiveOnMerge } from "./auto-archive-on-merge/index.js";
 import { wrapSessionMessage, type SessionOutboundMessage } from "./messages.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
-import { startWorkerTerminalManager } from "../terminal/worker-terminal-manager.js";
+import { createDeferredWorkerTerminalManager } from "../terminal/worker-terminal-manager.js";
 import { applyTerminalAgentHookSetting } from "../terminal/agent-hooks/terminal-agent-hook-setting.js";
 import { loadOrCreateDaemonKeyPair } from "./daemon-keypair.js";
 import {
@@ -807,8 +807,9 @@ export async function createPaseoDaemon(
   });
   let boundListenTarget: ListenTarget | null = null;
   let workspaceRegistry: FileBackedWorkspaceRegistry | null = null;
-  const terminalManager = await startWorkerTerminalManager({
+  const terminalManager = createDeferredWorkerTerminalManager({
     paseoHome: config.paseoHome,
+    serverId,
     paseoVersion: daemonVersion,
     logger,
     getTerminalActivityUrl: () => createTerminalActivityUrl(boundListenTarget),
@@ -1901,6 +1902,7 @@ export async function createPaseoDaemon(
         onHeartbeatError: handleDaemonInstanceHeartbeatError,
       });
       daemonInstanceRegistration = registration;
+      await terminalManager.activate();
       await restartRecovery.prepareStartup();
       // Reconcile only after this daemon owns the instance lease. A rejected
       // competitor must never terminate helpers owned by the live daemon.

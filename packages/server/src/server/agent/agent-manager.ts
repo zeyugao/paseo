@@ -5262,13 +5262,9 @@ export class AgentManager {
     if (!isForegroundEvent && !agent.activeForegroundTurnId) {
       agent.lifecycle = "error";
     }
-    agent.lastError = event.error;
-    await this.appendSystemErrorTimelineMessage(
-      agent,
-      event.provider,
-      this.formatTurnFailedMessage(event),
-      options,
-    );
+    const failureMessage = this.formatTurnFailedMessage(event);
+    agent.lastError = failureMessage;
+    await this.appendSystemErrorTimelineMessage(agent, event.provider, failureMessage, options);
     this.resolvePendingPermissionsForAgent(agent, event.provider, options, "Turn failed");
     if (!isForegroundEvent && !agent.activeForegroundTurnId) {
       this.emitState(agent);

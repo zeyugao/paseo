@@ -29,6 +29,7 @@ const MANAGED_PROCESS_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const POSIX_LSTART_WIDTH = 24;
 
 const ManagedProcessRecordSchema = z.object({
+  hostId: z.string().optional(),
   id: z.string().min(1),
   owner: z.object({
     provider: z.string().min(1),
@@ -84,6 +85,7 @@ export interface ManagedProcessRecordInput {
 }
 
 export interface ManagedProcessRecord extends ManagedProcessRecordInput {
+  hostId?: string;
   id: string;
   metadata: Record<string, unknown>;
   identity: {
@@ -109,8 +111,9 @@ export interface ManagedProcessRegistry {
   reapStale(): Promise<ManagedProcessReapResult>;
 }
 
-interface ManagedProcessRegistryOptions {
+export interface ManagedProcessRegistryOptions {
   paseoHome: string;
+  serverId?: string;
   processTable: ManagedProcessTable;
   terminateProcess: ProcessTerminator;
   logger: Logger;
@@ -222,12 +225,14 @@ class SystemManagedProcessTable implements ManagedProcessTable {
 
 class FileBackedManagedProcessRegistry implements ManagedProcessRegistry {
   private readonly directory: string;
+  private readonly serverId: string | undefined;
   private readonly processTable: ManagedProcessTable;
   private readonly terminateProcess: ProcessTerminator;
   private readonly logger: Logger;
 
   constructor(options: ManagedProcessRegistryOptions) {
     this.directory = path.join(options.paseoHome, "runtime", "managed-processes");
+    this.serverId = options.serverId;
     this.processTable = options.processTable;
     this.terminateProcess = options.terminateProcess;
     this.logger = options.logger.child({ module: "managed-processes" });
@@ -249,6 +254,9 @@ class FileBackedManagedProcessRegistry implements ManagedProcessRegistry {
       },
       createdAt: new Date().toISOString(),
     };
+    if (this.serverId !== undefined) {
+      record.hostId = this.serverId;
+    }
 
     await writeJsonFileAtomic(this.recordPath(record.id), record);
     return record;
@@ -274,6 +282,13 @@ class FileBackedManagedProcessRegistry implements ManagedProcessRegistry {
     };
 
     for (const entry of await this.readEntries()) {
+      if (
+        this.serverId !== undefined &&
+        entry.record.hostId !== undefined &&
+        entry.record.hostId !== this.serverId
+      ) {
+        continue;
+      }
       result.checked += 1;
       try {
         const inspection = await this.processTable.inspect(entry.record.pid);

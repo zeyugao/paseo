@@ -39,7 +39,12 @@ export async function generateLocalPairingOffer(args: {
   const relayPublicUseTls = args.relayPublicUseTls ?? relayUseTls;
   const appBaseUrl = args.appBaseUrl ?? "https://app.paseo.sh";
   const serverId = getOrCreateServerId(args.paseoHome, { logger: args.logger });
-  const daemonKeyPair = await loadOrCreateDaemonKeyPair(args.paseoHome, args.logger);
+  // The pairing offer creates the home's primary identity; the keypair must
+  // land at the legacy root path so the first daemon on this home adopts it.
+  // Passing serverId here would place it under daemons/{serverId}/ instead.
+  const daemonKeyPair = await loadOrCreateDaemonKeyPair(args.paseoHome, {
+    logger: args.logger,
+  });
   const offer = await createConnectionOfferV2({
     serverId,
     daemonPublicKeyB64: daemonKeyPair.publicKeyB64,

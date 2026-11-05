@@ -102,6 +102,7 @@ import { mapOmpTodoReminderEvent, mapOmpTodoState, mapOmpTodoToolResult } from "
 import { mapOmpRuntimeEventToTimelineItem } from "./event-mapper.js";
 import { mapOmpAdvisorMessageToToolCall } from "./advisor-message.js";
 import { handleOmpHostToolRuntimeEvent, OmpHostToolRouter } from "./host-tools.js";
+import { readOmpNativeMessageId } from "./native-message-id.js";
 import { OmpSubagentIndex } from "./subagent-index.js";
 import { OmpQuestionUi } from "./question-ui.js";
 import { mapOmpToolDetail } from "./tool-call-mapper.js";
@@ -463,15 +464,6 @@ function buildResumeStartInput(input: {
       input.resumeConfig.config.daemonAppendSystemPrompt,
     ),
   };
-}
-
-function readNativeMessageId(
-  message: OmpAgentMessage & { id?: unknown; entryId?: unknown },
-): string | undefined {
-  if (typeof message.id === "string") {
-    return message.id;
-  }
-  return typeof message.entryId === "string" ? message.entryId : undefined;
 }
 
 function withOmpCapabilities(): AgentCapabilityFlags {
@@ -2053,8 +2045,12 @@ export class OmpAgentSession implements AgentSession {
     if (!text) {
       return;
     }
-    const nativeMessage = event.message as OmpAgentMessage & { id?: unknown; entryId?: unknown };
-    const messageId = readNativeMessageId(nativeMessage);
+    const nativeMessage = event.message as OmpAgentMessage & {
+      id?: unknown;
+      entryId?: unknown;
+      steering?: unknown;
+    };
+    const messageId = readOmpNativeMessageId(nativeMessage);
     const emitUserMessage = (resolvedMessageId?: string): void => {
       if (resolvedMessageId) {
         // OMP re-emits user message_end frames for entries it has already

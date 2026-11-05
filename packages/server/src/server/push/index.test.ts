@@ -46,7 +46,7 @@ describe("push notifications", () => {
       deliver: async (tokens) => deliveries.push(tokens),
     });
 
-    pushNotifications.renew("ExponentPushToken[offline-device]");
+    await pushNotifications.renew("ExponentPushToken[offline-device]");
     now += 48 * 60 * 60 * 1000;
     await pushNotifications.send({ title: "Agent finished", body: "Done" });
 
@@ -65,11 +65,45 @@ describe("push notifications", () => {
       deliver: async (tokens) => deliveries.push(tokens),
     });
 
-    pushNotifications.renew("ExponentPushToken[online-device]");
-    pushNotifications.revoke("ExponentPushToken[online-device]");
+    await pushNotifications.renew("ExponentPushToken[online-device]");
+    await pushNotifications.revoke("ExponentPushToken[online-device]");
     await pushNotifications.send({ title: "Agent finished", body: "Done" });
 
     expect(deliveries).toEqual([]);
+  });
+
+  test("independent notification services see registrations and revocations without restarting", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "paseo-push-notifications-"));
+    homes.push(home);
+    const filePath = path.join(home, "push-tokens.json");
+    const deliveries: string[][] = [];
+    const options = {
+      logger: createLogger(),
+      filePath,
+      now: () => Date.parse("2026-08-10T00:00:00.000Z"),
+      deliver: async (tokens: string[]) => {
+        deliveries.push(tokens);
+      },
+    };
+    const first = createPushNotifications(options);
+    const second = createPushNotifications(options);
+    const payload = { title: "Agent finished", body: "Done" };
+    await Promise.all([first.send(payload), second.send(payload)]);
+
+    await first.renew("ExponentPushToken[first]");
+    await second.send(payload);
+    await second.renew("ExponentPushToken[second]");
+    await first.send(payload);
+    await second.revoke("ExponentPushToken[first]");
+    await first.send(payload);
+    await createPushNotifications(options).send(payload);
+
+    expect(deliveries).toEqual([
+      ["ExponentPushToken[first]"],
+      ["ExponentPushToken[first]", "ExponentPushToken[second]"],
+      ["ExponentPushToken[second]"],
+      ["ExponentPushToken[second]"],
+    ]);
   });
 
   let originalDispatcher: Dispatcher;
@@ -139,7 +173,7 @@ describe("push notifications", () => {
       .persist();
 
     const { pushNotifications } = createPersistentStore();
-    for (const token of tokens) pushNotifications.renew(token);
+    for (const token of tokens) await pushNotifications.renew(token);
 
     await pushNotifications.send({ title: "Agent finished", body: "Done" });
 
@@ -168,8 +202,8 @@ describe("push notifications", () => {
         .persist();
 
       const { filePath, options, pushNotifications } = createPersistentStore();
-      pushNotifications.renew(invalid);
-      pushNotifications.renew(valid);
+      await pushNotifications.renew(invalid);
+      await pushNotifications.renew(valid);
       const payload = { title: "Agent finished", body: "Done" };
 
       await pushNotifications.send(payload);
@@ -217,7 +251,7 @@ describe("push notifications", () => {
         .persist();
 
       const { filePath, pushNotifications } = createPersistentStore();
-      pushNotifications.renew(token);
+      await pushNotifications.renew(token);
       const payload = { title: "Agent finished", body: "Done" };
 
       await pushNotifications.send(payload);

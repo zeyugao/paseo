@@ -549,13 +549,10 @@ than treating it as valid.
 
 **Path:** `$PASEO_HOME/push-tokens.json`
 
-```json
-{
-  "tokens": ["ExponentPushToken[...]", ...]
-}
-```
-
-Simple set of Expo push notification tokens. Loaded with permissive parsing (filters non-string entries). Persisted with atomic temp-file rename.
+The file stores leased subscriptions (`token`, `expiresAt`); the old `tokens` array is
+accepted and migrated on the next read. Delivery and mutation re-read disk under the
+same cross-process lock. See [daemon push delivery](notifications.md#daemon-push-delivery)
+for shared-home consistency and terminal Expo error handling.
 
 ---
 

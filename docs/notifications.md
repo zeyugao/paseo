@@ -22,9 +22,10 @@ Send each token in its own Expo request: a mixed-project batch is rejected befor
 per-device tickets, so one stale registration can prevent every device from receiving a push.
 
 Treat `DeviceNotRegistered` and `InvalidCredentials` tickets as terminal subscription failures.
-Revoke through the token store so memory and disk agree; editing `push-tokens.json` alone does not
-update a running daemon. Transport, HTTP, and rate-limit failures leave registrations intact.
-A client that reports the token again can register it again; revocation is not a permanent ban.
+Revoke through the token store. Every delivery reads the current shared file; renewals,
+revocations and pruning re-read under a cross-process lock before an atomic write, so one
+daemon cannot overwrite another's registration. Transport, HTTP and rate-limit failures
+leave registrations intact. A client can register a revoked token again.
 
 ## Native delivery
 

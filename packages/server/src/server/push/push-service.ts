@@ -18,9 +18,9 @@ const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 /** Hosts may register devices from different Expo projects, which cannot share a request. */
 export class PushService {
   private readonly logger: pino.Logger;
-  private readonly revokeToken: (token: string) => void;
+  private readonly revokeToken: (token: string) => Promise<void>;
 
-  constructor(logger: pino.Logger, revokeToken: (token: string) => void) {
+  constructor(logger: pino.Logger, revokeToken: (token: string) => Promise<void>) {
     this.logger = logger.child({ component: "push-service" });
     this.revokeToken = revokeToken;
   }
@@ -55,13 +55,13 @@ export class PushService {
       }
 
       const result = (await response.json()) as { data: ExpoPushTicket };
-      this.handleTicket(token, result.data);
+      await this.handleTicket(token, result.data);
     } catch (error) {
       this.logger.error({ err: error }, "Failed to send push notifications");
     }
   }
 
-  private handleTicket(token: string, ticket: ExpoPushTicket): void {
+  private async handleTicket(token: string, ticket: ExpoPushTicket): Promise<void> {
     if (ticket.status !== "error") return;
 
     this.logger.error(
@@ -73,7 +73,7 @@ export class PushService {
       ticket.details?.error === "DeviceNotRegistered" ||
       ticket.details?.error === "InvalidCredentials"
     ) {
-      this.revokeToken(token);
+      await this.revokeToken(token);
     }
   }
 }

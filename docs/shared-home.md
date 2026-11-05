@@ -85,6 +85,9 @@ one journal.
 - Local speech models download and extract directly into the shared home; prefer a
   per-machine `providers.local.modelsDir` when two hosts might enable voice at the
   same time.
+- Plugins with platform-specific dependencies (native modules) only load on machines
+  matching the installing machine's OS/arch, and a plugin update requires restarting
+  the other machines' daemons to pick up the new path.
 - The Hub relationship is per-home and single-connection. A blocked daemon retries
   the `hub-connection.lock` lease with bounded backoff and takes over after release or
   expiry. Stopping cancels takeover; losing the lease fences the former connection.

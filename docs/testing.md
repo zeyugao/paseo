@@ -42,6 +42,8 @@ Tests must produce the same result every run:
 - No weak assertions (`toBeTruthy`, `toBeDefined`)
 - Assert the full intended behavior, not fragments
 
+Restart tests reopen the saved home without replaying configuration or installation. Otherwise setup can repair the state the test is meant to verify.
+
 ```typescript
 // Bad: conditional and weak
 it("creates a tool call", async () => {

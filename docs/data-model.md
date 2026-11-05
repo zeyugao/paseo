@@ -6,9 +6,12 @@ Projects are allocated for the exact root selected by the caller, normalized lex
 
 `projectKey` is a persisted, opaque equivalence key used only to group the same logical project
 across hosts. It is separate from the host-local `projectId`; today's producer prefers a normalized
-Git remote and otherwise uses the local project root. Consumers never derive it from live Git.
-Creation persists it with the project, and normal boot reconciliation fills it for
-older records where the field is absent—there is no migration.
+Git remote. Without a remote the key names the local root under every daemon that has observed it
+(`host:srv_a+srv_b:/path`), sorted and joined with `+`: each daemon unions its own `serverId` in
+during reconciliation instead of replacing the list, so several daemons on one home converge on a
+single key instead of rewriting the record for each other. Consumers never derive it from live Git.
+Creation persists it with the project, and normal boot reconciliation fills it for older records
+where the field is absent—there is no migration.
 
 `kind` and `projectKey` are mutable metadata, not identity. Workspace reconciliation watches active project roots and
 updates those fields and `updatedAt` when Git facts change, preserving the project's ID, root path,
@@ -50,9 +53,9 @@ Store APIs own persistence atomicity and should not make services coordinate raw
 $PASEO_HOME/
 ├── config.json                          # Daemon configuration
 ├── server-id                            # Stable daemon identifier (plain text, "srv_<base64url>")
-├── daemon-keypair.json                  # E2EE keypair for relay (mode 0600)
-├── paseo.pid                            # Daemon PID lock file
-├── local-credential                     # Per-run local client credential (mode 0600)
+├── daemon-keypair.json                  # Legacy E2EE keypair; per-daemon copies live under daemons/
+├── paseo.pid                            # CLI discovery pointer held by one daemon (JSON {pid, startedAt, ...})
+├── local-credential                     # CLI credential mirrored by the paseo.pid owner (mode 0600)
 ├── daemon.log                           # Default log file (path configurable)
 ├── agents/
 │   └── {sanitized-cwd}/
@@ -63,7 +66,7 @@ $PASEO_HOME/
 │   ├── projects.json                    # Project registry
 │   ├── workspaces.json                  # Workspace registry
 │   ├── workspace-labels.json            # Shared host-local label catalog
-│   ├── workspace-labels.transaction.json # Recoverable catalog/assignment compound commit
+│   ├── workspace-labels.transaction.{txId}.json # Recoverable catalog/assignment compound commit (one per transaction)
 │   └── icons/                           # Host-local custom project icon images
 ├── runtime/
 │   └── managed-processes/
@@ -512,7 +515,7 @@ last assignment. Editing a label takes a new name, a new colour, or both in one 
 fields cannot land half-applied. Workspaces store label names, so a rename and a delete rewrite
 workspace assignments through one serialized compound commit while a recolour is catalog-only; a
 rename onto a name the host already has is refused rather than merged. A prepared
-`workspace-labels.transaction.json` contains both before and after images. The daemon writes the
+`workspace-labels.transaction.{txId}.json` contains both before and after images. The daemon writes the
 catalog and workspace files, then atomically changes the transaction to committed; that phase
 change is the durable commit point. Recovery rolls prepared transactions back before either
 directory is served. A committed marker proves both data files were already written, so recovery
@@ -549,13 +552,13 @@ Simple set of Expo push notification tokens. Loaded with permissive parsing (fil
 
 These small files are not validated as full Zod schemas but are persisted under `$PASEO_HOME` for daemon identity and runtime coordination.
 
-| Path                  | Format                                                         | Notes                                                                             |
-| --------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `server-id`           | Plain text, e.g. `srv_<base64url>`                             | Stable per-`$PASEO_HOME` daemon ID. Overridable via `PASEO_SERVER_ID` env.        |
-| `daemon-keypair.json` | `{ v: 2, publicKeyB64, secretKeyB64 }` (libsodium box keypair) | E2EE relay identity. Written with mode `0600`. Regenerated if file is unreadable. |
-| `paseo.pid`           | JSON `{ pid, startedAt, ... }`                                 | PID lock; prevents two daemons sharing one `$PASEO_HOME`.                         |
-| `local-credential`    | 32 random bytes encoded as base64url text                      | Rotated before each listen and deleted on shutdown; mode `0600`.                  |
-| `daemon.log`          | Pino log output                                                | Default location; path/rotation configurable via `log.file` in `config.json`.     |
+| Path                  | Format                                                         | Notes                                                                                                                                                                                                    |
+| --------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server-id`           | Plain text, e.g. `srv_<base64url>`                             | Stable per-`$PASEO_HOME` daemon ID. Overridable via `PASEO_SERVER_ID` env.                                                                                                                               |
+| `daemon-keypair.json` | `{ v: 2, publicKeyB64, secretKeyB64 }` (libsodium box keypair) | Legacy E2EE keypair. Each daemon keeps its own under `daemons/{serverId}/`, adopting the legacy copy only when its serverId matches the legacy `server-id` file. Mode `0600`; regenerated if unreadable. |
+| `paseo.pid`           | JSON `{ pid, startedAt, ... }`                                 | Legacy discovery pointer. Verified per-instance discovery and lease rules are in [shared-home.md](shared-home.md#identity-and-per-instance-state).                                                       |
+| `local-credential`    | 32 random bytes encoded as base64url text                      | Per-daemon copy under `daemons/{serverId}/`; the pid owner also mirrors the legacy path. Mode `0600`.                                                                                                    |
+| `daemon.log`          | Pino log output                                                | Default location; `daemon.{serverId}.log` when `PASEO_SERVER_ID` is set. Path/rotation configurable via `log.file` in `config.json`.                                                                     |
 
 ---
 

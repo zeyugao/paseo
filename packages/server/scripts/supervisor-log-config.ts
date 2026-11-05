@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import type { loadPersistedConfig } from "../src/server/persisted-config.js";
+import { validateEnvironmentServerId } from "../src/server/server-id.js";
 
 const DEFAULT_DAEMON_LOG_FILENAME = "daemon.log";
 const DEFAULT_LOG_ROTATE_SIZE = "10m";
@@ -15,7 +16,10 @@ export function resolveSupervisorLogFile(
   const configuredPath = configuredFile?.path;
   const envRotateSize = env.PASEO_LOG_ROTATE_SIZE?.trim();
   const envRotateMaxFiles = parseOptionalPositiveInteger(env.PASEO_LOG_ROTATE_COUNT);
-  let logPath = path.join(paseoHome, DEFAULT_DAEMON_LOG_FILENAME);
+  const serverId = env.PASEO_SERVER_ID?.trim();
+  const safeServerId = serverId ? validateEnvironmentServerId(serverId) : undefined;
+  const defaultFilename = safeServerId ? `daemon.${safeServerId}.log` : DEFAULT_DAEMON_LOG_FILENAME;
+  let logPath = path.join(paseoHome, defaultFilename);
   if (configuredPath) {
     logPath = path.isAbsolute(configuredPath)
       ? configuredPath

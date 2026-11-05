@@ -3,6 +3,7 @@ import type { ProviderAvailability } from "../../agent/agent-manager.js";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
 import { readDaemonInstance } from "../../daemon-instance.js";
 import { readUnconfirmedTerminalCleanup } from "../../../terminal/terminal-worker-reaper.js";
+import { terminalWorkerHome } from "../../../terminal/terminal-worker-record.js";
 import { generateLocalPairingOffer } from "../../pairing-offer.js";
 import {
   collectDaemonDiagnostics,
@@ -181,9 +182,12 @@ export class DaemonSession {
   ): Promise<void> {
     // Read outside the degraded-status fallback below: a status that cannot say whether
     // terminal cleanup finished must fail the request, not report that nothing is left.
-    const terminalCleanupUnconfirmed = (await readUnconfirmedTerminalCleanup(this.paseoHome)).map(
-      ({ pid, role, reason, detail }) => ({ pid, role, reason, detail }),
-    );
+    const terminalCleanupUnconfirmed =
+      this.serverId === undefined
+        ? []
+        : (
+            await readUnconfirmedTerminalCleanup(terminalWorkerHome(this.paseoHome, this.serverId))
+          ).map(({ pid, role, reason, detail }) => ({ pid, role, reason, detail }));
     const terminalsUnavailable = this.getTerminalsUnavailable();
     try {
       const pidInfo = await readDaemonInstance(this.paseoHome, {

@@ -74,6 +74,41 @@ export function createTerminalWorkerProcessInspector(
   };
 }
 
+/** The explicit identity of a locally verified legacy worker; null means the home default. */
+export async function readTerminalWorkerServerId(pid: number): Promise<string | null> {
+  let entries: string[];
+  if (process.platform === "linux") {
+    const environment = await readLinuxEnvironment(process.platform, pid);
+    if (environment === null) throw new Error(`Terminal worker ${pid} is gone`);
+    entries = environment;
+  } else if (process.platform === "darwin") {
+    const { stdout } = await createLocaleNeutralCommandRunner().exec("ps", [
+      "eww",
+      "-p",
+      String(pid),
+      "-o",
+      "command=",
+    ]);
+    // The worker argv contains only paths and launch flags. The trailing environment is
+    // unquoted, but server IDs cannot contain whitespace, so this field is unambiguous.
+    entries =
+      String(stdout)
+        .match(/(?:^|\s)PASEO_SERVER_ID=[^\s]*/g)
+        ?.map((entry) => entry.trim()) ?? [];
+    if (!String(stdout).trim()) throw new Error(`Terminal worker ${pid} is gone`);
+  } else {
+    throw new Error(`Cannot attribute a legacy terminal worker on ${process.platform}`);
+  }
+  const overrides = new Set(
+    entries
+      .filter((entry) => entry.startsWith("PASEO_SERVER_ID="))
+      .map((entry) => entry.slice("PASEO_SERVER_ID=".length)),
+  );
+  if (overrides.size > 1) throw new Error(`Terminal worker ${pid} identity is ambiguous`);
+  const override = overrides.values().next().value;
+  return override?.trim() ? override : null;
+}
+
 async function readLinuxEnvironment(
   platform: NodeJS.Platform,
   pid: number,

@@ -7,7 +7,10 @@ import type {
 } from "./terminal-manager.js";
 import type { TerminalSession } from "./terminal.js";
 import type { WorkerCreateTerminalOptions } from "./terminal-worker-protocol.js";
-import type { DaemonTerminalManager } from "./worker-terminal-manager.js";
+import type {
+  ActivatableDaemonTerminalManager,
+  DaemonTerminalManager,
+} from "./worker-terminal-manager.js";
 
 // The daemon's terminal service over up to two terminal workers: the current one, which takes
 // every new terminal, and one draining a previous worker protocol, which keeps serving the
@@ -66,10 +69,12 @@ export interface TerminalWorkerPoolOptions {
 }
 
 export function createTerminalWorkerPool(
-  options: TerminalWorkerPoolOptions,
-): DaemonTerminalManager {
-  let current = options.current;
-  const draining = new Set(options.draining);
+  initialize: () => Promise<TerminalWorkerPoolOptions>,
+): ActivatableDaemonTerminalManager {
+  let options: TerminalWorkerPoolOptions | null = null;
+  let activation: Promise<void> | null = null;
+  let current: TerminalWorkerPoolMember | null = null;
+  const draining = new Set<TerminalWorkerPoolMember>();
   const terminalsChangedListeners = new Set<TerminalsChangedListener>();
   const terminalActivityListeners = new Set<TerminalActivityListener>();
   const contributionListeners = new Set<TerminalWorkspaceContributionChangedListener>();
@@ -80,12 +85,19 @@ export function createTerminalWorkerPool(
   // Registrations belong to the service and are replayed whenever a current worker starts.
   const cwdEnv = new Map<string, Record<string, string>>();
 
+  function requireOptions(): TerminalWorkerPoolOptions {
+    if (!options) throw new Error("Terminal manager has not been activated");
+    return options;
+  }
+
   function members(): TerminalWorkerPoolMember[] {
+    requireOptions();
     return [...(current ? [current] : []), ...draining];
   }
 
   function assertAvailable(): void {
-    if (options.incompatible) throw options.incompatible;
+    const { incompatible } = requireOptions();
+    if (incompatible) throw incompatible;
   }
 
   function ownerOf(terminalId: string): DaemonTerminalManager | null {
@@ -111,7 +123,7 @@ export function createTerminalWorkerPool(
     // the last terminal is still waiting for its answer.
     void member.manager
       .detach({ afterPendingRequests: true })
-      .then(() => options.onDrained?.(member));
+      .then(() => requireOptions().onDrained?.(member));
   }
 
   function forwardEvents(member: TerminalWorkerPoolMember): void {
@@ -131,15 +143,12 @@ export function createTerminalWorkerPool(
     });
   }
 
-  for (const member of members()) forwardEvents(member);
-  for (const member of Array.from(draining)) releaseIfDrained(member);
-
   async function currentManager(): Promise<DaemonTerminalManager> {
     if (closePromise || detached)
       throw new NoTerminalWorkerAvailableError("No terminal worker can take new terminals");
     const candidate = current;
     if (candidate && (await candidate.ready())) return candidate.manager;
-    const startCurrent = options.startCurrent;
+    const startCurrent = requireOptions().startCurrent;
     if (!startCurrent || closePromise || detached) {
       return Promise.reject(
         new NoTerminalWorkerAvailableError("No terminal worker can take new terminals"),
@@ -165,19 +174,32 @@ export function createTerminalWorkerPool(
   }
 
   function closeTerminals(): Promise<void> {
+    requireOptions();
     closePromise ??= (async () => {
       for (const member of members()) member.stopRecovery();
       await starting?.catch(() => {});
       await Promise.all(members().map((member) => member.manager.detach()));
       draining.clear();
-      await options.closeAll();
+      await requireOptions().closeAll();
     })();
     return closePromise;
   }
 
   return {
+    activate(): Promise<void> {
+      activation ??= (async () => {
+        const configured = await initialize();
+        options = configured;
+        current = configured.current;
+        for (const member of configured.draining) draining.add(member);
+        for (const member of members()) forwardEvents(member);
+        for (const member of Array.from(draining)) releaseIfDrained(member);
+      })();
+      return activation;
+    },
+
     getUnavailableError(): Error | null {
-      return options.incompatible;
+      return requireOptions().incompatible;
     },
 
     async getTerminals(cwd, filter) {
@@ -197,6 +219,7 @@ export function createTerminalWorkerPool(
     },
 
     registerCwdEnv(registration) {
+      requireOptions();
       cwdEnv.set(registration.cwd, registration.env);
       if (current) current.manager.registerCwdEnv(registration);
     },
@@ -258,6 +281,7 @@ export function createTerminalWorkerPool(
     closeTerminals,
 
     async detach() {
+      requireOptions();
       detached = true;
       for (const member of members()) member.stopRecovery();
       await starting?.catch(() => {});

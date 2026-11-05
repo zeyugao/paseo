@@ -54,7 +54,7 @@ $PASEO_HOME/
 ├── local-credential                     # CLI credential mirrored by the paseo.pid owner (mode 0600)
 ├── daemon.log                           # Default log file (path configurable)
 ├── daemons/
-│   └── {serverId}/                      # Per-daemon state: instance.json lock, keypair, local-credential
+│   └── {serverId}/                      # Instance lease, keypair, credential and terminal-worker state
 ├── agents/
 │   └── {sanitized-cwd}/
 │       └── {agentId}.json               # One file per agent

@@ -16,8 +16,9 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { DaemonClient } from "../test-utils/daemon-client.js";
 import { resolveDaemonVersion } from "../daemon-version.js";
-import { readDaemonInstance, stopDaemonInstance } from "../daemon-instance.js";
+import { daemonLogPath, readDaemonInstance, stopDaemonInstance } from "../daemon-instance.js";
 import { currentBootId } from "../pid-lock.js";
+import { getMachineId } from "../machine-id.js";
 import { connectTerminalWorker } from "../../terminal/terminal-worker-client.js";
 import { createTerminalWorkerProcessInspector } from "../../terminal/terminal-worker-processes.js";
 import { reapTerminalWorkers } from "../../terminal/terminal-worker-reaper.js";
@@ -26,6 +27,7 @@ import { prepareTerminalWorkerRuntime } from "../../terminal/terminal-worker-run
 import { createWorkerTerminalManager } from "../../terminal/worker-terminal-manager.js";
 import {
   listTerminalWorkerRecords,
+  terminalWorkerHome,
   writeTerminalWorkerRecord,
   type TerminalWorkerRecord,
 } from "../../terminal/terminal-worker-record.js";
@@ -39,6 +41,8 @@ const SUPERVISOR_ENTRY = path.join(SERVER_ROOT, "scripts/supervisor-entrypoint.t
 const READY_TIMEOUT_MS = 90_000;
 const POSIX = process.platform !== "win32";
 const inspector = createTerminalWorkerProcessInspector();
+const SERVER_ID = "srv_terminal_lifecycle";
+const INSTANCE_ENV: NodeJS.ProcessEnv = { ...process.env, PASEO_SERVER_ID: SERVER_ID };
 
 interface Harness {
   home: string;
@@ -95,12 +99,15 @@ async function startSupervisor(
   const home = options.home ?? mkdtempSync(path.join(tmpdir(), "tw-life-"));
   const workDir = path.join(home, "work");
   mkdirSync(workDir, { recursive: true });
+  // HOME is isolated below; preserve the parent's host identity for local registry discovery.
+  writeFileSync(path.join(home, ".paseo-machine-id"), `${await getMachineId()}\n`, { mode: 0o600 });
   const port = options.port ?? (await getAvailablePort());
   const env: NodeJS.ProcessEnv = {
     ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("PASEO_"))),
     HOME: home,
     USERPROFILE: home,
     PASEO_HOME: home,
+    PASEO_SERVER_ID: SERVER_ID,
     PASEO_LISTEN: `127.0.0.1:${port}`,
     PASEO_RELAY_ENABLED: "false",
     PASEO_NODE_INSPECT: "0",
@@ -123,7 +130,7 @@ async function startSupervisor(
   const harness: Harness = { home, workDir, port, supervisor, output: () => output };
   harnesses.push(harness);
   await waitFor(async () => {
-    const instance = await readDaemonInstance(home);
+    const instance = await readDaemonInstance(home, INSTANCE_ENV);
     return instance?.pid === supervisor.pid && instance.listen ? instance : null;
   }, `supervisor did not become ready:\n${output}`);
   return harness;
@@ -149,6 +156,7 @@ async function connect(harness: Harness): Promise<DaemonClient> {
 // for it (Windows refuses a graceful stop without one).
 async function stopDaemon(harness: Harness): Promise<void> {
   await stopDaemonInstance(harness.home, {
+    env: INSTANCE_ENV,
     requestShutdown: async () => {
       const client = await connect(harness);
       try {
@@ -288,7 +296,7 @@ async function waitUntilGone(pid: number, what: string) {
 }
 
 async function liveRecords(home: string): Promise<TerminalWorkerRecord[]> {
-  return (await listTerminalWorkerRecords(home)).flatMap((file) =>
+  return (await listTerminalWorkerRecords(terminalWorkerHome(home, SERVER_ID))).flatMap((file) =>
     "record" in file ? [file.record] : [],
   );
 }
@@ -334,9 +342,11 @@ afterEach(async () => {
         // gone
       }
     }
-    await stopDaemonInstance(harness.home, { force: true, timeoutMs: 15_000 }).catch(
-      () => undefined,
-    );
+    await stopDaemonInstance(harness.home, {
+      env: INSTANCE_ENV,
+      force: true,
+      timeoutMs: 15_000,
+    }).catch(() => undefined);
     if (pid && isAlive(pid)) process.kill(pid, "SIGKILL");
     for (const record of await liveRecords(harness.home)) {
       if (isAlive(record.pid)) {
@@ -347,7 +357,10 @@ afterEach(async () => {
         }
       }
     }
-    await reapTerminalWorkers({ paseoHome: harness.home, gracefulMs: 0 }).catch(() => undefined);
+    await reapTerminalWorkers({
+      paseoHome: terminalWorkerHome(harness.home, SERVER_ID),
+      gracefulMs: 0,
+    }).catch(() => undefined);
     rmSync(harness.home, { recursive: true, force: true });
   }
   for (const pid of extraPids) {
@@ -461,7 +474,7 @@ if (has("-g", "ls", "@getpaseo/cli", "--json", "--depth=0", "--long")) {
       const terminal = await createMarkedTerminal(client, harness, workspaceId, "MARKER-HUNG");
       const daemonPid = await daemonWorkerPid(client);
       const supervisorPid = harness.supervisor.pid!;
-      const logPath = path.join(harness.home, "daemon.log");
+      const logPath = daemonLogPath(harness.home, INSTANCE_ENV);
 
       // Barrier: the supervisor is paused, so the restart intent waits in its IPC channel.
       // The daemon's own log line marks the intent dispatched; then the daemon is paused, so
@@ -541,7 +554,7 @@ describe("terminals when the daemon stops", { timeout: 240_000 }, () => {
         const replacement = await createMarkedTerminal(client, harness, workspaceId, "RECOVERED");
         await expectKept(client, replacement, "RECOVERED", "worker-death");
         await client.close();
-        await stopDaemonInstance(harness.home, { force });
+        await stopDaemonInstance(harness.home, { env: INSTANCE_ENV, force });
         await expectAllClosed(harness.home, [terminal.sleepPid, replacement.programPid]);
       },
     );
@@ -557,7 +570,7 @@ describe("terminals when the daemon stops", { timeout: 240_000 }, () => {
       const workerPid = (await currentWorkerRecord(harness.home)).pid;
       await client.close();
       process.kill(workerPid, "SIGSTOP");
-      await stopDaemonInstance(harness.home, { force: true });
+      await stopDaemonInstance(harness.home, { env: INSTANCE_ENV, force: true });
       await expectAllClosed(harness.home, [workerPid, terminal.programPid]);
     },
   );
@@ -583,7 +596,7 @@ describe("terminals when the daemon stops", { timeout: 240_000 }, () => {
     const earlierBoot = spawnUnrelated();
     const base = await currentWorkerRecord(harness.home);
     // Same pid, another birth time: what a reused pid looks like, whatever its command line.
-    writeTerminalWorkerRecord(harness.home, {
+    writeTerminalWorkerRecord(terminalWorkerHome(harness.home, SERVER_ID), {
       ...base,
       recordId: "stale-record",
       pid: reused.pid!,
@@ -591,7 +604,7 @@ describe("terminals when the daemon stops", { timeout: 240_000 }, () => {
       terminals: [{ id: "t-stale", pid: reused.pid!, startedAt: "Thu Jan  1 00:00:00 1970" }],
     });
     // The right birth time, but written before this boot.
-    writeTerminalWorkerRecord(harness.home, {
+    writeTerminalWorkerRecord(terminalWorkerHome(harness.home, SERVER_ID), {
       ...base,
       recordId: "earlier-boot-record",
       pid: earlierBoot.pid!,
@@ -612,14 +625,14 @@ describe("terminals when the daemon stops", { timeout: 240_000 }, () => {
     expect(await liveRecords(harness.home)).toEqual([]);
 
     // A second round through --force, with the stale record put back.
-    writeTerminalWorkerRecord(harness.home, {
+    writeTerminalWorkerRecord(terminalWorkerHome(harness.home, SERVER_ID), {
       ...base,
       recordId: "stale-record",
       pid: reused.pid!,
       identity: { startedAt: "Thu Jan  1 00:00:00 1970", commandLine: "node -e setInterval" },
       terminals: [{ id: "t-stale", pid: reused.pid!, startedAt: "Thu Jan  1 00:00:00 1970" }],
     });
-    await stopDaemonInstance(harness.home, { force: true });
+    await stopDaemonInstance(harness.home, { env: INSTANCE_ENV, force: true });
     expect(isAlive(reused.pid!)).toBe(true);
     expect(await liveRecords(harness.home)).toEqual([]);
   });

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import treeKill from "tree-kill";
 import { writtenDuringThisBoot } from "../server/pid-lock.js";
@@ -149,11 +150,12 @@ export interface TerminalWorkerReapResult {
 }
 
 export interface ReapTerminalWorkersOptions {
+  /** Instance worker state home from terminalWorkerHome, never the daemon's shared root. */
   paseoHome: string;
   /** Time the worker gets to close its terminals before SIGKILL. 0 skips the shutdown request. */
   gracefulMs?: number;
   confirmMs?: number;
-  /** Limit cleanup to these record files. Defaults to every record in the home. */
+  /** Limit cleanup to these files. Defaults to all attributed records in this worker home. */
   recordPaths?: string[];
   inspector?: TerminalWorkerProcessInspector;
   log?: (message: string, fields?: Record<string, unknown>) => void;
@@ -202,7 +204,7 @@ export async function reapTerminalWorkers(
       continue;
     }
     const outcome = await reapRecord({
-      paseoHome: options.paseoHome,
+      paseoHome: path.dirname(path.dirname(file.path)),
       file,
       inspector,
       gracefulMs,

@@ -39,6 +39,7 @@ import { Session } from "./session.js";
 import {
   terminalCleanupRecordPath,
   terminalWorkerDirectory,
+  terminalWorkerHome,
   writeTerminalCleanupRecord,
 } from "../terminal/terminal-worker-record.js";
 import { OWNER_PERMISSIONS, type DaemonPermission } from "./authorization/index.js";
@@ -2327,7 +2328,7 @@ describe("daemon status + pairing RPC", () => {
       reason: "still alive" as const,
       detail: "survived SIGKILL",
     };
-    await writeTerminalCleanupRecord(paseoHome, {
+    await writeTerminalCleanupRecord(terminalWorkerHome(paseoHome, "srv-test"), {
       recordId: "closing-record",
       pid: 4241,
       bootId: null,
@@ -2362,8 +2363,9 @@ describe("daemon status + pairing RPC", () => {
   test("daemon.get_status.request fails when a terminal cleanup record cannot be read", async () => {
     const messages: unknown[] = [];
     const paseoHome = makeHome();
-    mkdirSync(terminalWorkerDirectory(paseoHome), { recursive: true });
-    const cleanupPath = terminalCleanupRecordPath(paseoHome, "closing-record");
+    const workerHome = terminalWorkerHome(paseoHome, "srv-test");
+    mkdirSync(terminalWorkerDirectory(workerHome), { recursive: true });
+    const cleanupPath = terminalCleanupRecordPath(workerHome, "closing-record");
     writeFileSync(cleanupPath, "{ not json");
     const session = createSessionForTest({
       messages,
@@ -2389,6 +2391,36 @@ describe("daemon status + pairing RPC", () => {
       expect.objectContaining({ type: "daemon.get_status.response" }),
     );
   });
+
+  test.each([undefined, "srv-test"])(
+    "daemon status ignores foreign and legacy terminal cleanup records for %s",
+    async (serverId) => {
+      const messages: SessionOutboundMessage[] = [];
+      const paseoHome = makeHome();
+      for (const workerHome of [paseoHome, terminalWorkerHome(paseoHome, "srv-other")]) {
+        mkdirSync(terminalWorkerDirectory(workerHome), { recursive: true });
+        writeFileSync(terminalCleanupRecordPath(workerHome, "unreadable"), "{ not json");
+      }
+      const session = createSessionForTest({
+        messages,
+        paseoHome,
+        serverId,
+        agentManager: { listProviderAvailability: async () => [] },
+      });
+
+      await session.handleMessage({
+        type: "daemon.get_status.request",
+        requestId: "status-scoped",
+      });
+
+      expect(messages).toEqual([
+        expect.objectContaining({
+          type: "daemon.get_status.response",
+          payload: expect.objectContaining({ terminalCleanupUnconfirmed: [] }),
+        }),
+      ]);
+    },
+  );
 
   test("daemon.get_status.request falls back to a null/empty status when provider listing fails", async () => {
     const messages: unknown[] = [];

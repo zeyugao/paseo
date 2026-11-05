@@ -201,7 +201,7 @@ npm run release:patch
 npm run release:minor
 ```
 
-This bumps the version across all workspaces, runs checks, publishes to npm, and pushes the branch + tag. The tag push triggers `Desktop Release`, `Android APK Release`, `Docker`, and `Release Notes Sync` on GitHub Actions. The workflows create the GitHub Release as a draft while builds and release-note sync run. EAS picks up the same tag via the EAS GitHub app and starts the iOS + Android store builds in parallel (see "Mobile builds (EAS)" below) — there is no mobile-release workflow under `.github/workflows`.
+This bumps the version across all workspaces, runs checks, publishes to npm, and pushes the branch + tag. The tag push triggers the declared GitHub release workflows, including `iOS TestFlight`. Stable Android store publication remains in EAS; see [Mobile releases](#mobile-releases). Disabled GitHub workflows must be enabled separately if a release requires their artifacts.
 
 After the stable release succeeds, check `npm view @getpaseo/cli dist-tags`. When the new stable
 is newer than `beta`, move `beta` to it for every published package. This changes dist-tags only;
@@ -248,7 +248,7 @@ npm run release:promote          # Promote X.Y.Z-beta.N to stable X.Y.Z
 
 - Beta tags are published GitHub prereleases like `v0.1.41-beta.1`
 - Betas publish npm packages with `--tag beta`, so `npm install @getpaseo/cli@beta` opts in while plain `npm install @getpaseo/cli` stays on `latest`
-- Betas publish desktop assets and APKs for testing. They also build iOS, upload it to TestFlight, add it to the `Paseo Beta` external group, and submit it for Beta App Review. They do not submit mobile builds to the production stores.
+- Betas publish desktop assets and APKs for testing. GitHub `iOS TestFlight` distributes Overkite to the internal tester group without external distribution or Apple review submission. Betas do not submit mobile builds to production stores.
 - `release:promote` creates a fresh stable tag like `v0.1.41`; the final release never reuses the beta tag
 - Desktop assets now come from the Electron package at `packages/desktop`
 - Require the Linux artifact CI checks with both restricted and usable user namespaces to pass before publication; see [packaged desktop smoke](testing.md#packaged-desktop-smoke). Keep the installed-package and AppImage checks together.
@@ -374,28 +374,43 @@ smoke-installs over the previous rolling CLI and checks the installed server's c
 only `paseo-server.tgz` and does not replace the CLI's dependency package set. Both workflows use
 the repository's existing package build/prepack scripts; committed npm dependency specifications
 and workspace versions remain upstream.
-- **Android (Play Store)** — EAS builds with profile `production` and auto-submits to the Play Store via `eas submit` (EAS-managed credentials). A Fastlane lane then replaces the store screenshots.
-- **iOS (TestFlight + App Store)** — EAS builds with profile `production`, uploads once through a `testflight` job, distributes the build to the `Paseo Beta` external group with Beta App Review submission, and a Fastlane lane uploads the store screenshots and submits that same build for App Store review.
-- **Android APK (GitHub Release asset)** — separate, via `.github/workflows/android-apk-release.yml`. This is the only Android-related workflow that lives in this repo.
 
-EAS uses the local app version source. `packages/app/app.config.js` derives the native version from the package version. Android `versionCode` is `major * 1_000_000 + minor * 1_000 + patch`. iOS reserves 1,000 build slots per app version: beta `N` uses slot `N`, and stable uses slot `999`. For example, `0.2.6-beta.2` appears in App Store Connect as version `0.2.6` build `2006002`; stable uses build `2006999`. Rebuilding the same tag produces the same native build number; if a store has already accepted a binary and you need a different binary, cut the next beta or patch instead of relying on EAS remote auto-increment.
+## Mobile releases
 
-Stable tags run `Release Mobile`; beta tags run `Release iOS Beta`. Both distribute to the persistent `Paseo Beta` external group and submit for Beta App Review, so testers receive stable releases as well as betas. Testers, the group, and required TestFlight test information are managed once in App Store Connect.
+### iOS — Overkite internal TestFlight
 
-Stable iOS releases use one binary for two Apple review paths: Beta App Review for external TestFlight distribution and App Store review. [Apple says](https://developer.apple.com/help/app-store-connect/test-a-beta-version/invite-external-testers) the first submitted build requires a full TestFlight review; later builds for the same version might not. Do not assume a stable patch skips review.
+`.github/workflows/ios-release.yml` builds on non-RC `v*` tag pushes. Manual dispatch accepts an
+existing tag that matches the app package version. It runs on `xcode-27` with Xcode 27.1 and
+distributes the matching version/build to **Overkite Internal**. It does not distribute externally,
+submit Beta App Review, or submit App Store review.
 
 Production iOS uses `me.elsanna.overkite` and display name Overkite. Android remains Paseo / `sh.paseo`;
 development remains Paseo Debug / `sh.paseo.debug`. The shared Expo name and generated production
 Xcode project, workspace, scheme and target remain Paseo. Expo uses owner `elsagranger`, slug
 `overkite`, and project `a84e29d0-dad8-4136-8d22-22333db92371`.
-There is no mobile-release workflow under `.github/workflows`. The EAS GitHub app reads the workflows under `packages/app/.eas/workflows` and handles tag triggering directly.
+
+Configure GitHub's `production` environment with `IOS_DISTRIBUTION_P12_BASE64`,
+`IOS_DISTRIBUTION_P12_PASSWORD`, `IOS_PROVISION_PROFILE_BASE64`, `ASC_PRIVATE_KEY`, `ASC_KEY_ID`,
+and `ASC_ISSUER_ID`. Use an unexpired App Store distribution profile for the production bundle and
+create the internal tester group in App Store Connect before publishing. Changelog summaries
+supply TestFlight notes. The workflow cleans up its temporary signing credentials after the lane.
+
+Native versions derive from the package version. iOS reserves 1,000 build slots per app version:
+beta `N` uses slot `N`, stable uses slot `999`. For example, `0.2.6-beta.2` appears as version `0.2.6`
+build `2006002`; stable uses build `2006999`. Rebuilding the same tag preserves the native build
+number. Once Apple accepts a binary, different contents require a new authorized release version.
+
+### Android — EAS
+
+The EAS `Release Mobile` workflow keeps Android production build, Play Store submission and
+Google Play screenshot upload. Android identity and credentials are unchanged. iOS EAS release
+and review jobs and the old App Store app ID are removed; GitHub TestFlight owns iOS publishing.
+Android `versionCode` remains `major * 1_000_000 + minor * 1_000 + patch`.
 
 ### Store screenshots
 
 Each stable release publishes the screenshots committed under `assets/store-screenshots/output/` (see [its README](../assets/store-screenshots/README.md) for how they are made). To change the store screenshots, re-render and commit them before you tag.
 
-- **App Store:** `submit_review` uploads `output/apple/` and `output/apple-ipad/` to the version it submits, replacing that version's `en-US` screenshots. Apple ties screenshots to an app version, so a version that is already live keeps the ones it shipped with. `Resubmit iOS for App Store review` uploads them again.
-  - When `submit_review` fails with `appStoreVersions … is not in valid state`, the reason is in the API error's `meta.associatedErrors`, which fastlane does not print. Read it with a `POST /v1/reviewSubmissionItems` against the version. A required age-rating question that Apple added, such as `socialMedia`, fails this way; answer it under App Information > Age Rating in App Store Connect, then resubmit.
 - **Google Play:** `upload_android_screenshots` runs `fastlane android upload_screenshots` after `submit_android`. It replaces only the `en-US` phone and 10-inch tablet screenshots, never the listing text or changelogs, and skips images whose checksum already matches. The lane stages only `en-US`: supply uploads every locale folder in one edit, and Play rejects F-Droid locales such as `ja`, which fails the whole edit. `Upload Google Play screenshots` reruns the step for the current release without a rebuild.
 - **F-Droid:** reads the same files as Google Play. `fastlane/metadata/android/en-US/images/phoneScreenshots/` and `tenInchScreenshots/` hold symlinks to the Google renders. `render.mjs` rewrites them on every render, so added or renamed panels reach Google Play and F-Droid as well.
 
@@ -411,21 +426,19 @@ cd packages/app
 # Recent builds (newest first). Pipe to jq for status only.
 npx eas build:list --limit 8 --non-interactive --json | jq '.[] | {platform, status, appVersion, gitCommitHash}'
 
-# Recent EAS workflow runs. This is the source of truth for submit/review jobs.
+# Recent EAS workflow runs, including Android submission jobs.
 npx eas workflow:runs --json | jq '.[] | {status, workflowName, trigger, gitCommitHash, startedAt, finishedAt}'
 
 # Filter by platform.
-npx eas build:list --platform ios --limit 5 --non-interactive --json
 npx eas build:list --platform android --limit 5 --non-interactive --json
 
 # Inspect a specific build.
 npx eas build:view <build-id>
 
-# Inspect the full release workflow, including distribute_ios, submit_android,
-# and submit_ios_for_review.
+# Inspect the Android build, Play Store submission and screenshot jobs.
 npx eas workflow:view <workflow-run-id> --json
 
-# Read failed submit/review job logs.
+# Read failed Android submission job logs.
 npx eas workflow:logs <workflow-job-id> --all-steps --non-interactive
 
 # Stream logs for a build.
@@ -434,20 +447,12 @@ npx eas build:view <build-id> --json | jq '.logFiles[]'
 
 A build's `gitCommitHash` must match the release tag commit. `status` walks through `NEW` → `IN_QUEUE` → `IN_PROGRESS` → `FINISHED` (or `ERRORED`/`CANCELED`). The EAS workflow run's `gitCommitHash` and `trigger` must also match the release tag.
 
-Once a build is `FINISHED`, EAS still has release-critical work to do: Android must submit to the Play Store, and iOS must distribute to the external TestFlight group with Beta App Review submission **and** submit the same build for App Store review. The release is not done until all platforms are on their way through the stores.
+A finished EAS build still needs Play Store submission and screenshot upload. For `Release Mobile`,
+require `build_android`, `submit_android` and `upload_android_screenshots` to succeed for the release
+commit; confirm the submitted track in Play Console.
 
-For the `Release Mobile` EAS workflow, these jobs must pass:
-
-- `build_ios` — iOS binary built
-- `distribute_ios` — iOS binary uploaded once, added to `Paseo Beta`, and submitted for Beta App Review
-- `submit_ios_for_review` — iOS build submitted for App Store review via Fastlane
-- `build_android` — Android store binary built
-- `submit_android` — Android binary submitted to the Play Store
-- `upload_android_screenshots` — Google Play screenshots replaced from the repo
-
-Do not treat `build_ios: SUCCESS` or `distribute_ios: SUCCESS` as a completed iOS release. `submit_ios_for_review: FAILURE` means the iOS release is blocked even if the build is visible in TestFlight.
-
-To confirm the submission landed, inspect the EAS workflow with `npx eas workflow:view <workflow-run-id> --json`. App Store Connect (review state for the matching version/build) and the Play Console track are the final ground truth.
+For iOS, require GitHub `iOS TestFlight` to succeed for the exact tag and confirm the matching
+version/build is available to Overkite Internal. EAS build status is not iOS release evidence.
 
 ## Release completion and heartbeat
 
@@ -468,12 +473,9 @@ Windows, and Android APK assets are present along with the channel manifests
 (`latest-mac.yml`, `latest-linux.yml`, and `latest.yml` for stable;
 `beta-mac.yml`, `beta-linux.yml`, and `beta.yml` for beta).
 
-For stable releases, also confirm every required mobile build, external
-TestFlight distribution, Beta App Review submission, and store submission job
-for the release commit. For betas, confirm
-the beta EAS workflow completed its TestFlight distribution and Beta App Review
-path. Delete the heartbeat only after every applicable checklist item passes,
-then report the release as shipped.
+For stable releases, confirm Android EAS submission and the matching Overkite internal TestFlight
+build. Betas require the same GitHub iOS path without a production-store submission. Delete the
+heartbeat only after every applicable checklist item passes, then report the release as shipped.
 
 Pattern:
 
@@ -485,7 +487,7 @@ Pattern:
   "timezone": "UTC",
   "maxRuns": 120,
   "expiresIn": "24h",
-  "prompt": "Resume the vX.Y.Z release babysit for commit <sha>. Check npm tags; every GitHub Actions run for the release branch and tag; the published GitHub Release body, expected desktop/APK assets, and channel manifests; the Docker image; and the matching EAS workflow. Completion requires every applicable checklist item. For stable, require build_ios, distribute_ios (Paseo Beta external distribution and Beta App Review submission), submit_ios_for_review, build_android, and submit_android to succeed. For beta, require the beta TestFlight distribution and Beta App Review path. If work is pending, wait for the next heartbeat. If a failure can be retried safely for the same version, follow the failed-release procedure; otherwise report the blocker. When every applicable completion-checklist item passes, delete THIS heartbeat, report shipped, and stop.",
+  "prompt": "Resume the vX.Y.Z release babysit for commit <sha>. Check npm tags; every enabled GitHub Actions run for the release branch and tag; published release body, expected desktop/APK assets and channel manifests; Docker image; and Android EAS jobs where applicable. For stable, require Android build/submission/screenshots. For stable and beta, require GitHub iOS TestFlight success and the matching version/build available to Overkite Internal without external distribution or review submission. If pending, wait for the next heartbeat. Retry only under the existing failed-release procedure. Delete this heartbeat and report shipped only after every applicable checklist item passes.",
 }
 ```
 
@@ -751,7 +753,7 @@ Every entry covers `previous stable release → release source`: first beta, lat
 - [ ] GitHub `Android APK Release` workflow for the same tag is green
 - [ ] GitHub `Docker` workflow is green and the versioned beta image is published without moving `latest`
 - [ ] GitHub `Release Notes Sync` mirrored the beta entry into the prerelease body
-- [ ] EAS `Release iOS Beta` completed its build, TestFlight distribution, external beta group, and Beta App Review path
+- [ ] GitHub `iOS TestFlight` succeeds for the release tag and the matching version/build is available to Overkite Internal
 - [ ] The [reconcile PR](#reconcile-main) brought the shipped changelog entries and version into `main`
 - [ ] The release heartbeat was created after the tag push and deleted only after every item above passed
 
@@ -778,9 +780,7 @@ Every entry covers `previous stable release → release source`: first beta, lat
 - [ ] GitHub `Docker` workflow is green and both the versioned and `latest` images are published
 - [ ] GitHub `Release Notes Sync` is green and the release body matches the stable changelog entry
 - [ ] EAS `Release Mobile` workflow for the same tag is green
-- [ ] EAS iOS `build_ios` completes for the same tag
-- [ ] EAS iOS `distribute_ios` succeeds, uploading the binary once, distributing it to `Paseo Beta`, and submitting it for Beta App Review
-- [ ] EAS iOS `submit_ios_for_review` succeeds, putting the build into App Store review
+- [ ] GitHub `iOS TestFlight` succeeds for the release tag and the matching version/build is available to Overkite Internal
 - [ ] EAS Android `build_android` completes for the same tag
 - [ ] EAS Android `submit_android` succeeds, putting the build on its Play Store track
 - [ ] The [reconcile PR](#reconcile-main) brought the shipped changelog entries and version into `main`

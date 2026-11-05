@@ -1587,6 +1587,7 @@ export class AgentManager {
         background: options.background,
         labels: options.labels ?? {},
         metadata: options.metadata ?? {},
+        internal: config.internal === true,
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -1985,6 +1986,7 @@ export class AgentManager {
         background: existing.background,
         labels: existing.labels,
         metadata: existing.metadata,
+        internal: refreshConfig.internal === true,
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -2734,6 +2736,17 @@ export class AgentManager {
       if (error instanceof MalformedLegacyOptionError) return own;
       throw error;
     }
+  }
+
+  private agentTitleRefiner: { refine: (agentId: string) => Promise<void> } | null = null;
+
+  /**
+   * The title refiner needs the manager itself (internal generation agents,
+   * timeline reads), so bootstrap constructs it after the manager and attaches
+   * it here. Structural typing keeps the manager decoupled from the module.
+   */
+  attachTitleRefiner(refiner: { refine: (agentId: string) => Promise<void> }): void {
+    this.agentTitleRefiner = refiner;
   }
 
   async setTitle(agentId: string, title: string): Promise<void> {
@@ -5425,6 +5438,7 @@ export class AgentManager {
           eventTurnId,
           isForegroundEvent,
           terminalDisposition,
+          options,
         });
         return undefined;
       case "turn_failed":
@@ -5518,8 +5532,9 @@ export class AgentManager {
     eventTurnId: string | undefined;
     isForegroundEvent: boolean;
     terminalDisposition: ActiveTurnTerminalDisposition;
+    options: { fromHistory?: boolean } | undefined;
   }): void {
-    const { agent, event, eventTurnId, isForegroundEvent, terminalDisposition } = params;
+    const { agent, event, eventTurnId, isForegroundEvent, terminalDisposition, options } = params;
     this.logger.trace(
       {
         agentId: agent.id,
@@ -5549,6 +5564,19 @@ export class AgentManager {
       this.emitState(agent);
     }
     void this.refreshRuntimeInfo(agent);
+
+    // History-replayed completions arrive with a "stale" disposition and return
+    // above; the explicit fromHistory gate keeps that contract if the disposition
+    // logic changes. Refinement is fire-and-forget and CAS-protected: a failed
+    // generation keeps the provisional title and a concurrent manual rename wins.
+    if (!options?.fromHistory && this.agentTitleRefiner) {
+      void this.agentTitleRefiner.refine(agent.id).catch((error: unknown) => {
+        this.logger.warn(
+          { err: error, agentId: agent.id },
+          "agent.manager.title_refinement_failed",
+        );
+      });
+    }
   }
 
   private async onStreamTurnFailed(params: {
@@ -6331,36 +6359,20 @@ export class AgentManager {
       background?: boolean;
       labels?: Record<string, string>;
       metadata?: AgentMetadata;
+      /** Internal agents (title refiner, branch naming) skip plugin hooks,
+       * mirroring the `agent.create` hook's `!config.internal` gate. */
+      internal?: boolean;
     },
   ): Promise<AgentLaunchContext> {
     // A plugin changing during this open must still make the resulting session stale.
     const generation = this.sessionOpenGeneration;
     this.detachPluginTools(agentId);
-    let mcpServers: AgentSessionConfig["mcpServers"];
-    let mcpServerOwners: Record<string, string> | undefined;
-    if (this.pluginLifecycle) {
-      const request = {
-        agentId,
-        provider: client.provider,
-        cwd,
-        workspaceId: opening?.workspaceId ?? null,
-        reason: opening?.reason ?? "resume",
-        purpose: opening?.purpose ?? "interactive",
-        env: { ...env },
-        title: opening?.title ?? null,
-        background: opening?.background === true,
-        ...agentEntityData(opening),
-        tools: [],
-        mcpServers: {},
-      };
-      const transformed = await this.pluginLifecycle.before("agent.open.before", request);
-      env = transformed.env;
-      if (request.purpose === "interactive") {
-        this.attachedPluginTools.set(agentId, transformed.tools as AttachedAgentTool[]);
-        mcpServers = transformed.mcpServers;
-        mcpServerOwners = transformed.mcpServerOwners;
-      }
-    }
+    const {
+      env: sessionOpenEnv,
+      mcpServers,
+      mcpServerOwners,
+    } = await this.runSessionOpenPluginHooks(agentId, client, cwd, env, opening);
+    env = sessionOpenEnv;
     const context: AgentLaunchContext = {
       agentId,
       mcpServers,
@@ -6391,6 +6403,46 @@ export class AgentManager {
     }
     this.sessionOpenGenerations.set(agentId, generation);
     return context;
+  }
+
+  private async runSessionOpenPluginHooks(
+    agentId: string,
+    client: AgentClient,
+    cwd: string,
+    env: Record<string, string> | undefined,
+    opening: Parameters<AgentManager["buildLaunchContext"]>[5],
+  ): Promise<{
+    env: Record<string, string> | undefined;
+    mcpServers: AgentSessionConfig["mcpServers"];
+    mcpServerOwners: Record<string, string> | undefined;
+  }> {
+    if (!this.pluginLifecycle || opening?.internal === true) {
+      return { env, mcpServers: undefined, mcpServerOwners: undefined };
+    }
+    const request = {
+      agentId,
+      provider: client.provider,
+      cwd,
+      workspaceId: opening?.workspaceId ?? null,
+      reason: opening?.reason ?? "resume",
+      purpose: opening?.purpose ?? "interactive",
+      env: { ...env },
+      title: opening?.title ?? null,
+      background: opening?.background === true,
+      ...agentEntityData(opening),
+      tools: [],
+      mcpServers: {},
+    };
+    const transformed = await this.pluginLifecycle.before("agent.open.before", request);
+    if (request.purpose !== "interactive") {
+      return { env: transformed.env, mcpServers: undefined, mcpServerOwners: undefined };
+    }
+    this.attachedPluginTools.set(agentId, transformed.tools as AttachedAgentTool[]);
+    return {
+      env: transformed.env,
+      mcpServers: transformed.mcpServers,
+      mcpServerOwners: transformed.mcpServerOwners,
+    };
   }
 
   private resolveProviderLaunchConfig(

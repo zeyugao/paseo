@@ -8,7 +8,13 @@ import { createTestLogger } from "../test-utils/test-logger.js";
 import { AgentStorage } from "./agent/agent-storage.js";
 import { createNoopWorkspaceGitService } from "./test-utils/workspace-git-service-stub.js";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
-import { FileBackedProjectRegistry, FileBackedWorkspaceRegistry } from "./workspace-registry.js";
+import {
+  createPersistedProjectRecord,
+  createPersistedWorkspaceRecord,
+  FileBackedProjectRegistry,
+  FileBackedWorkspaceRegistry,
+} from "./workspace-registry.js";
+import { WorkspaceReconciliationService } from "./workspace-reconciliation-service.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { deriveProjectKey } from "./project-key.js";
 
@@ -577,4 +583,110 @@ describe("bootstrapWorkspaceRegistries", () => {
     expect(projects).toHaveLength(1);
     expect(projects[0]?.projectId).toBe(NON_GIT_PROJECT);
   });
+  test.each([
+    {
+      name: "original owner restores cleanup",
+      serverId: "srv-a",
+      foreignHostId: null,
+      workspaceHostId: null,
+      expectedHostId: "srv-a",
+      expectedArchived: true,
+    },
+    {
+      name: "another host leaves legacy records alone",
+      serverId: "srv-b",
+      foreignHostId: null,
+      workspaceHostId: null,
+      expectedHostId: null,
+      expectedArchived: false,
+    },
+    {
+      name: "foreign agent ownership prevents adoption",
+      serverId: "srv-a",
+      foreignHostId: "srv-b",
+      workspaceHostId: null,
+      expectedHostId: null,
+      expectedArchived: false,
+    },
+    {
+      name: "existing ownership is never transferred",
+      serverId: "srv-a",
+      foreignHostId: null,
+      workspaceHostId: "srv-b",
+      expectedHostId: "srv-b",
+      expectedArchived: false,
+    },
+  ])(
+    "$name",
+    async ({ serverId, foreignHostId, workspaceHostId, expectedHostId, expectedArchived }) => {
+      await agentStorage.initialize();
+      const timestamp = "2026-03-01T00:00:00.000Z";
+      const workspaceId = "ws-legacy-owner";
+      const missingCwd = path.join(NON_GIT_PROJECT, "removed-workspace");
+      await projectRegistry.upsert(
+        createPersistedProjectRecord({
+          projectId: "project-legacy-owner",
+          rootPath: NON_GIT_PROJECT,
+          kind: "non_git",
+          displayName: "legacy project",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+      await workspaceRegistry.upsert(
+        createPersistedWorkspaceRecord({
+          workspaceId,
+          projectId: "project-legacy-owner",
+          cwd: missingCwd,
+          kind: "directory",
+          displayName: "legacy workspace",
+          ...(workspaceHostId ? { hostId: workspaceHostId } : {}),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+      writeFileSync(path.join(paseoHome, "server-id"), "srv-a\n");
+      if (foreignHostId) {
+        await agentStorage.upsert({
+          id: "foreign-workspace-agent",
+          hostId: foreignHostId,
+          workspaceId,
+          provider: "codex",
+          cwd: missingCwd,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          lastActivityAt: null,
+          lastUserMessageAt: null,
+          title: null,
+          labels: {},
+          lastStatus: "idle",
+          lastModeId: null,
+          config: null,
+          runtimeInfo: { provider: "codex", sessionId: null },
+          persistence: null,
+          archivedAt: null,
+        });
+      }
+      await bootstrapWorkspaceRegistries({
+        serverId,
+        paseoHome,
+        agentStorage,
+        projectRegistry,
+        workspaceRegistry,
+        workspaceGitService,
+        logger,
+      });
+      const service = new WorkspaceReconciliationService({
+        serverId,
+        projectRegistry,
+        workspaceRegistry,
+        logger,
+      });
+      await service.runOnce();
+
+      const workspace = await workspaceRegistry.get(workspaceId);
+      expect(workspace?.hostId ?? null).toBe(expectedHostId);
+      expect(workspace?.archivedAt !== null).toBe(expectedArchived);
+    },
+  );
 });

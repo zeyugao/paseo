@@ -1523,11 +1523,8 @@ export class ScheduleService {
   }
 }
 
-/**
- * A failed turn no longer ends on an assistant message, so the last assistant
- * text in the timeline is stale by definition. The snapshot's lastError is the
- * only place a scheduled run's failure text still reaches the caller.
- */
+// The last assistant message can include partial model output before the failure.
+// lastError is the provider failure, including its code and diagnostic.
 function resolveScheduledRunFailure(agentManager: ScheduleAgentManager, agentId: string): string {
   const snapshot = agentManager.getAgent(agentId);
   const lastError = snapshot?.lifecycle === "error" ? snapshot.lastError.trim() : "";

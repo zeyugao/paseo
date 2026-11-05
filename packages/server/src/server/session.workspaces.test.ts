@@ -1879,6 +1879,52 @@ test("delete rejects a freshly foreign agent before installing the delete fence"
   expect(beginDelete).not.toHaveBeenCalled();
 });
 
+test.each(["ownership-change", "flush-failure"] as const)(
+  "abandoned deletion releases its storage fence after %s",
+  async (failure) => {
+    const directory = mkdtempSync(path.join(tmpdir(), "paseo-delete-fence-"));
+    const storagePath = path.join(directory, "agents");
+    const logger = createTestLogger();
+    const storage = new AgentStorage(storagePath, logger);
+    const externalWriter = new AgentStorage(storagePath, logger);
+    const record: StoredAgentRecord = {
+      id: "agent-delete-fence",
+      provider: "claude",
+      cwd: directory,
+      hostId: "srv-local",
+      createdAt: "2026-03-01T12:00:00.000Z",
+      updatedAt: "2026-03-01T12:00:00.000Z",
+      lastStatus: "closed",
+      labels: {},
+    };
+    try {
+      await storage.upsert(record);
+      const session = createSessionForWorkspaceTests({
+        serverId: "srv-local",
+        agentManager: {
+          assertAgentMutable: async () => {},
+          flush: async () => {
+            if (failure === "flush-failure") throw new Error("flush failed");
+            await externalWriter.upsert({ ...record, hostId: "srv-other" });
+          },
+        },
+      });
+      session.agentStorage = storage;
+      await expect(session.handleDeleteAgentRequest(record.id, "req-delete-fence")).rejects.toThrow(
+        failure === "flush-failure" ? "flush failed" : "owned by host srv-other",
+      );
+      const surviving = await storage.getFresh(record.id);
+      expect(surviving?.hostId).toBe(failure === "flush-failure" ? "srv-local" : "srv-other");
+      await storage.upsert({ ...surviving!, title: "still writable" });
+      const reloaded = new AgentStorage(storagePath, logger);
+      expect((await reloaded.getFresh(record.id))?.title).toBe("still writable");
+    } finally {
+      await Promise.all([storage.flush(), externalWriter.flush()]);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
 test("workspace clear attention uses the fresh owner before updating a stored agent", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const workspace = createPersistedWorkspaceRecord({

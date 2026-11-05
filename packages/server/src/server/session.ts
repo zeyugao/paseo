@@ -359,10 +359,15 @@ type DeleteFencedAgentStorage = AgentStorage & {
   beginDelete(agentId: string): void;
 };
 
-function beginAgentDeleteIfSupported(agentStorage: AgentStorage, agentId: string): void {
+function beginAgentDeleteIfSupported(
+  agentStorage: AgentStorage,
+  agentId: string,
+): AgentStorage | undefined {
   if ("beginDelete" in agentStorage && typeof agentStorage.beginDelete === "function") {
     (agentStorage as DeleteFencedAgentStorage).beginDelete(agentId);
+    return agentStorage;
   }
+  return undefined;
 }
 
 const FETCH_AGENTS_SORT_KEYS = ["status_priority", "created_at", "updated_at", "title"] as const;
@@ -3658,7 +3663,7 @@ export class Session {
       this.agentManager.getAgent(agentId) ?? (await this.agentStorage.get(agentId));
 
     // File-backed storage still needs an early delete fence before closeAgent().
-    beginAgentDeleteIfSupported(this.agentStorage, agentId);
+    const fencedStorage = beginAgentDeleteIfSupported(this.agentStorage, agentId);
 
     try {
       await closeAgentCommand({ agentManager: this.agentManager }, agentId);
@@ -3671,8 +3676,22 @@ export class Session {
 
     // Drain queued persistence from the just-closed agent before removing its
     // durable snapshot, otherwise an in-flight background write can recreate it.
-    await this.agentManager.flush();
+    try {
+      await this.agentManager.flush();
 
+      // Ownership may change externally while the flush is pending. The delete
+      // fence makes normal getFresh return null, so bypass it before removing data.
+      const postFlushRecord = await this.agentStorage.getFresh(agentId, {
+        ignoreDeleteFence: true,
+      });
+      if (postFlushRecord?.hostId !== undefined && postFlushRecord.hostId !== this.serverId) {
+        throw new Error(`agent is owned by host ${postFlushRecord.hostId}`);
+      }
+    } catch (error) {
+      // A rejected delete must not hide or discard later updates to the surviving record.
+      fencedStorage?.cancelDelete(agentId);
+      throw error;
+    }
     try {
       await this.agentStorage.remove(agentId);
       await this.agentManager.deleteAgentState(agentId);

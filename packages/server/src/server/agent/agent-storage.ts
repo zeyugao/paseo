@@ -383,6 +383,10 @@ export class AgentStorage {
     this.deleting.add(agentId);
   }
 
+  cancelDelete(agentId: string): void {
+    this.deleting.delete(agentId);
+  }
+
   async remove(agentId: string): Promise<void> {
     await this.load();
     this.beginDelete(agentId);

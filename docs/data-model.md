@@ -6,9 +6,12 @@ Projects are allocated for the exact root selected by the caller, normalized lex
 
 `projectKey` is a persisted, opaque equivalence key used only to group the same logical project
 across hosts. It is separate from the host-local `projectId`; today's producer prefers a normalized
-Git remote and otherwise uses the local project root. Consumers never derive it from live Git.
-Creation persists it with the project, and normal boot reconciliation fills it for
-older records where the field is absent—there is no migration.
+Git remote. Without a remote the key names the local root under every daemon that has observed it
+(`host:srv_a+srv_b:/path`), sorted and joined with `+`: each daemon unions its own `serverId` in
+during reconciliation instead of replacing the list, so several daemons on one home converge on a
+single key instead of rewriting the record for each other. Consumers never derive it from live Git.
+Creation persists it with the project, and normal boot reconciliation fills it for older records
+where the field is absent—there is no migration.
 
 `kind` and `projectKey` are mutable metadata, not identity. Workspace reconciliation watches active project roots and
 updates those fields and `updatedAt` when Git facts change, preserving the project's ID, root path,
@@ -473,6 +476,7 @@ Array of workspace records. A workspace is a specific working directory within a
 | ------------------------------ | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `workspaceId`                  | `string`                                                     | Opaque stable identifier (`wks_<hex>`), generated independently of the directory. MUST NOT be treated as a path; compare by exact equality. Use the `cwd` field for directory access.         |
 | `projectId`                    | `string`                                                     | FK to Project.projectId; the workspace's stable project membership                                                                                                                            |
+| `hostId`                       | `string?`                                                    | Creating daemon's serverId. A daemon lists only workspaces whose `hostId` is absent (legacy) or its own; updates and reconciliation preserve the field. See [shared-home.md](./shared-home.md) |
 | `cwd`                          | `string`                                                     | Exact execution directory selected for agents, files, scripts, and setup                                                                                                                      |
 | `kind`                         | `"local_checkout" \| "worktree" \| "directory"`              | Mutable checkout classification                                                                                                                                                               |
 | `displayName`                  | `string`                                                     | The human name (the generated/derived title). Decoupled from `branch` by construction.                                                                                                        |
@@ -504,7 +508,7 @@ last assignment. Editing a label takes a new name, a new colour, or both in one 
 fields cannot land half-applied. Workspaces store label names, so a rename and a delete rewrite
 workspace assignments through one serialized compound commit while a recolour is catalog-only; a
 rename onto a name the host already has is refused rather than merged. A prepared
-`workspace-labels.transaction.json` contains both before and after images. The daemon writes the
+`workspace-labels.transaction.{txId}.json` contains both before and after images. The daemon writes the
 catalog and workspace files, then atomically changes the transaction to committed; that phase
 change is the durable commit point. Recovery rolls prepared transactions back before either
 directory is served. A committed marker proves both data files were already written, so recovery

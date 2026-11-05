@@ -64,6 +64,7 @@ type CodexAppServerChildProcess = ChildProcessWithoutNullStreams & {
 
 export interface FakeCodexAppServer {
   readonly child: CodexAppServerChildProcess;
+  readonly recordedForks: JsonObject[];
   readonly recordedRollbacks: JsonObject[];
   requests(): readonly JsonObject[];
   assertNoErrors(): void;
@@ -161,6 +162,7 @@ export function createFakeCodexAppServer(
   handlers: Record<string, FakeCodexAppServerHandler> = {},
 ): FakeCodexAppServer {
   const child = createCodexAppServerChildProcess();
+  const recordedForks: JsonObject[] = [];
   const recordedRollbacks: JsonObject[] = [];
   const responseHandlers: Record<string, FakeCodexAppServerHandler> = {
     initialize: () => ({}),
@@ -182,25 +184,29 @@ export function createFakeCodexAppServer(
     "thread/backgroundTerminals/list": () => ({ data: [], nextCursor: null }),
     "thread/resume": () => ({}),
     "turn/start": () => ({}),
-    "thread/fork": (params) => ({
-      thread: {
-        id: "forked-thread",
-        sessionId: "forked-session",
-        forkedFromId: toJsonObject(params).threadId,
-        turns: [],
-      },
-      model: "gpt-5.4",
-      modelProvider: "openai",
-      serviceTier: null,
-      cwd: "/workspace/project",
-      runtimeWorkspaceRoots: [],
-      instructionSources: [],
-      approvalPolicy: "on-request",
-      approvalsReviewer: null,
-      sandbox: { type: "workspaceWrite", networkAccess: false },
-      activePermissionProfile: null,
-      reasoningEffort: null,
-    }),
+    "thread/fork": (params) => {
+      const fork = toJsonObject(params);
+      recordedForks.push(fork);
+      return {
+        thread: {
+          id: "forked-thread",
+          sessionId: "forked-session",
+          forkedFromId: fork.threadId,
+          turns: [],
+        },
+        model: "gpt-5.4",
+        modelProvider: "openai",
+        serviceTier: null,
+        cwd: "/workspace/project",
+        runtimeWorkspaceRoots: [],
+        instructionSources: [],
+        approvalPolicy: "on-request",
+        approvalsReviewer: null,
+        sandbox: { type: "workspaceWrite", networkAccess: false },
+        activePermissionProfile: null,
+        reasoningEffort: null,
+      };
+    },
     "thread/rollback": (params) => {
       const rollback = toJsonObject(params);
       recordedRollbacks.push(rollback);
@@ -364,6 +370,7 @@ export function createFakeCodexAppServer(
 
   return {
     child,
+    recordedForks,
     recordedRollbacks,
     requests() {
       return messages;

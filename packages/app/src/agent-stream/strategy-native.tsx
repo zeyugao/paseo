@@ -31,6 +31,7 @@ import { useTranslation } from "react-i18next";
 import type { StreamItem } from "@/types/stream";
 import type { Theme } from "@/styles/theme";
 import { useStableEvent } from "@/hooks/use-stable-event";
+import { useWindowLayout } from "@/window-layout";
 import { shouldAnimateNativeScrollToBottom } from "./native-scroll-animation";
 import { useRevisedHistoryRows } from "./history-row-revision";
 import { useBottomAnchorController } from "./bottom-anchor-controller";
@@ -159,6 +160,9 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
   const isActive = useRetainedPanelActive();
   const { t } = useTranslation();
   const { renderHistoryMountedRow, renderLiveHeadRow, renderLiveAuxiliary } = renderers;
+  const windowLayout = useWindowLayout();
+  // With controls at the top edge, their taps also reach UIKit's status-bar scroll gesture.
+  const hasTopEdgeControls = windowLayout?.topChrome != null || windowLayout?.verticalBar != null;
   const listRef = useRef<LegendListRef>(null);
   // LegendList places the rows once, behind a hidden reveal, when the list mounts.
   const [isListPlaced, setIsListPlaced] = useState(false);
@@ -423,8 +427,10 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
   );
   // A new identity re-renders LegendList's scroll component, which is how the pin follows the mode.
   const renderScrollComponent = useCallback(
-    (scrollProps: ScrollViewProps) => <EndPinnedScrollView {...scrollProps} pinEnd={pinsEnd} />,
-    [pinsEnd],
+    (scrollProps: ScrollViewProps) => (
+      <EndPinnedScrollView {...scrollProps} pinEnd={pinsEnd} scrollsToTop={!hasTopEdgeControls} />
+    ),
+    [pinsEnd, hasTopEdgeControls],
   );
   const topOverlayInset = useStreamTopOverlayInset();
   // No keyboard inset: one committed after the keyboard settles moves every row when the end pin is

@@ -177,6 +177,8 @@ Windows and Linux controls are fixed window chrome, outside scrolling header con
 
 Each window edge has one safe-area owner. `WindowLayoutProvider` publishes the bottom inset that every surface reads through `useSafeAreaInsets()`: on iOS 27.1 and later it is UIKit's bottom-bar clearance, which refines the rectangular home-indicator inset to the screen's corners, and elsewhere the system inset. Surfaces apply that value once and never stack their own spacing under it; `WindowLayoutSurface` owns the horizontal insets the same way.
 
+Wide menu headers and workspace title/tab rows share the system's available top band. Keep corner clearances on the physical window edges; do not clear the top inset globally, since scrolling content and compact headers still need their own safe-area clearance.
+
 A new list+detail feature copies the settings shell. A new workspace-shaped feature copies the workspace shell. Inventing a third shape happens in design review, not in a PR.
 
 ---

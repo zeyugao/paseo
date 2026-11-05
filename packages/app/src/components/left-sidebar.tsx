@@ -32,6 +32,7 @@ import {
   resolveDesktopSidebarWidth,
 } from "@/components/desktop-sidebar-layout";
 import { useWindowLayout, resolveDesktopDivisionLayout } from "@/window-layout";
+import { resolveWorkspaceTopChromeInsets } from "@/window-layout/model";
 import {
   SIDEBAR_RESIZE_ACTIVATION_OFFSET,
   SIDEBAR_RESIZE_FAIL_OFFSET,
@@ -101,6 +102,7 @@ const DEV_BUILD_LABEL = process.env.EXPO_PUBLIC_PASEO_DEV_BUILD_LABEL?.trim() ||
 
 interface SidebarSharedProps {
   theme: SidebarTheme;
+  topChromeInsetLeft: number;
   workspaceGroups: SidebarWorkspaceGroup[];
   projectIconTargets: SidebarProjectIconTarget[];
   pinnedGroups: PinnedSidebarGroups;
@@ -156,6 +158,10 @@ export const LeftSidebar = memo(function LeftSidebar({
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
+  const topChromeInsets = resolveWorkspaceTopChromeInsets(useWindowLayout(), insets, {
+    left: true,
+    right: false,
+  });
   const isCompactLayout = useIsCompactFormFactor();
   const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
 
@@ -228,6 +234,7 @@ export const LeftSidebar = memo(function LeftSidebar({
 
   const sharedProps = {
     theme,
+    topChromeInsetLeft: topChromeInsets?.paddingLeft ?? 0,
     workspaceGroups,
     projectIconTargets,
     pinnedGroups,
@@ -262,7 +269,7 @@ export const LeftSidebar = memo(function LeftSidebar({
             {...sharedProps}
             {...handlers}
             active={active}
-            insetsTop={insets.top}
+            insetsTop={topChromeInsets?.paddingTop ?? insets.top}
             insetsBottom={insets.bottom}
             closeSidebar={showMobileAgent}
           />
@@ -270,7 +277,7 @@ export const LeftSidebar = memo(function LeftSidebar({
           <DesktopSidebar
             {...sharedProps}
             {...handlers}
-            insetsTop={insets.top}
+            insetsTop={topChromeInsets?.paddingTop ?? insets.top}
             active={active}
             overlay={desktopOverlay}
           />
@@ -571,6 +578,7 @@ function MobileSidebar({
   handleAddHost,
   handleOpenHostSettings,
   insetsTop,
+  topChromeInsetLeft,
   insetsBottom,
   closeSidebar,
 }: MobileSidebarProps) {
@@ -606,7 +614,7 @@ function MobileSidebar({
 
   const navRows = (
     <SidebarNavRows
-      style={styles.mobileNavRowsGroup}
+      style={styles.mobileNavRowsGroup(topChromeInsetLeft)}
       onBeforeNavigate={closeSidebar}
       firstRowTrailing={closeButton}
     />
@@ -711,6 +719,7 @@ function DesktopSidebar({
   handleAddHost,
   handleOpenHostSettings,
   insetsTop,
+  topChromeInsetLeft,
   active,
   overlay,
 }: DesktopSidebarProps) {
@@ -808,8 +817,11 @@ function DesktopSidebar({
     [insetsTop, insets.bottom, insets.left, overlay, divisionLayout],
   );
   const sidebarHeaderGroupStyle = useMemo(
-    () => [styles.sidebarHeaderGroup, ownsTopLeft && styles.sidebarHeaderGroupBelowChrome],
-    [ownsTopLeft],
+    () => [
+      styles.sidebarHeaderGroup(topChromeInsetLeft),
+      ownsTopLeft && styles.sidebarHeaderGroupBelowChrome,
+    ],
+    [ownsTopLeft, topChromeInsetLeft],
   );
   return (
     <MobilePanelOverlay
@@ -931,13 +943,14 @@ const staticStyles = RNStyleSheet.create({
 });
 
 const styles = StyleSheet.create((theme) => ({
-  sidebarHeaderGroup: {
+  sidebarHeaderGroup: (topChromeInsetLeft: number) => ({
     paddingTop: theme.spacing[2],
+    paddingLeft: topChromeInsetLeft,
     gap: 2,
     paddingBottom: theme.spacing[1.5],
     borderBottomWidth: 1,
     borderBottomColor: theme.colors.border,
-  },
+  }),
   sidebarHeaderGroupBelowChrome: {
     paddingTop: 0,
   },
@@ -948,11 +961,12 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 1,
     maxHeight: "50%",
   },
-  mobileNavRowsGroup: {
+  mobileNavRowsGroup: (topChromeInsetLeft: number) => ({
     paddingTop: theme.spacing[2],
+    paddingLeft: topChromeInsetLeft,
     gap: 2,
     paddingBottom: theme.spacing[1.5],
-  },
+  }),
   sidebarContent: {
     flex: 1,
     minHeight: 0,

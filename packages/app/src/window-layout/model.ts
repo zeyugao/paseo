@@ -15,6 +15,23 @@ export interface WindowLayout {
    */
   bottomClearance?: number | null;
   divisions: WindowLayoutRect[];
+  topChrome?: WindowLayoutRect | null;
+}
+
+export function resolveWorkspaceTopChromeInsets(
+  layout: WindowLayout | null,
+  insets: { top: number; left: number; right: number },
+  edges: { left: boolean; right: boolean },
+) {
+  const bar = layout?.topChrome;
+  if (!layout || !bar || bar.y + bar.height > insets.top) return null;
+  return {
+    paddingTop: bar.y,
+    paddingLeft: edges.left ? Math.max(0, bar.x - insets.left) : 0,
+    paddingRight: edges.right
+      ? Math.max(0, layout.bounds.width - insets.right - bar.x - bar.width)
+      : 0,
+  };
 }
 
 /** The window's measured bottom clearance replaces the rectangular safe-area bottom. */

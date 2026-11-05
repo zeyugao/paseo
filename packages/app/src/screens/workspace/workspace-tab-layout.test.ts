@@ -13,6 +13,63 @@ import {
   computeWorkspaceTabLayout,
   retainWorkspaceTabMeasuredWidth,
 } from "@/screens/workspace/workspace-tab-layout";
+import { resolveWorkspaceTopChromeInsets, type WindowLayout } from "@/window-layout/model";
+
+describe("workspace top chrome placement", () => {
+  const layout: WindowLayout = {
+    bounds: { x: 0, y: 0, width: 669, height: 951 },
+    verticalBarEdge: "none",
+    verticalBar: null,
+    divisions: [],
+    topChrome: { x: 6, y: 0, width: 519, height: 44 },
+  };
+  const insets = { top: 84, left: 0, right: 0 };
+  const edges = { left: true, right: true };
+
+  it("moves both rows together without preserving the empty top inset", () => {
+    expect(resolveWorkspaceTopChromeInsets(layout, insets, edges)).toEqual({
+      paddingTop: 0,
+      paddingLeft: 6,
+      paddingRight: 144,
+    });
+  });
+
+  it("applies corner clearance only to the column occupying that window edge", () => {
+    expect(resolveWorkspaceTopChromeInsets(layout, insets, { left: false, right: true })).toEqual({
+      paddingTop: 0,
+      paddingLeft: 0,
+      paddingRight: 144,
+    });
+    expect(resolveWorkspaceTopChromeInsets(layout, insets, { left: true, right: false })).toEqual({
+      paddingTop: 0,
+      paddingLeft: 6,
+      paddingRight: 0,
+    });
+    expect(resolveWorkspaceTopChromeInsets(layout, insets, { left: false, right: false })).toEqual({
+      paddingTop: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+  });
+
+  it("credits horizontal clearance already consumed by the native shell", () => {
+    expect(resolveWorkspaceTopChromeInsets(layout, { top: 84, left: 4, right: 84 }, edges)).toEqual(
+      {
+        paddingTop: 0,
+        paddingLeft: 2,
+        paddingRight: 60,
+      },
+    );
+  });
+
+  it("keeps normal safe areas without a usable top band or after it stops fitting", () => {
+    expect(resolveWorkspaceTopChromeInsets(null, insets, edges)).toBeNull();
+    expect(
+      resolveWorkspaceTopChromeInsets({ ...layout, topChrome: null }, insets, edges),
+    ).toBeNull();
+    expect(resolveWorkspaceTopChromeInsets(layout, { ...insets, top: 0 }, edges)).toBeNull();
+  });
+});
 
 const metrics = {
   rowHorizontalInset: 0,

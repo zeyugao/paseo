@@ -738,6 +738,52 @@ describe("OMP CLI runtime", () => {
     await rejection;
   });
 
+  test("compact waits beyond the default control-plane timeout for a late response", async () => {
+    vi.useFakeTimers();
+    const child = createOmpChild();
+    const pendingCompact = capturePendingCommand(child, "compact");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+
+    try {
+      const compactPromise = session.compact("focus on tests");
+      const compactCommand = await pendingCompact;
+      await vi.advanceTimersByTimeAsync(35_000);
+
+      expect(compactCommand).toMatchObject({
+        type: "compact",
+        customInstructions: "focus on tests",
+        id: expect.any(String),
+      });
+
+      writeResponse(child, compactCommand, {
+        summary: "done",
+        firstKeptEntryId: "entry-1",
+        tokensBefore: 120_000,
+        estimatedTokensAfter: 20_000,
+      });
+
+      await expect(compactPromise).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      await session.close();
+    }
+  });
+
+  test("compact without a wall-clock timeout rejects when the session closes", async () => {
+    const child = createOmpChild();
+    const pendingCompact = capturePendingCommand(child, "compact");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+
+    const compactPromise = session.compact();
+    const compactCommand = await pendingCompact;
+    expect(compactCommand).toMatchObject({ type: "compact", id: expect.any(String) });
+
+    const rejection = expect(compactPromise).rejects.toThrow("OMP RPC session is closed");
+    await session.close();
+
+    await rejection;
+  });
+
   test("negotiates RPC protocol v2 when OMP advertises it", async () => {
     const child = createOmpChild({ supportedProtocolVersions: [1, 2] });
     const commands: Record<string, unknown>[] = [];

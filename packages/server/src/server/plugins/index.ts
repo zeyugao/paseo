@@ -289,7 +289,8 @@ export class PluginService {
             running: running.has(id),
           }),
         };
-        const manifest = await readPluginManifest(path.resolve(source.path)).catch(() => null);
+        const directory = this.resolveDirectory(source.path);
+        const manifest = await readPluginManifest(directory).catch(() => null);
         if (manifest) {
           item.name = manifest.name;
           item.description = manifest.description;
@@ -297,10 +298,10 @@ export class PluginService {
           item.media = manifest.media;
         }
         item.installation = await this.managedSources
-          ?.describe(id, source.path)
+          ?.describe(id, directory)
           .catch(() => undefined);
         if (!this.managedSources)
-          item.installation = { identity: { kind: "directory", path: path.resolve(source.path) } };
+          item.installation = { identity: { kind: "directory", path: directory } };
         if (item.installation?.identity.kind === "git") {
           item.source = "git";
           item.remote = item.installation.identity.remote;
@@ -436,7 +437,7 @@ export class PluginService {
       const managedSources = this.requireManagedSources();
       const statuses: PluginSourceStatusItem[] = [];
       for (const [id, source] of selected) {
-        statuses.push(await managedSources.status(id, source.path));
+        statuses.push(await managedSources.status(id, this.resolveDirectory(source.path)));
       }
       return statuses.sort((left, right) => left.id.localeCompare(right.id));
     });
@@ -460,7 +461,7 @@ export class PluginService {
         try {
           return await this.requireManagedSources().preview(
             id,
-            this.requireSource(id).path,
+            this.resolveDirectory(this.requireSource(id).path),
             input.target,
           );
         } catch (error) {
@@ -503,7 +504,7 @@ export class PluginService {
       const source = this.requireEnabledSource(pluginId);
       this.errors.delete(pluginId);
       await this.stopPlugin(pluginId);
-      await this.startExplicit(pluginId, source.path);
+      await this.startExplicit(pluginId, this.resolveDirectory(source.path));
       this.notify(pluginId);
       return this.requireItem(pluginId);
     });
@@ -518,7 +519,7 @@ export class PluginService {
       await this.pendingOperations.get(pluginId)?.completion.catch(() => {});
       const current = this.requireSource(pluginId);
       if (current.enabled !== false && this.configStore.get().pluginsEnabled === true) {
-        await this.startExplicit(pluginId, current.path);
+        await this.startExplicit(pluginId, this.resolveDirectory(current.path));
       }
       this.notify(pluginId);
       return this.requireItem(pluginId);
@@ -614,7 +615,7 @@ export class PluginService {
     if (!source || source.enabled === false || !this.canPublish(pluginId)) return;
     this.errors.delete(pluginId);
     try {
-      await this.startPlugin(pluginId, source.path, publishTurn);
+      await this.startPlugin(pluginId, this.resolveDirectory(source.path), publishTurn);
     } catch (error) {
       if (this.canPublish(pluginId)) this.recordFailure(pluginId, error);
     }
@@ -807,14 +808,20 @@ export class PluginService {
     const pluginId = proposal.id;
     const managedSources = this.requireManagedSources();
     const source = this.requireSource(pluginId);
-    let candidate = await managedSources.prepareUpdate(proposal, source.path);
+    let candidate = await managedSources.prepareUpdate(
+      proposal,
+      this.resolveDirectory(source.path),
+    );
     try {
       await this.checkRequirements(candidate.directory);
       await runPluginBuild(candidate.directory, candidate.build, this.logger);
       candidate = await managedSources.place(pluginId, candidate);
       await this.validateCandidate(candidate);
       await managedSources.verifyCandidate(pluginId, candidate, proposal.target);
-      await managedSources.assertCurrent(proposal, this.requireSource(pluginId).path);
+      await managedSources.assertCurrent(
+        proposal,
+        this.resolveDirectory(this.requireSource(pluginId).path),
+      );
     } catch (error) {
       await managedSources.discard(candidate);
       throw error;
@@ -833,7 +840,7 @@ export class PluginService {
         try {
           this.errors.delete(pluginId);
           if (isRunning && this.canPublish(pluginId))
-            await this.startExplicit(pluginId, source.path);
+            await this.startExplicit(pluginId, this.resolveDirectory(source.path));
         } catch (restoreError) {
           recoveryError = restoreError;
         } finally {
@@ -861,7 +868,7 @@ export class PluginService {
     this.notify(pluginId);
     let warning: string | undefined;
     try {
-      await managedSources.removeVersion(pluginId, source.path);
+      await managedSources.removeVersion(pluginId, this.resolveDirectory(source.path));
     } catch (error) {
       warning = `Plugin updated, but previous installation cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
     }
@@ -883,6 +890,15 @@ export class PluginService {
   private requireManagedSources(): ManagedPluginSources {
     if (!this.managedSources) throw new Error("Plugin source management is unavailable");
     return this.managedSources;
+  }
+
+  // Absolute paths are used as written; relative paths resolve against the
+  // daemon's PASEO_HOME, so one config.json works on machines that keep the
+  // plugin at the same home-relative path.
+  private resolveDirectory(configuredPath: string): string {
+    return path.isAbsolute(configuredPath)
+      ? path.normalize(configuredPath)
+      : path.resolve(this.configStore.paseoHome, configuredPath);
   }
 
   private requireSource(pluginId: string): PluginSource {
@@ -1010,7 +1026,7 @@ export class PluginService {
     const persisted = readPersistedConfig(this.configStore.paseoHome).plugins?.[pluginId];
     if (!persisted) return;
     if (isDeepStrictEqual(persisted, this.configStore.get().plugins?.[pluginId])) return;
-    const directory = path.resolve(persisted.path);
+    const directory = this.resolveDirectory(persisted.path);
     const info = await stat(directory).catch(() => null);
     if (!info?.isDirectory()) return;
     await this.patchSourceEntry(pluginId, () => persisted);

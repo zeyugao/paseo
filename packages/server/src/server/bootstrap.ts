@@ -1897,10 +1897,10 @@ export async function createPaseoDaemon(
   const start = async () => {
     let mainStarted = false;
     try {
-      daemonInstanceRegistration = await registerDaemonInstance(config.paseoHome, serverId, {
-        listen: formatListenTarget(listenTarget) ?? undefined,
+      const registration = await registerDaemonInstance(config.paseoHome, serverId, {
         onHeartbeatError: handleDaemonInstanceHeartbeatError,
       });
+      daemonInstanceRegistration = registration;
       await restartRecovery.prepareStartup();
       // Reconcile only after this daemon owns the instance lease. A rejected
       // competitor must never terminate helpers owned by the live daemon.
@@ -1940,9 +1940,6 @@ export async function createPaseoDaemon(
           mainStarted = true;
           const logAndResolve = async () => {
             boundListenTarget = resolveBoundListenTarget(listenTarget, httpServer);
-            if (daemonInstanceRegistration) {
-              await daemonInstanceRegistration.updateListen(formatListenTarget(boundListenTarget)!);
-            }
             const mcpBaseUrl = createAgentMcpBaseUrl(boundListenTarget);
             agentMcpBaseUrl =
               !mcpEnabled || config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
@@ -2127,6 +2124,7 @@ export async function createPaseoDaemon(
       // model loading doesn't block the server from accepting connections.
       speechService.start();
       scriptHealthMonitor.start();
+      await registration.updateListen(formatListenTarget(boundListenTarget)!);
     } catch (error) {
       const credentialToDelete = localCredential;
       localCredential = null;

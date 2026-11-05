@@ -1,7 +1,7 @@
 import type pino from "pino";
 import type { ProviderAvailability } from "../../agent/agent-manager.js";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
-import { getPidLockInfo } from "../../pid-lock.js";
+import { readDaemonInstance } from "../../daemon-instance.js";
 import { readUnconfirmedTerminalCleanup } from "../../../terminal/terminal-worker-reaper.js";
 import { generateLocalPairingOffer } from "../../pairing-offer.js";
 import {
@@ -186,7 +186,10 @@ export class DaemonSession {
     );
     const terminalsUnavailable = this.getTerminalsUnavailable();
     try {
-      const pidInfo = await getPidLockInfo(this.paseoHome);
+      const pidInfo = await readDaemonInstance(this.paseoHome, {
+        ...process.env,
+        PASEO_SERVER_ID: this.serverId ?? undefined,
+      });
       const providers = (await this.listProviderAvailability()).map((p) => ({
         provider: p.provider,
         available: p.available,

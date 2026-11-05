@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,6 +18,7 @@ import {
   readLocalCredentialForTarget,
   writeLocalCredential,
 } from "./local-credential.js";
+import { acquirePidLock } from "./pid-lock.js";
 
 const CORRECT_PASSWORD_HASH = "$2b$12$OLxyuuP9uLK30Uzc4wQX0O6liuU/Q1t5P2b0Ebf36mULvpVK3DRZW";
 
@@ -182,18 +183,18 @@ describe("hello admission", () => {
   test("writes a private rotating credential and reads it only for the matching target", async () => {
     const home = await mkdtemp(join(tmpdir(), "paseo-local-file-"));
     try {
-      await writeFile(join(home, "paseo.pid"), JSON.stringify({ listen: "127.0.0.1:6767" }));
+      await acquirePidLock(home, "127.0.0.1:6767");
       const first = await writeLocalCredential(home);
       if (process.platform !== "win32") {
         expect((await stat(join(home, "local-credential"))).mode & 0o777).toBe(0o600);
       }
-      expect(readLocalCredentialForTarget(home, "tcp://localhost:6767")).toBe(first);
-      expect(readLocalCredentialForTarget(home, "tcp://remote.example:6767")).toBeNull();
+      expect(await readLocalCredentialForTarget(home, "tcp://localhost:6767")).toBe(first);
+      expect(await readLocalCredentialForTarget(home, "tcp://remote.example:6767")).toBeNull();
       const second = await writeLocalCredential(home);
       expect(second).not.toBe(first);
       expect((await readFile(join(home, "local-credential"), "utf8")).trim()).toBe(second);
       await deleteLocalCredential(home);
-      expect(readLocalCredentialForTarget(home, "localhost:6767")).toBeNull();
+      expect(await readLocalCredentialForTarget(home, "localhost:6767")).toBeNull();
     } finally {
       await rm(home, { recursive: true, force: true });
     }

@@ -57,10 +57,15 @@ The reverse also holds: a pairing offer generated after the first daemon boot mi
 that daemon's keypair to the legacy root `daemon-keypair.json`, so the CLI keeps reading
 the home root and offers always carry the live daemon's public key.
 
-`paseo.pid` is a CLI discovery pointer, not the mutual exclusion. The daemon that holds
-it mirrors its credential to the legacy `local-credential` path for the unchanged CLI.
-On the other machines the CLI's local discovery does not work — point it at the daemon
-explicitly with `PASEO_HOST`.
+`paseo.pid` remains a legacy discovery pointer, not mutual exclusion. Local discovery
+selects the requested serverId's registration, verifies machine and process birth
+identities, and reads that daemon's credential. Another host's root pointer is left alone.
+Registrations publish their listen address only after startup succeeds. Status reads do
+not create server or machine identities.
+
+On macOS, keep a previously persisted fallback machine ID even when the corrected
+hardware UUID query starts working. Changing that identity during an upgrade would
+invalidate the live local registrations and legacy-worker ownership receipts.
 
 Cross-daemon visibility is pull-based: the project/workspace registries reload when the
 file's mtime or size changes underneath them, and agent storage rescans the `agents/`
@@ -70,10 +75,9 @@ one journal.
 
 ## Known limitations
 
-- The instance/pid leases compare file mtime against the local clock. Keep machine
-  clocks NTP-synced and mount the shared home with attribute caching no coarser than
-  the default (roughly a minute); very aggressive `actimeo` values or skewed clocks can
-  make a live daemon look stale.
+- Remote instance/pid leases use file mtime. Keep machine clocks NTP-synced and mount
+  with normal attribute caching; clock skew or aggressive `actimeo` can make a remote
+  daemon look stale. A verified live local process is not reclaimed for stale mtime alone.
 - The shared storage must provide cross-client `flock`/`lockf` semantics (stock NFS
   with network locking; not `local_lock=local`). Instance and pid reclaims, schedule
   claim release, and label commits all rely on it.

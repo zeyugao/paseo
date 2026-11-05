@@ -9,7 +9,8 @@ import { z } from "zod";
 
 import { ensurePrivateDirectory, PRIVATE_FILE_MODE } from "./private-files.js";
 import { getMachineId } from "./machine-id.js";
-import { withReclaimLock } from "./pid-lock.js";
+import { currentBootId, withReclaimLock, writtenDuringThisBoot } from "./pid-lock.js";
+import { createTerminalWorkerProcessInspector } from "../terminal/terminal-worker-processes.js";
 
 const DAEMON_INSTANCE_HEARTBEAT_INTERVAL_MS = 30_000;
 export const DAEMON_INSTANCE_STALE_AFTER_MS = 120_000;
@@ -23,6 +24,15 @@ export const daemonInstanceInfoSchema = z.object({
   pid: z.number().int().positive(),
   bootId: z.string().uuid(),
   startedAt: z.string(),
+  processStartedAt: z.string().optional(),
+  machineBootId: z.string().optional(),
+  desktopManaged: z.boolean().optional(),
+  supervisor: z
+    .object({
+      pid: z.number().int().positive(),
+      startedAt: z.string(),
+    })
+    .optional(),
   listen: z.string().optional(),
 });
 
@@ -124,6 +134,33 @@ export async function readRegisteredDaemonInstance(
 ): Promise<DaemonInstanceInfo | null> {
   return readInstanceFile(instancePath(paseoHome, serverId));
 }
+
+/** A registry lease is local only when machine identity agrees, not merely a reused PID. */
+export async function isRegisteredDaemonOwnerRunning(
+  info: DaemonInstanceInfo,
+  machineId: string,
+): Promise<boolean> {
+  if (info.machineId !== machineId || !info.processStartedAt) return false;
+  if (!writtenDuringThisBoot({ startedAt: info.startedAt, bootId: info.machineBootId })) {
+    return false;
+  }
+  const inspector = createTerminalWorkerProcessInspector();
+  const worker = await inspector.inspect(info.pid);
+  if (worker.status === "error") throw worker.error;
+  if (worker.status !== "alive" || worker.snapshot.startedAt !== info.processStartedAt)
+    return false;
+  if (info.supervisor) {
+    const supervisor = await inspector.inspect(info.supervisor.pid);
+    if (supervisor.status === "error") throw supervisor.error;
+    if (
+      supervisor.status !== "alive" ||
+      supervisor.snapshot.startedAt !== info.supervisor.startedAt
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
 /**
  * Synchronous, lock-free release for hard-exit paths (supervisor loss, tree-kill).
  * Must not spawn child processes (flock) — the tree-kill test expects the
@@ -181,6 +218,21 @@ async function clearAbandonedInstance(
       existing,
     );
   }
+  if (sameMachine) {
+    const inspection = await createTerminalWorkerProcessInspector().inspect(existing.pid);
+    if (inspection.status === "error") throw inspection.error;
+    const alive =
+      inspection.status === "alive" &&
+      (existing.processStartedAt
+        ? inspection.snapshot.startedAt === existing.processStartedAt
+        : writtenDuringThisBoot({ startedAt: existing.startedAt, bootId: existing.machineBootId }));
+    if (alive) {
+      throw new DaemonInstanceRegistryError(
+        `Another Paseo daemon is already running (PID ${existing.pid}, started ${existing.startedAt})`,
+        existing,
+      );
+    }
+  }
   if (!stale) {
     throw new DaemonInstanceRegistryError(
       `Another Paseo daemon is already running (PID ${existing.pid}, started ${existing.startedAt})`,
@@ -189,6 +241,38 @@ async function clearAbandonedInstance(
   }
 
   await unlink(filePath);
+}
+
+async function readProcessBirth(pid: number): Promise<string | undefined> {
+  const inspection = await createTerminalWorkerProcessInspector().inspect(pid);
+  if (inspection.status === "error") throw inspection.error;
+  return inspection.status === "alive" ? (inspection.snapshot.startedAt ?? undefined) : undefined;
+}
+
+async function readRegistrationProcessIdentity(
+  ownerPid: number,
+): Promise<Pick<DaemonInstanceInfo, "processStartedAt" | "machineBootId" | "supervisor">> {
+  const processStartedAt = await readProcessBirth(ownerPid);
+  if (ownerPid === process.pid && !processStartedAt) {
+    throw new DaemonInstanceRegistryError("Cannot identify daemon worker process");
+  }
+  let supervisor: DaemonInstanceInfo["supervisor"];
+  if (
+    ownerPid === process.pid &&
+    process.env.PASEO_SUPERVISED === "1" &&
+    typeof process.send === "function"
+  ) {
+    const startedAt = await readProcessBirth(process.ppid);
+    if (!startedAt)
+      throw new DaemonInstanceRegistryError("Cannot identify daemon supervisor process");
+    supervisor = { pid: process.ppid, startedAt };
+  }
+  const machineBootId = currentBootId();
+  return {
+    ...(processStartedAt ? { processStartedAt } : {}),
+    ...(machineBootId ? { machineBootId } : {}),
+    ...(supervisor ? { supervisor } : {}),
+  };
 }
 
 export async function registerDaemonInstance(
@@ -203,6 +287,7 @@ export async function registerDaemonInstance(
   const reclaimLockPath = path.join(path.dirname(filePath), ".reclaim.lock");
   ensurePrivateDirectory(path.dirname(filePath));
 
+  const processIdentity = await readRegistrationProcessIdentity(ownerPid);
   const info: DaemonInstanceInfo = {
     serverId,
     hostname,
@@ -210,6 +295,8 @@ export async function registerDaemonInstance(
     pid: ownerPid,
     bootId: randomUUID(),
     startedAt: new Date().toISOString(),
+    ...processIdentity,
+    ...(process.env.PASEO_DESKTOP_MANAGED === "1" ? { desktopManaged: true } : {}),
     ...(options.listen ? { listen: options.listen } : {}),
   };
 

@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { getOrCreateServerId } from "./server-id.js";
+import { getOrCreateServerId, readServerId } from "./server-id.js";
 import { PRIVATE_FILE_MODE } from "./private-files.js";
 
 const MODE_MASK = 0o777;
@@ -49,6 +49,17 @@ describe("getOrCreateServerId", () => {
     const idPath = path.join(home, "server-id");
     expect(existsSync(idPath)).toBe(true);
     expect(readFileSync(idPath, "utf8").trim()).toBe(first);
+  });
+
+  it("reads selected identity without creating or rewriting home state", () => {
+    expect(readServerId(home, {})).toBeNull();
+    expect(existsSync(path.join(home, "server-id"))).toBe(false);
+    expect(readServerId(home, { PASEO_SERVER_ID: "srv_secondary" })).toBe("srv_secondary");
+    expect(existsSync(path.join(home, "server-id"))).toBe(false);
+    writeFileSync(path.join(home, "server-id"), "srv_primary\n");
+    expect(readServerId(home, {})).toBe("srv_primary");
+    expect(readServerId(home, { PASEO_SERVER_ID: "srv_secondary" })).toBe("srv_secondary");
+    expect(readFileSync(path.join(home, "server-id"), "utf8")).toBe("srv_primary\n");
   });
 
   function collectChildOutput(child: ChildProcess): Promise<string> {

@@ -5444,7 +5444,7 @@ export class Session {
       }
     } catch (error) {
       this.sessionLogger.error({ err: error, agentIds }, "Failed to clear agent attention");
-      // Don't throw - this is not critical
+      if (requestId) throw error;
     }
   }
 

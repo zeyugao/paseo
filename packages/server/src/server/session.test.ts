@@ -207,6 +207,69 @@ test("legacy cancel_agent_request reports refusal through the activity log", asy
   ]);
 });
 
+test("refused clear_agent_attention returns a source-correlated rpc_error", async () => {
+  const source = {};
+  const messages: SessionOutboundMessage[] = [];
+  const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];
+  const session = createSessionForTest({
+    messages,
+    targetedMessages,
+    agentManager: {
+      waitForAgentClose: async () => {},
+      getAgent: () => ({ id: "foreign-agent" }),
+      clearAgentAttention: async () => {
+        throw new Error("agent is owned by host srv-other");
+      },
+    },
+  });
+
+  await session.handleMessage(
+    {
+      type: "clear_agent_attention",
+      agentId: "foreign-agent",
+      requestId: "clear-refused",
+    },
+    source,
+  );
+
+  expect(targetedMessages).toContainEqual({
+    source,
+    message: {
+      type: "rpc_error",
+      payload: {
+        requestId: "clear-refused",
+        requestType: "clear_agent_attention",
+        code: "handler_error",
+        error: "Request failed: agent is owned by host srv-other",
+      },
+    },
+  });
+  expect(messages).not.toContainEqual(expect.objectContaining({ type: "rpc_error" }));
+  expect(targetedMessages).not.toContainEqual(
+    expect.objectContaining({
+      message: expect.objectContaining({ type: "clear_agent_attention_response" }),
+    }),
+  );
+});
+
+test("refused fire-and-forget clear_agent_attention stays response-free", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      waitForAgentClose: async () => {},
+      getAgent: () => ({ id: "foreign-agent" }),
+      clearAgentAttention: async () => {
+        throw new Error("agent is owned by host srv-other");
+      },
+    },
+  });
+
+  await session.handleMessage({ type: "clear_agent_attention", agentId: "foreign-agent" });
+
+  expect(messages).toEqual([]);
+});
+
 const checkoutGitMocks = vi.hoisted(() => ({
   checkoutResolvedBranch: vi.fn(),
   commitChanges: vi.fn(),

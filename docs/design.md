@@ -158,6 +158,8 @@ Compact-first. The small case is designed; the large case adds chrome around it.
 
 Use `md: 600` for the compact/wide layout boundary, in logical points on native and CSS pixels on web. Do not add a separate density breakpoint; touch sizing comes from the control sizing gate in [Buttons](#4-buttons). Measured content constraints remain independent: composer controls use `COMPACT_CONTENT_WIDTH` (500), so a narrow pane can keep compact controls inside a wide window.
 
+On iOS, use the SafeAreaProvider frame with its insets for shell allocation and window-geometry validation. React Native Dimensions arrives independently and can pair a new width with old side insets during rotation. Let the native SafeAreaView apply horizontal clearance; routing the inset back through JS padding exposes a second layout after rotation. Insets passed to compact descendants describe the clearance still unconsumed. Wide sidebar and division allocation also read this context as window-space geometry, so do not clear their side insets when changing visual clearance.
+
 The settings shell (`packages/app/src/screens/settings-screen.tsx`) and the projects screen (`packages/app/src/screens/projects-screen.tsx`) share the canonical list+detail navigation pattern:
 
 - On compact: full-screen list with `<BackHeader>` at the top. Tapping a row pushes a full-screen detail with its own `<BackHeader>` that returns to the list.

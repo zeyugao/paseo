@@ -56,6 +56,7 @@ export class HubConnectionLeaseOwnedError extends Error {
 
 interface HubConnectionLeaseRegistration {
   assertOwned(): Promise<void>;
+  assertOwnedSync(): void;
   release(): Promise<void>;
 }
 
@@ -269,6 +270,10 @@ export class HubRelationshipController implements HubRelationshipManagement {
   private executionAgents: { daemonId: string; value: HubExecutionAgents } | null = null;
   private connectionLease: HubConnectionLeaseRegistration | null = null;
   private blockedLeaseOwner: HubConnectionLeaseOwner | null = null;
+  private started = false;
+  private leaseAttempt: Promise<void> | null = null;
+  private leaseAcquisition: Promise<HubConnectionLeaseRegistration> | null = null;
+  private executionRetirement: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: HubRelationshipControllerOptions) {
     this.filePath = path.join(options.paseoHome, FILE_NAME);
@@ -276,19 +281,32 @@ export class HubRelationshipController implements HubRelationshipManagement {
     this.retryPolicy = options.retryPolicy ?? new BoundedExponentialHubRetryPolicy();
   }
 
-  async start(): Promise<void> {
-    if (!this.connectionLease) {
+  start(): Promise<void> {
+    if (this.started) return this.leaseAttempt ?? Promise.resolve();
+    this.started = true;
+    this.retryAttempt = 0;
+    return this.startWithLease();
+  }
+
+  private startWithLease(): Promise<void> {
+    if (this.leaseAttempt) return this.leaseAttempt;
+    if (!this.started || this.connectionLease) return Promise.resolve();
+    const attempt = this.acquireConnectionLease(this.generation);
+    this.leaseAttempt = attempt;
+    const settled = () => {
+      if (this.leaseAttempt === attempt) this.leaseAttempt = null;
+    };
+    void attempt.then(settled, settled);
+    return attempt;
+  }
+
+  private async acquireConnectionLease(generation: number): Promise<void> {
+    try {
+      let lease: HubConnectionLeaseRegistration;
       try {
-        this.connectionLease = await acquireHubConnectionLease({
-          paseoHome: this.options.paseoHome,
-          serverId: this.options.serverId,
-          hostname: this.options.hostname,
-          heartbeatIntervalMs: this.options.connectionLease?.heartbeatIntervalMs,
-          staleAfterMs: this.options.connectionLease?.staleAfterMs,
-          onLost: (error) => this.connectionLeaseLost(error),
-        });
-        this.blockedLeaseOwner = null;
+        lease = await this.registerConnectionLease();
       } catch (error) {
+        if (!this.started || generation !== this.generation) return;
         if (!(error instanceof HubConnectionLeaseOwnedError)) throw error;
         this.blockedLeaseOwner = error.owner;
         this.state = "not_connected";
@@ -297,12 +315,20 @@ export class HubRelationshipController implements HubRelationshipManagement {
           { owner: error.owner },
           "Hub connection disabled because another daemon owns the per-home lease",
         );
+        this.scheduleLeaseAcquisition();
         return;
       }
-    }
-    try {
+      if (!this.started || generation !== this.generation) {
+        await lease.release();
+        return;
+      }
+      this.connectionLease = lease;
+      this.blockedLeaseOwner = null;
+      this.retryAttempt = 0;
+      await this.executionRetirement;
+      if (!this.started || generation !== this.generation) return;
       this.loadRelationshipForStartup();
-      if (this.record?.state === "active") this.openSocket(this.record, false);
+      if (this.record?.state === "active") await this.openSocket(this.record, false);
       if (this.record?.state === "pending") {
         const enrollmentGeneration = this.beginEnrollmentAttempt();
         try {
@@ -316,8 +342,10 @@ export class HubRelationshipController implements HubRelationshipManagement {
         }
       }
     } catch (error) {
+      if (generation !== this.generation) throw error;
+      this.started = false;
       try {
-        await this.stop();
+        await this.stopLifecycle();
       } catch (stopError) {
         this.options.logger.error(
           { err: stopError },
@@ -328,10 +356,54 @@ export class HubRelationshipController implements HubRelationshipManagement {
     }
   }
 
+  private async registerConnectionLease(): Promise<HubConnectionLeaseRegistration> {
+    let lease: HubConnectionLeaseRegistration;
+    const acquisition = acquireHubConnectionLease({
+      paseoHome: this.options.paseoHome,
+      serverId: this.options.serverId,
+      hostname: this.options.hostname,
+      heartbeatIntervalMs: this.options.connectionLease?.heartbeatIntervalMs,
+      staleAfterMs: this.options.connectionLease?.staleAfterMs,
+      onLost: (error) => {
+        if (this.connectionLease === lease) this.connectionLeaseLost(error);
+      },
+    });
+    this.leaseAcquisition = acquisition;
+    try {
+      lease = await acquisition;
+      return lease;
+    } finally {
+      if (this.leaseAcquisition === acquisition) this.leaseAcquisition = null;
+    }
+  }
+
+  private scheduleLeaseAcquisition(): void {
+    if (!this.started) return;
+    this.schedule(() =>
+      this.startWithLease().catch((error: unknown) => {
+        this.options.logger.error({ err: error }, "Scheduled Hub lease acquisition failed");
+      }),
+    );
+  }
+
   async stop(): Promise<void> {
+    this.started = false;
+    const acquisition = this.leaseAcquisition;
+    this.leaseAttempt = null;
+    try {
+      await this.stopLifecycle();
+    } finally {
+      const lease = await acquisition?.catch(() => null);
+      await lease?.release();
+    }
+  }
+
+  private async stopLifecycle(): Promise<void> {
     const lease = this.connectionLease;
     this.connectionLease = null;
     this.blockedLeaseOwner = null;
+    this.state = "not_connected";
+    this.connectedAt = null;
     try {
       const pendingExecutionCleanup = this.retireExecutionAgents();
       this.cancelLifecycle();
@@ -402,7 +474,8 @@ export class HubRelationshipController implements HubRelationshipManagement {
     grant: readonly string[];
     revoke: readonly string[];
   }): Promise<HubRelationshipStatus> {
-    await this.requireConnectionLease();
+    const lease = this.connectionLease;
+    await this.requireConnectionLease(lease);
     if (!this.record || this.record.state !== "active") {
       throw new Error("This daemon is not connected to a Hub");
     }
@@ -418,7 +491,7 @@ export class HubRelationshipController implements HubRelationshipManagement {
       credential: this.record.credential.secret,
       permissions,
     });
-    await this.requireConnectionLease();
+    await this.requireConnectionLease(lease);
     if (!samePermissions(result.permissions, permissions)) {
       throw new Error("Hub permission response did not match the local grant");
     }
@@ -434,7 +507,8 @@ export class HubRelationshipController implements HubRelationshipManagement {
   async disconnect(input: {
     force: boolean;
   }): Promise<{ status: HubRelationshipStatus; warning?: string }> {
-    await this.requireConnectionLease();
+    const lease = this.connectionLease;
+    await this.requireConnectionLease(lease);
     const waitForEnrollment = this.record?.state === "pending";
     const pendingCreateCleanup = this.retireExecutionAgents();
     this.cancelLifecycle();
@@ -458,6 +532,7 @@ export class HubRelationshipController implements HubRelationshipManagement {
     if (waitForEnrollment && !input.force) {
       await Promise.all(this.inFlightEnrollments);
     }
+    await this.requireConnectionLease(lease);
     let warning: string | undefined;
     if (!input.force) {
       try {
@@ -475,6 +550,7 @@ export class HubRelationshipController implements HubRelationshipManagement {
           "Hub could not be reached; local relationship removed, but server-side revocation may remain pending.";
       }
     }
+    await this.requireConnectionLease(lease);
     this.remove();
     await pendingCreateCleanup;
     return { status: this.status(), ...(warning ? { warning } : {}) };
@@ -483,16 +559,19 @@ export class HubRelationshipController implements HubRelationshipManagement {
   private async tryEnrollment(pending: PendingRecord, enrollmentGeneration: number): Promise<void> {
     if (enrollmentGeneration !== this.enrollmentGeneration) return;
     const verifier = createHash("sha256").update(pending.credential.secret).digest("base64url");
-    const request = this.options.remote.enroll({
-      daemonId: pending.relationship.daemonId,
-      idempotencyKey: pending.relationship.idempotencyKey,
-      hubOrigin: pending.relationship.hubOrigin,
-      token: pending.enrollment.token,
-      hostname: this.options.hostname,
-      serverId: pending.identity.serverId,
-      daemonPublicKey: pending.identity.daemonPublicKey,
-      credentialVerifier: verifier,
-      permissions: pending.relationship.permissions,
+    const request = this.requireConnectionLease().then(() => {
+      if (enrollmentGeneration !== this.enrollmentGeneration) return null;
+      return this.options.remote.enroll({
+        daemonId: pending.relationship.daemonId,
+        idempotencyKey: pending.relationship.idempotencyKey,
+        hubOrigin: pending.relationship.hubOrigin,
+        token: pending.enrollment.token,
+        hostname: this.options.hostname,
+        serverId: pending.identity.serverId,
+        daemonPublicKey: pending.identity.daemonPublicKey,
+        credentialVerifier: verifier,
+        permissions: pending.relationship.permissions,
+      });
     });
     const settled = request.then(
       () => undefined,
@@ -501,6 +580,8 @@ export class HubRelationshipController implements HubRelationshipManagement {
     this.inFlightEnrollments.add(settled);
     try {
       const enrollment = await request;
+      if (!enrollment || enrollmentGeneration !== this.enrollmentGeneration) return;
+      await this.requireConnectionLease();
       if (enrollmentGeneration !== this.enrollmentGeneration) return;
       if (
         enrollment.daemonId !== pending.relationship.daemonId ||
@@ -519,7 +600,7 @@ export class HubRelationshipController implements HubRelationshipManagement {
       this.record = active;
       this.retry = null;
       this.retryAttempt = 0;
-      this.openSocket(active, false);
+      await this.openSocket(active, false);
     } catch (error) {
       if (enrollmentGeneration !== this.enrollmentGeneration) return;
       if (error instanceof HubEnrollmentRejectedError) {
@@ -533,24 +614,36 @@ export class HubRelationshipController implements HubRelationshipManagement {
     }
   }
 
-  private openSocket(record: ActiveRecord, reconnecting: boolean): void {
+  private async openSocket(record: ActiveRecord, reconnecting: boolean): Promise<void> {
     const generation = ++this.generation;
     this.state = reconnecting ? "reconnecting" : "connecting";
-    const events: HubSocketEvents = {
-      connected: (socket, sessionProtocol) =>
-        this.socketConnected(generation, record, socket, sessionProtocol),
-      rejected: (statusCode) => this.socketRejected(generation, statusCode),
-      closed: (code) => this.socketClosed(generation, record, code),
-      failed: (error) => this.socketFailed(generation, record, error),
-    };
-    this.socket = this.options.remote.openSocket(
-      {
-        daemonId: record.relationship.daemonId,
-        webSocketUrl: record.transport.webSocketUrl,
-        credential: record.credential.secret,
-      },
-      events,
-    );
+    try {
+      await this.requireConnectionLease();
+      if (generation !== this.generation) return;
+      this.socket?.close();
+      this.socket = null;
+      const events: HubSocketEvents = {
+        connected: (socket, sessionProtocol) =>
+          this.socketConnected(generation, record, socket, sessionProtocol),
+        rejected: (statusCode) => this.socketRejected(generation, statusCode),
+        closed: (code) => this.socketClosed(generation, record, code),
+        failed: (error) => this.socketFailed(generation, record, error),
+      };
+      this.socket = this.options.remote.openSocket(
+        {
+          daemonId: record.relationship.daemonId,
+          webSocketUrl: record.transport.webSocketUrl,
+          credential: record.credential.secret,
+        },
+        events,
+      );
+    } catch (error) {
+      this.socketFailed(
+        generation,
+        record,
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
   }
 
   private socketConnected(
@@ -559,15 +652,18 @@ export class HubRelationshipController implements HubRelationshipManagement {
     socket: WebSocketLike,
     sessionProtocol: "legacy" | "session-v1",
   ): void {
-    if (generation !== this.generation) {
+    const lease = this.connectionLease;
+    if (!lease || !this.socketAuthorityCurrent(generation, lease)) {
       socket.close();
       return;
     }
     this.retryAttempt = 0;
+    this.retry?.cancel();
+    this.retry = null;
     this.state = "connected";
     this.connectedAt = this.clock.now().toISOString();
     this.lastError = null;
-    void this.options.attachSocket(socket, {
+    void this.options.attachSocket(this.socketWithLeaseAuthority(socket, generation, lease), {
       daemonId: record.relationship.daemonId,
       principalId: hubPrincipalId(record),
       permissions: record.relationship.permissions,
@@ -576,9 +672,90 @@ export class HubRelationshipController implements HubRelationshipManagement {
     });
   }
 
+  private socketAuthorityCurrent(
+    generation: number,
+    lease: HubConnectionLeaseRegistration | null,
+  ): boolean {
+    if (generation !== this.generation || !lease || lease !== this.connectionLease) return false;
+    try {
+      lease.assertOwnedSync();
+      return true;
+    } catch (error) {
+      if (!(error instanceof HubConnectionLeaseOwnedError)) throw error;
+      return false;
+    }
+  }
+
+  private socketWithLeaseAuthority(
+    socket: WebSocketLike,
+    generation: number,
+    lease: HubConnectionLeaseRegistration,
+  ): WebSocketLike {
+    const isCurrent = () => {
+      if (this.socketAuthorityCurrent(generation, lease)) return true;
+      socket.close();
+      return false;
+    };
+    return {
+      get readyState() {
+        return socket.readyState;
+      },
+      get bufferedAmount() {
+        return socket.bufferedAmount;
+      },
+      get maxFrameBytes() {
+        return socket.maxFrameBytes;
+      },
+      send:
+        socket.send.length < 2
+          ? (data) => {
+              if (isCurrent()) return socket.send(data);
+            }
+          : (data, callback) => {
+              if (!isCurrent()) {
+                callback?.(new HubConnectionLeaseOwnedError(this.blockedLeaseOwner));
+                return;
+              }
+              return socket.send(data, callback);
+            },
+      close: (code, reason) => socket.close(code, reason),
+      terminate: socket.terminate?.bind(socket),
+      on: (event, listener) => {
+        socket.on(
+          event,
+          event === "message"
+            ? (...args) => {
+                if (isCurrent()) listener(...args);
+              }
+            : listener,
+        );
+      },
+      once: (event, listener) => socket.once(event, listener),
+    };
+  }
+
   private executionAgentsFor(daemonId: string): HubExecutionAgents {
     if (this.executionAgents?.daemonId === daemonId) return this.executionAgents.value;
-    const value = this.options.createExecutionAgents(daemonId);
+    const agents = this.options.createExecutionAgents(daemonId);
+    const lease = this.connectionLease;
+    const requireAuthority = async () => {
+      await this.requireConnectionLease(lease);
+      if (this.executionAgents?.value !== value) {
+        throw new Error("Hub relationship authority is no longer active");
+      }
+    };
+    const value: HubExecutionAgents = {
+      create: async (input) => {
+        await requireAuthority();
+        return agents.create(input);
+      },
+      control: async (input) => {
+        await requireAuthority();
+        return agents.control(input);
+      },
+      subscribe: (listener) => agents.subscribe(listener),
+      invalidateAuthority: () => agents.invalidateAuthority(),
+    };
     this.executionAgents = { daemonId, value };
     return value;
   }
@@ -586,16 +763,22 @@ export class HubRelationshipController implements HubRelationshipManagement {
   private retireExecutionAgents(): Promise<void> {
     const executionAgents = this.executionAgents;
     this.executionAgents = null;
-    return executionAgents?.value.invalidateAuthority() ?? Promise.resolve();
+    if (executionAgents) {
+      this.executionRetirement = Promise.all([
+        this.executionRetirement,
+        executionAgents.value.invalidateAuthority(),
+      ]).then(() => undefined);
+    }
+    return this.executionRetirement;
   }
 
   private socketRejected(generation: number, statusCode: 401 | 403): void {
-    if (generation !== this.generation) return;
+    if (!this.socketAuthorityCurrent(generation, this.connectionLease)) return;
     this.revoke(`Hub rejected socket authentication (${statusCode})`);
   }
 
   private socketClosed(generation: number, record: ActiveRecord, code: number): void {
-    if (generation !== this.generation) return;
+    if (!this.socketAuthorityCurrent(generation, this.connectionLease)) return;
     if (code === 4403) {
       this.revoke("Hub revoked this relationship");
       return;
@@ -604,7 +787,7 @@ export class HubRelationshipController implements HubRelationshipManagement {
   }
 
   private socketFailed(generation: number, record: ActiveRecord, error: Error): void {
-    if (generation !== this.generation) return;
+    if (!this.socketAuthorityCurrent(generation, this.connectionLease)) return;
     this.lastError = error.message;
     if (this.record?.state === "active") this.scheduleSocket(record);
   }
@@ -621,25 +804,30 @@ export class HubRelationshipController implements HubRelationshipManagement {
     const delay = this.retryPolicy.delay(this.retryAttempt++);
     this.retry = this.clock.schedule(delay, () => {
       if (enrollmentGeneration !== this.enrollmentGeneration) return;
-      void this.tryEnrollment(record, enrollmentGeneration).catch((error: unknown) => {
+      this.retry = null;
+      return this.tryEnrollment(record, enrollmentGeneration).catch((error: unknown) => {
         if (error instanceof HubEnrollmentRejectedError) return;
         this.options.logger.error({ err: error }, "Scheduled Hub enrollment retry failed");
       });
     });
   }
 
-  private schedule(task: () => void): void {
+  private schedule(task: () => void | Promise<void>): void {
     this.retry?.cancel();
     const generation = this.generation;
     const delay = this.retryPolicy.delay(this.retryAttempt++);
     this.retry = this.clock.schedule(delay, () => {
-      if (generation === this.generation) task();
+      if (generation !== this.generation) return;
+      this.retry = null;
+      return task();
     });
   }
 
   private revoke(reason: string): void {
     void this.retireExecutionAgents();
     this.cancelLifecycle();
+    this.socket?.close();
+    this.socket = null;
     if (!this.record) return;
     const revoked: RevokedRecord = {
       version: 2,
@@ -693,18 +881,23 @@ export class HubRelationshipController implements HubRelationshipManagement {
     }
   }
 
-  private async requireConnectionLease(): Promise<void> {
-    if (!this.connectionLease) {
+  private async requireConnectionLease(lease = this.connectionLease): Promise<void> {
+    if (!lease || lease !== this.connectionLease) {
       throw new HubConnectionLeaseOwnedError(this.blockedLeaseOwner);
     }
-    await this.connectionLease.assertOwned();
+    await lease.assertOwned();
+    if (lease !== this.connectionLease) {
+      throw new HubConnectionLeaseOwnedError(this.blockedLeaseOwner);
+    }
   }
 
   private connectionLeaseLost(error: HubConnectionLeaseOwnedError): void {
     if (!this.connectionLease) return;
-    this.blockedLeaseOwner = error.owner;
+    this.connectionLease = null;
+    this.blockedLeaseOwner = null;
     this.lastError = error.message;
     this.state = "not_connected";
+    this.connectedAt = null;
     void this.retireExecutionAgents();
     this.cancelLifecycle();
     this.socket?.close();
@@ -713,6 +906,7 @@ export class HubRelationshipController implements HubRelationshipManagement {
       { err: error, owner: error.owner },
       "Hub connection stopped after losing the per-home lease",
     );
+    if (this.record?.state !== "revoked") this.scheduleLeaseAcquisition();
   }
 
   private persist(record: HubRelationshipRecord): void {
@@ -812,6 +1006,7 @@ async function acquireHubConnectionLease(
   });
 
   let released = false;
+  let release: Promise<void> | null = null;
   let heartbeatPending = false;
   let lost = false;
   const markLost = (current: HubConnectionLeaseOwner | null): HubConnectionLeaseOwnedError => {
@@ -853,14 +1048,28 @@ async function acquireHubConnectionLease(
 
   return {
     assertOwned: () => assertOwned(false),
-    async release(): Promise<void> {
-      if (released) return;
+    assertOwnedSync(): void {
+      if (lost || released) throw new HubConnectionLeaseOwnedError(null);
+      let current: HubConnectionLeaseOwner | null = null;
+      try {
+        const parsed = HubConnectionLeaseOwnerSchema.safeParse(
+          JSON.parse(readFileSync(filePath, "utf8")),
+        );
+        current = parsed.success ? parsed.data : null;
+      } catch {
+        throw markLost(null);
+      }
+      if (!sameHubConnectionLease(current, owner)) throw markLost(current);
+    },
+    release(): Promise<void> {
+      if (release) return release;
       released = true;
       clearInterval(timer);
-      await withReclaimLock(reclaimLockPath, async () => {
+      release = withReclaimLock(reclaimLockPath, async () => {
         const current = await readHubConnectionLease(filePath);
         if (sameHubConnectionLease(current, owner)) await unlink(filePath);
       });
+      return release;
     },
   };
 }

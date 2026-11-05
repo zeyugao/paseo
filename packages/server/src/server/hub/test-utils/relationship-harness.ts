@@ -137,8 +137,7 @@ class TestRelationshipClock implements HubRelationshipClock, HubRelationshipRetr
       const scheduled = this.tasks.shift();
       if (!scheduled) throw new Error("No relationship retry is scheduled");
       if (!scheduled.cancelled) {
-        scheduled.task();
-        await Promise.resolve();
+        await scheduled.task();
         return;
       }
     }

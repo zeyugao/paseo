@@ -1,14 +1,27 @@
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { getHostName } from "../host-name.js";
+import type { WebSocketLike } from "../websocket-server.js";
+import { sendBoundedPhysicalFrameAndWait } from "../websocket/physical-socket.js";
+import type { HubExecutionAgents } from "./daemon-executions.js";
 import {
   HubRelationshipController,
   type HubRelationshipControllerOptions,
+  type HubRelationshipClock,
+  type HubRelationshipRetryPolicy,
+  type ScheduledRelationshipTask,
 } from "./relationship-controller.js";
-import type { HubRelationshipRemote } from "./relationship-remote.js";
+import type {
+  HubEnrollment,
+  HubEnrollmentResult,
+  HubRelationshipRemote,
+  HubSocketCredentials,
+  HubSocketEvents,
+} from "./relationship-remote.js";
 import { HubRelationshipHarness } from "./test-utils/relationship-harness.js";
 
 async function captureUnhandledRejections(action: () => Promise<void>): Promise<unknown[]> {
@@ -935,6 +948,385 @@ describe("Hub relationship", () => {
 
     expect(await relationship.storedOwnedStatus(created.payload.agentId!)).toBe("closed");
   });
+  test("a blocked daemon automatically takes over a released lease without duplicate sockets or heartbeats", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-retry-"));
+    const clock = new LeaseTestClock();
+    const owner = createLeaseTestController(paseoHome, "server-owner");
+    const contender = createLeaseTestController(paseoHome, "server-contender", 120_000, {}, clock);
+    try {
+      await Promise.all([owner.controller.start(), owner.controller.start()]);
+      await owner.controller.connect({
+        hubUrl: "https://hub.test",
+        token: "token",
+        permissions: ["hub.execute"],
+      });
+      owner.connectLatestSocket();
+      await expect(
+        sendBoundedPhysicalFrameAndWait({
+          socket: owner.attachedSockets[0],
+          frame: "lease-wrapped-output",
+          onHighWater: () => {
+            throw new Error("Unexpected physical high-water mark");
+          },
+        }),
+      ).resolves.toBe(true);
+      expect(owner.sockets[0].socket.sent).toEqual(["lease-wrapped-output"]);
+      await contender.controller.start();
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        expect(clock.pendingTasks()).toBe(1);
+        await clock.runNext();
+        expect(contender.controller.status().state).toBe("not_connected");
+        expect(contender.sockets).toHaveLength(0);
+        expect(vi.getTimerCount()).toBe(1);
+      }
+      expect(clock.attempts).toEqual([0, 1, 2, 3]);
+
+      await owner.controller.stop();
+      expect(owner.sockets[0].socket.closed).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+      await clock.runNext();
+      contender.connectLatestSocket();
+      await Promise.all([contender.controller.start(), contender.controller.start()]);
+
+      expect(contender.controller.status().state).toBe("connected");
+      expect(contender.observations.enrollmentAttempts).toBe(0);
+      expect(contender.sockets).toHaveLength(1);
+      expect(contender.sockets[0].credentials).toEqual(owner.sockets[0].credentials);
+      expect(clock.pendingTasks()).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(vi.getTimerCount()).toBe(1);
+      expect(contender.sockets).toHaveLength(1);
+
+      contender.sockets[0].events.failed(new Error("Connection lost"));
+      contender.sockets[0].events.closed(1006);
+      expect(clock.pendingTasks()).toBe(1);
+      await clock.runNext();
+      contender.connectLatestSocket();
+      expect(contender.sockets).toHaveLength(2);
+      expect(contender.sockets.filter(({ socket }) => !socket.closed)).toHaveLength(1);
+      expect(clock.pendingTasks()).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      await Promise.allSettled([owner.controller.stop(), contender.controller.stop()]);
+      vi.useRealTimers();
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("stopping a blocked daemon cancels takeover even if the cancelled callback is delivered", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-retry-stop-"));
+    const clock = new LeaseTestClock();
+    const owner = createLeaseTestController(paseoHome, "server-owner");
+    const contender = createLeaseTestController(paseoHome, "server-contender", 120_000, {}, clock);
+    try {
+      await owner.controller.start();
+      await contender.controller.start();
+      expect(clock.pendingTasks()).toBe(1);
+      await contender.controller.stop();
+      await owner.controller.stop();
+      expect(clock.pendingTasks()).toBe(0);
+      await clock.runNext(true);
+
+      expect(clock.pendingTasks()).toBe(0);
+      expect(contender.sockets).toHaveLength(0);
+      await expect(readFile(path.join(paseoHome, "hub-connection.lock"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(
+        contender.controller.connect({
+          hubUrl: "https://hub.test",
+          token: "token",
+          permissions: [],
+        }),
+      ).rejects.toThrow("not owned by this daemon");
+    } finally {
+      await Promise.allSettled([owner.controller.stop(), contender.controller.stop()]);
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("stopping during an in-flight takeover releases the new lease without dialing", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-retry-race-"));
+    const clock = new LeaseTestClock();
+    const owner = createLeaseTestController(paseoHome, "server-owner");
+    const contender = createLeaseTestController(paseoHome, "server-contender", 120_000, {}, clock);
+    try {
+      await owner.controller.start();
+      await owner.controller.connect({
+        hubUrl: "https://hub.test",
+        token: "token",
+        permissions: [],
+      });
+      await contender.controller.start();
+      await owner.controller.stop();
+
+      const takeover = clock.runNext();
+      await contender.controller.stop();
+      await takeover;
+
+      expect(contender.sockets).toHaveLength(0);
+      expect(clock.pendingTasks()).toBe(0);
+      await expect(readFile(path.join(paseoHome, "hub-connection.lock"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await Promise.allSettled([owner.controller.stop(), contender.controller.stop()]);
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("a blocked daemon takes a stale lease and fences the former owner's socket and execution authority", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-retry-stale-"));
+    const ownerClock = new LeaseTestClock();
+    const contenderClock = new LeaseTestClock();
+    const owner = createLeaseTestController(paseoHome, "server-owner", 120_000, {}, ownerClock);
+    const contender = createLeaseTestController(
+      paseoHome,
+      "server-contender",
+      120_000,
+      {},
+      contenderClock,
+    );
+    try {
+      await owner.controller.start();
+      await owner.controller.connect({
+        hubUrl: "https://hub.test",
+        token: "token",
+        permissions: ["hub.execute"],
+      });
+      owner.connectLatestSocket();
+      const oldAuthority = owner.attachedAgents[0];
+      const oldSocket = owner.attachedSockets[0];
+      let forwardedFrames = 0;
+      oldSocket.on("message", () => {
+        forwardedFrames += 1;
+      });
+      await contender.controller.start();
+      const expired = new Date(Date.now() - 121_000);
+      await utimes(path.join(paseoHome, "hub-connection.lock"), expired, expired);
+
+      await contenderClock.runNext();
+      contender.connectLatestSocket();
+      owner.sockets[0].socket.emit("message", "stale-command", false);
+      oldSocket.send("stale-output");
+      expect(forwardedFrames).toBe(0);
+      expect(owner.sockets[0].socket.sent).toEqual([]);
+      await expect(
+        oldAuthority.control({
+          requestId: "stale-control",
+          executionId: "execution",
+          action: "interrupt",
+        }),
+      ).rejects.toThrow("not owned by this daemon");
+
+      expect(owner.observations.executionControls).toBe(0);
+      expect(owner.observations.authorityRetirements).toBe(1);
+      expect(owner.sockets[0].socket.closed).toBe(true);
+      expect(owner.controller.status().state).toBe("not_connected");
+      expect(ownerClock.pendingTasks()).toBe(1);
+      expect(contender.controller.status().state).toBe("connected");
+      expect(contender.sockets).toHaveLength(1);
+      expect(contender.observations.enrollmentAttempts).toBe(0);
+      expect(contenderClock.pendingTasks()).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
+
+      owner.sockets[0].events.closed(4403);
+      expect(
+        JSON.parse(await readFile(path.join(paseoHome, "hub-relationship.json"), "utf8")),
+      ).toMatchObject({
+        state: "active",
+      });
+      await ownerClock.runNext();
+      expect(owner.sockets).toHaveLength(1);
+      expect(ownerClock.pendingTasks()).toBe(1);
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      await Promise.allSettled([owner.controller.stop(), contender.controller.stop()]);
+      vi.useRealTimers();
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("takeover resumes the same pending ceremony and ignores the former owner's late enrollment response", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-retry-enrollment-"));
+    const ownerClock = new LeaseTestClock();
+    const contenderClock = new LeaseTestClock();
+    const enrollmentStarted = Promise.withResolvers<HubEnrollment>();
+    const enrollmentResult = Promise.withResolvers<HubEnrollmentResult>();
+    const owner = createLeaseTestController(
+      paseoHome,
+      "server-owner",
+      120_000,
+      {
+        enroll(input) {
+          enrollmentStarted.resolve(input);
+          return enrollmentResult.promise;
+        },
+      },
+      ownerClock,
+    );
+    const contender = createLeaseTestController(
+      paseoHome,
+      "server-contender",
+      120_000,
+      {},
+      contenderClock,
+    );
+    let connecting: Promise<unknown> | undefined;
+    try {
+      await owner.controller.start();
+      connecting = owner.controller.connect({
+        hubUrl: "https://hub.test",
+        token: "original-token",
+        permissions: ["hub.execute"],
+      });
+      const originalEnrollment = await enrollmentStarted.promise;
+      await contender.controller.start();
+      const expired = new Date(Date.now() - 121_000);
+      await utimes(path.join(paseoHome, "hub-connection.lock"), expired, expired);
+
+      await contenderClock.runNext();
+      expect(contender.observations.enrollments).toHaveLength(1);
+      expect(contender.observations.enrollments[0]).toMatchObject({
+        daemonId: originalEnrollment.daemonId,
+        idempotencyKey: originalEnrollment.idempotencyKey,
+        hubOrigin: originalEnrollment.hubOrigin,
+        token: originalEnrollment.token,
+        serverId: originalEnrollment.serverId,
+        daemonPublicKey: originalEnrollment.daemonPublicKey,
+        credentialVerifier: originalEnrollment.credentialVerifier,
+        permissions: originalEnrollment.permissions,
+      });
+      enrollmentResult.resolve({
+        daemonId: originalEnrollment.daemonId,
+        permissions: originalEnrollment.permissions,
+        webSocketUrl: "wss://hub.test/daemon",
+      });
+      await connecting;
+
+      expect(owner.sockets).toHaveLength(0);
+      expect(owner.controller.status().state).toBe("not_connected");
+      expect(contender.sockets).toHaveLength(1);
+      expect(
+        JSON.parse(await readFile(path.join(paseoHome, "hub-relationship.json"), "utf8")),
+      ).toMatchObject({
+        state: "active",
+        relationship: { daemonId: originalEnrollment.daemonId },
+      });
+    } finally {
+      enrollmentResult.resolve({
+        daemonId: "test-cleanup",
+        permissions: [],
+        webSocketUrl: "wss://hub.test/daemon",
+      });
+      await connecting?.catch(() => undefined);
+      await Promise.allSettled([owner.controller.stop(), contender.controller.stop()]);
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("stopping takeover does not wait for enrollment or revive it after the response arrives", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-retry-pending-stop-"));
+    const ownerEnrollment = Promise.withResolvers<HubEnrollment>();
+    const contenderEnrollment = Promise.withResolvers<HubEnrollment>();
+    const enrollmentResult = Promise.withResolvers<HubEnrollmentResult>();
+    const owner = createLeaseTestController(paseoHome, "server-owner", 120_000, {
+      enroll(input) {
+        ownerEnrollment.resolve(input);
+        return enrollmentResult.promise;
+      },
+    });
+    const clock = new LeaseTestClock();
+    const contender = createLeaseTestController(
+      paseoHome,
+      "server-contender",
+      120_000,
+      {
+        enroll(input) {
+          contenderEnrollment.resolve(input);
+          return enrollmentResult.promise;
+        },
+      },
+      clock,
+    );
+    let connecting: Promise<unknown> | undefined;
+    let takeover: Promise<void> | undefined;
+    try {
+      await owner.controller.start();
+      connecting = owner.controller.connect({
+        hubUrl: "https://hub.test",
+        token: "token",
+        permissions: [],
+      });
+      const original = await ownerEnrollment.promise;
+      await contender.controller.start();
+      await owner.controller.stop();
+      takeover = clock.runNext();
+      await contenderEnrollment.promise;
+
+      await contender.controller.stop();
+      expect(clock.pendingTasks()).toBe(0);
+      await expect(readFile(path.join(paseoHome, "hub-connection.lock"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      enrollmentResult.resolve({
+        daemonId: original.daemonId,
+        permissions: original.permissions,
+        webSocketUrl: "wss://hub.test/daemon",
+      });
+      await Promise.all([connecting, takeover]);
+      expect(owner.sockets).toHaveLength(0);
+      expect(contender.sockets).toHaveLength(0);
+      expect(clock.pendingTasks()).toBe(0);
+      expect(contender.controller.status().state).toBe("not_connected");
+    } finally {
+      enrollmentResult.resolve({
+        daemonId: "test-cleanup",
+        permissions: [],
+        webSocketUrl: "wss://hub.test/daemon",
+      });
+      await Promise.allSettled([connecting, takeover]);
+      await Promise.allSettled([owner.controller.stop(), contender.controller.stop()]);
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("a revoked relationship never schedules lease takeover after losing ownership", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-retry-revoked-"));
+    const clock = new LeaseTestClock();
+    const owner = createLeaseTestController(paseoHome, "server-owner", 120_000, {}, clock);
+    const contender = createLeaseTestController(paseoHome, "server-contender");
+    try {
+      await owner.controller.start();
+      await owner.controller.connect({
+        hubUrl: "https://hub.test",
+        token: "token",
+        permissions: [],
+      });
+      owner.sockets[0].events.rejected(401);
+      expect(owner.controller.status().state).toBe("revoked");
+      expect(owner.sockets[0].socket.closed).toBe(true);
+      expect(clock.pendingTasks()).toBe(0);
+      const expired = new Date(Date.now() - 121_000);
+      await utimes(path.join(paseoHome, "hub-connection.lock"), expired, expired);
+      await contender.controller.start();
+
+      await expect(owner.controller.updatePermissions({ grant: [], revoke: [] })).rejects.toThrow(
+        "server-contender",
+      );
+      expect(clock.pendingTasks()).toBe(0);
+      expect(contender.controller.status().state).toBe("revoked");
+      expect(contender.sockets).toHaveLength(0);
+    } finally {
+      await Promise.allSettled([owner.controller.stop(), contender.controller.stop()]);
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
   test("a non-owner daemon starts without Hub connectivity and rejects relationship mutations", async () => {
     const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-hub-lease-owner-"));
     const owner = createLeaseTestController(paseoHome, "server-owner");
@@ -1103,12 +1495,27 @@ function createLeaseTestController(
   serverId: string,
   staleAfterMs = 120_000,
   remoteOverrides: Partial<HubRelationshipRemote> = {},
+  clock?: HubRelationshipClock & HubRelationshipRetryPolicy,
 ) {
   const warn = vi.fn();
-  const observations = { enrollmentAttempts: 0, permissionUpdates: 0 };
+  const observations = {
+    enrollmentAttempts: 0,
+    permissionUpdates: 0,
+    executionControls: 0,
+    authorityRetirements: 0,
+    enrollments: [] as HubEnrollment[],
+  };
+  const sockets: Array<{
+    socket: LeaseTestSocket;
+    credentials: HubSocketCredentials;
+    events: HubSocketEvents;
+  }> = [];
+  const attachedAgents: HubExecutionAgents[] = [];
+  const attachedSockets: WebSocketLike[] = [];
   const remote: HubRelationshipRemote = {
     async enroll(input) {
       observations.enrollmentAttempts += 1;
+      observations.enrollments.push(input);
       return {
         daemonId: input.daemonId,
         permissions: input.permissions,
@@ -1120,8 +1527,11 @@ function createLeaseTestController(
       return { permissions: input.permissions };
     },
     async revoke() {},
-    openSocket() {
-      return { close() {} };
+    openSocket(credentials, events) {
+      const socket = new LeaseTestSocket();
+      socket.on("close", (code: number) => events.closed(code));
+      sockets.push({ socket, credentials, events });
+      return socket;
     },
     ...remoteOverrides,
   };
@@ -1129,11 +1539,15 @@ function createLeaseTestController(
     async create(): Promise<never> {
       throw new Error("Unexpected execution create");
     },
-    async control() {},
+    async control() {
+      observations.executionControls += 1;
+    },
     subscribe() {
       return () => undefined;
     },
-    async invalidateAuthority() {},
+    async invalidateAuthority() {
+      observations.authorityRetirements += 1;
+    },
   };
   const logger = { warn, error: vi.fn() } as unknown as HubRelationshipControllerOptions["logger"];
   const controller = new HubRelationshipController({
@@ -1143,11 +1557,80 @@ function createLeaseTestController(
     daemonPublicKey: `key-${serverId}`,
     logger,
     remote,
+    clock,
+    retryPolicy: clock,
     createDaemonId: () => `daemon-${serverId}`,
     connectionLease: { heartbeatIntervalMs: 60_000, staleAfterMs },
-    attachSocket: async () => undefined,
+    attachSocket: async (socket, options) => {
+      attachedSockets.push(socket);
+      attachedAgents.push(options.agents);
+    },
     updateAttachedPermissions: () => undefined,
     createExecutionAgents: () => executionAgents,
   });
-  return { controller, warn, observations };
+  return {
+    controller,
+    warn,
+    observations,
+    sockets,
+    attachedAgents,
+    attachedSockets,
+    connectLatestSocket() {
+      const latest = sockets.at(-1);
+      if (!latest) throw new Error("No Hub socket was dialed");
+      latest.events.connected(latest.socket, "legacy");
+    },
+  };
+}
+
+class LeaseTestSocket extends EventEmitter implements WebSocketLike {
+  readyState = 1;
+  bufferedAmount = 0;
+  closed = false;
+  readonly sent: Array<string | Uint8Array | ArrayBuffer> = [];
+
+  send(data: string | Uint8Array | ArrayBuffer): void {
+    this.sent.push(data);
+  }
+
+  close(code = 1000): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.readyState = 3;
+    this.emit("close", code);
+  }
+}
+
+class LeaseTestClock implements HubRelationshipClock, HubRelationshipRetryPolicy {
+  readonly attempts: number[] = [];
+  private readonly tasks: Array<{ cancelled: boolean; task: () => void }> = [];
+
+  now(): Date {
+    return new Date("2026-07-13T00:00:00.000Z");
+  }
+
+  delay(attempt: number): number {
+    this.attempts.push(attempt);
+    return Math.min(8_000, 1_000 * 2 ** attempt);
+  }
+
+  schedule(_delayMs: number, task: () => void): ScheduledRelationshipTask {
+    const scheduled = { cancelled: false, task };
+    this.tasks.push(scheduled);
+    return { cancel: () => (scheduled.cancelled = true) };
+  }
+
+  pendingTasks(): number {
+    return this.tasks.filter((task) => !task.cancelled).length;
+  }
+
+  async runNext(includeCancelled = false): Promise<void> {
+    while (true) {
+      const scheduled = this.tasks.shift();
+      if (!scheduled) throw new Error("No Hub lease retry is scheduled");
+      if (scheduled.cancelled && !includeCancelled) continue;
+      await scheduled.task();
+      return;
+    }
+  }
 }

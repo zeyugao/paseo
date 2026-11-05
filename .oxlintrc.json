@@ -126,6 +126,8 @@
               ],
               // Provider child process: Pi loads this extension outside the daemon; it reads child-agent status there.
               "server/agent/providers/pi/extensions/pi-subagents/index.ts": ["readFileSync"],
+              // TODO: atomic replacement probes and resolves symlinks synchronously at the write boundary shared by every registry; convert the write path and its callers together.
+              "server/atomic-file.ts": ["lstatSync", "realpathSync"],
               // Startup/shutdown only: remove stale Unix listening sockets before bind and during disposal.
               "server/bootstrap.ts": ["existsSync", "unlinkSync"],
               // Startup configuration resolution: detect the bundled app distribution before the daemon listens.
@@ -169,7 +171,6 @@
               "server/private-files.ts": [
                 "chmodSync",
                 "mkdirSync",
-                "realpathSync",
                 "renameSync",
                 "rmSync",
                 "writeFileSync"

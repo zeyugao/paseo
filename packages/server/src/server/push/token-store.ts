@@ -131,7 +131,7 @@ export class PushTokenStore {
           null,
           2,
         ) + "\n";
-      this.write(this.filePath, payload);
+      this.write(this.filePath, payload, { preserveSymlink: true });
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
       this.logger.warn({ err }, "Failed to persist push tokens");

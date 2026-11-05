@@ -142,6 +142,16 @@ import {
 } from "./websocket/physical-socket.js";
 
 const WS_CLOSE_DAEMON_AUTH_FAILED = 4401;
+const configuredTimelineResponseSendTimeoutMs = Number(
+  process.env.PASEO_TIMELINE_RESPONSE_SEND_TIMEOUT_MS,
+);
+const hasValidTimelineResponseSendTimeoutMs =
+  Number.isSafeInteger(configuredTimelineResponseSendTimeoutMs) &&
+  configuredTimelineResponseSendTimeoutMs > 0 &&
+  configuredTimelineResponseSendTimeoutMs <= 2_147_483_647;
+const TIMELINE_RESPONSE_SEND_TIMEOUT_MS = hasValidTimelineResponseSendTimeoutMs
+  ? configuredTimelineResponseSendTimeoutMs
+  : 120_000;
 
 export interface ExternalSocketMetadata {
   transport: "relay" | "hub";
@@ -500,7 +510,7 @@ interface SocketSessionOptions {
   permissions: readonly DaemonPermission[];
   connectionLogger: pino.Logger;
   onMessage: (message: SessionOutboundMessage) => void;
-  onMessageToSource?: (source: object, message: SessionOutboundMessage) => void | Promise<void>;
+  onMessageToSource?: SessionOptions["onMessageToSource"];
   onBinaryMessage?: (frame: Uint8Array) => void;
   onBinaryMessageToSource?: (source: object, frame: Uint8Array) => Promise<void>;
   getTransportBufferedAmount?: (source?: object) => number | null;
@@ -1246,13 +1256,100 @@ export class VoiceAssistantWebSocketServer {
   private sendToClient(ws: WebSocketLike, message: WSOutboundMessage): void {
     this.sendMessageToSockets([ws], message, true);
   }
+  private async sendSocketFrameAndWait(
+    ws: WebSocketLike,
+    frame: string,
+    bytes: number,
+    signal: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<{ sent: boolean; timedOut: boolean }> {
+    const cancellation = this.socketWriteCancellation(ws);
+    if (signal.aborted) return { sent: false, timedOut: false };
+    let timedOut = false;
+    const onRequestAbort = () => cancellation.abort();
+    signal.addEventListener("abort", onRequestAbort, { once: true });
+    const timeoutId =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            timedOut = true;
+            cancellation.abort();
+          }, timeoutMs);
+    try {
+      // Retain negotiated chunking, including its ordered physical drain callbacks.
+      await this.sendSocketFrame(ws, frame, bytes, true);
+      return { sent: true, timedOut: false };
+    } catch (error) {
+      if (cancellation.signal.aborted && error === cancellation.signal.reason)
+        return { sent: false, timedOut };
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+      signal.removeEventListener("abort", onRequestAbort);
+    }
+  }
 
   private sendMessageToSockets(
     sockets: Iterable<WebSocketLike>,
     message: WSOutboundMessage,
     reportRejection = false,
-  ): void {
-    const prepared = this.prepareJsonDelivery(sockets, message, reportRejection);
+    signal?: AbortSignal,
+    waitTimeoutMs?: number,
+  ): void | Promise<void> {
+    if (signal?.aborted) return;
+    const physicalSockets = [...sockets];
+    if (signal) {
+      const paced = this.prepareJsonDelivery(physicalSockets, message, reportRejection);
+      if (!paced) {
+        return Promise.all(
+          physicalSockets
+            .filter((ws) => ws.readyState !== 1)
+            .map((ws) => this.detachSocket(ws, {})),
+        ).then(() => undefined);
+      }
+      return Promise.all(
+        paced.sockets.map(async (ws) => {
+          try {
+            const { sent, timedOut } = await this.sendSocketFrameAndWait(
+              ws,
+              paced.payload,
+              paced.bytes,
+              signal,
+              waitTimeoutMs,
+            );
+            if (sent) {
+              this.runtimeMetrics.recordOutboundMessage(message, ws.bufferedAmount);
+            } else if (timedOut) {
+              const error = new Error("Timeline response send timed out");
+              this.logger.warn(
+                { messageType: message.type, timeoutMs: waitTimeoutMs },
+                "ws_timeline_response_timeout",
+              );
+              this.closePhysicalSocket({
+                ws,
+                logMessage: "Closing physical WebSocket after timeline response timeout",
+                logFields: { messageType: message.type, timeoutMs: waitTimeoutMs },
+              });
+              await this.detachSocket(ws, { error });
+            } else if (!signal.aborted) {
+              await this.detachSocket(ws, {});
+            }
+          } catch (error) {
+            // A failed write can precede the close event; cancel queued producers now.
+            this.closePhysicalSocket({
+              ws,
+              logMessage: "Closing physical WebSocket after send failure",
+              logFields: { err: error },
+            });
+            await this.detachSocket(ws, {
+              error: error instanceof Error ? error : new Error(String(error)),
+            });
+            throw error;
+          }
+        }),
+      ).then(() => undefined);
+    }
+    const prepared = this.prepareJsonDelivery(physicalSockets, message, reportRejection);
     if (!prepared) return;
     for (const ws of prepared.sockets) {
       this.sendFrameToClient(ws, prepared.payload, prepared.bytes, () => {
@@ -1308,6 +1405,16 @@ export class VoiceAssistantWebSocketServer {
   }
 
   private readonly chunkedSockets = new WeakMap<WebSocketLike, ChunkedTransport>();
+  private readonly socketWriteCancellations = new WeakMap<WebSocketLike, AbortController>();
+
+  private socketWriteCancellation(ws: WebSocketLike): AbortController {
+    let cancellation = this.socketWriteCancellations.get(ws);
+    if (!cancellation) {
+      cancellation = new AbortController();
+      this.socketWriteCancellations.set(ws, cancellation);
+    }
+    return cancellation;
+  }
 
   private chunkedSocket(ws: WebSocketLike): ChunkedTransport {
     let transport = this.chunkedSockets.get(ws);
@@ -1324,11 +1431,15 @@ export class VoiceAssistantWebSocketServer {
           const params = {
             socket: ws,
             frame,
+            signal: this.socketWriteCancellation(ws).signal,
             onHighWater: () => this.closeAtOutboundHighWater(ws),
           };
           if (waitForDrain)
             return sendBoundedPhysicalFrameAndWait(params).then((sent) => {
-              if (!sent) throw new Error("Source is closed");
+              if (!sent) {
+                params.signal.throwIfAborted();
+                throw new Error("Source is closed");
+              }
               return undefined;
             });
           if (!sendBoundedPhysicalFrame(params)) throw new Error("Source is closed");
@@ -1446,6 +1557,8 @@ export class VoiceAssistantWebSocketServer {
 
   private closePhysicalSocket(params: ClosePhysicalSocketParams): void {
     const { ws, logMessage, logFields } = params;
+    this.socketWriteCancellations.get(ws)?.abort();
+    this.chunkedSockets.get(ws)?.close();
     this.applicationSocketLease.release(ws);
     if (ws.readyState !== 1) {
       return;
@@ -1581,6 +1694,18 @@ export class VoiceAssistantWebSocketServer {
       onMessageToSource: async (source, msg) => {
         if (!connection || !connection.sockets.has(source as WebSocketLike)) {
           return;
+        }
+        if (
+          msg.type === "fetch_agent_timeline_response" ||
+          msg.type === "agent.provider_subagents.timeline.get.response"
+        ) {
+          return this.sendMessageToSockets(
+            [source as WebSocketLike],
+            wrapSessionMessage(msg),
+            true,
+            connection.session.delivery.requestSignal,
+            TIMELINE_RESPONSE_SEND_TIMEOUT_MS,
+          );
         }
         await this.sendMessageToClientAndWait(source as WebSocketLike, wrapSessionMessage(msg));
       },
@@ -2306,6 +2431,8 @@ export class VoiceAssistantWebSocketServer {
       error?: Error;
     },
   ): Promise<void> {
+    this.socketWriteCancellations.get(ws)?.abort();
+    this.chunkedSockets.get(ws)?.close();
     this.hostLinks.get(ws)?.close();
     this.hostLinks.delete(ws);
 

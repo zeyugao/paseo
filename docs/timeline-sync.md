@@ -55,6 +55,18 @@ recovery is complete only when `hasNewer: false`.
 
 Initialization timeouts guard lack of catch-up progress, not the full multi-page sync. A successful page that queues the next `after` page refreshes the watchdog.
 
+Root and provider-child history share a serial admission lane per physical source. Wait before
+loading or projecting the next response, then hold the lane until its physical send completes;
+queueing already materialized responses retains the same reconnect-burst memory spike. Other
+sources and control handlers bypass admission, although already enqueued frames can delay them.
+Preserve negotiated chunked framing for large windows. `limit: 0` still requests full history;
+server pacing does not require a client receipt or change the requested window.
+
+The complete send has a 120-second deadline, configurable at daemon startup with
+`PASEO_TIMELINE_RESPONSE_SEND_TIMEOUT_MS`. Failure or expiry detaches that source before releasing
+queued producers. Do not reset the deadline from `bufferedAmount` or `bytesWritten`: neither
+proves delivery to the peer.
+
 Opening or resuming an agent fetches the latest available turns with a soft target of 40
 projected items. Backward pages and prompt-jump windows also include whole turns, including
 all currently available rows of an active run. There is no per-turn cap: a large run can

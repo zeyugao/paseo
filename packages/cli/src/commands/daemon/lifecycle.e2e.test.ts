@@ -322,8 +322,8 @@ test.skipIf(process.platform === "win32")(
       await f.ok(["start", "--home", a, "--timeout", "30"]);
       await f.ok(["start", "--home", b, "--timeout", "30"], { PASEO_SERVER_ID: "live-b" });
       const beforeA = await f.liveStatus(a);
-      expect((await f.liveStatus(b)).serverId).toBe("live-b");
-      await f.ok(["restart", "--home", b, "--timeout", "30"]);
+      expect((await f.liveStatus(b, { PASEO_SERVER_ID: "live-b" })).serverId).toBe("live-b");
+      await f.ok(["restart", "--home", b, "--timeout", "30"], { PASEO_SERVER_ID: "live-b" });
       const bLock = JSON.parse(await readFile(path.join(b, "paseo.pid"), "utf8"));
       await writeFile(
         path.join(b, "paseo.pid"),
@@ -332,6 +332,7 @@ test.skipIf(process.platform === "win32")(
       await writeFile(path.join(b, "server-id"), beforeA.serverId);
       await f.ok(["daemon", "stop", "--home", b]);
       expect((await f.liveStatus(a)).workerPid).toBe(beforeA.workerPid);
+      await f.ok(["daemon", "stop", "--home", b], { PASEO_SERVER_ID: "live-b" });
     } finally {
       await f.close();
     }

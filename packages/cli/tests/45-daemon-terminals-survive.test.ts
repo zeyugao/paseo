@@ -91,9 +91,14 @@ async function terminalIds(): Promise<string[]> {
   return (await json<Array<{ id: string }>>(["terminal", "ls", "--all"])).map((t) => t.id);
 }
 
+function workerStateDirectory(): string {
+  const serverId = readFileSync(join(paseoHome, "server-id"), "utf8").trim();
+  return join(paseoHome, "daemons", serverId, "terminal-worker");
+}
+
 // Worker records and the cleanup records a kill that could not finish leaves beside them.
 function workerRecordCount(): number {
-  const dir = join(paseoHome, "terminal-worker");
+  const dir = workerStateDirectory();
   return existsSync(dir)
     ? readdirSync(dir).filter((name) => /^(\d+|closing-.+)\.json$/.test(name)).length
     : 0;
@@ -193,11 +198,11 @@ async function plantRecordNaming(programPid: number): Promise<void> {
       { id: "planted-terminal", pid: programPid, startedAt: await psField(programPid, "lstart") },
     ],
   };
-  writeFileSync(
-    join(paseoHome, "terminal-worker", `${workerPid}.json`),
-    `${JSON.stringify(record, null, 2)}\n`,
-    { mode: 0o600 },
-  );
+  const directory = workerStateDirectory();
+  await mkdir(directory, { recursive: true });
+  writeFileSync(join(directory, `${workerPid}.json`), `${JSON.stringify(record, null, 2)}\n`, {
+    mode: 0o600,
+  });
 }
 
 const trackedPids: number[] = [];
@@ -299,7 +304,9 @@ try {
   await paseo(["daemon", "start"]);
   // A kill cleanup cannot check what an unreadable record names, and leaves nothing else
   // behind, so the replacement daemon must still report it.
-  const unreadablePath = join(paseoHome, "terminal-worker", `${await goneProcessPid()}.json`);
+  const workerDirectory = workerStateDirectory();
+  await mkdir(workerDirectory, { recursive: true });
+  const unreadablePath = join(workerDirectory, `${await goneProcessPid()}.json`);
   writeFileSync(unreadablePath, "{ not json", { mode: 0o600 });
   const unreadable = await paseo(
     ["daemon", "restart", "--host", endpoint, "--kill-terminals"],

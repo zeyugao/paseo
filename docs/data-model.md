@@ -57,6 +57,8 @@ $PASEO_HOME/
 ├── paseo.pid                            # CLI discovery pointer held by one daemon (JSON {pid, startedAt, ...})
 ├── local-credential                     # CLI credential mirrored by the paseo.pid owner (mode 0600)
 ├── daemon.log                           # Default log file (path configurable)
+├── daemons/
+│   └── {serverId}/                      # Instance lease, keypair, credential and terminal-worker state
 ├── agents/
 │   └── {sanitized-cwd}/
 │       └── {agentId}.json               # One file per agent

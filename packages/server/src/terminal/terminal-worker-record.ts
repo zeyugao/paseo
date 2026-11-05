@@ -3,6 +3,15 @@ import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import { z } from "zod";
 import { writePrivateFileAtomicSync, writePrivateFileAtomic } from "../server/private-files.js";
+import { currentBootId, writtenDuringThisBoot } from "../server/pid-lock.js";
+import { readServerId, validateEnvironmentServerId } from "../server/server-id.js";
+import { getMachineId } from "../server/machine-id.js";
+import {
+  createTerminalWorkerProcessInspector,
+  readTerminalWorkerServerId,
+  type TerminalWorkerProcessInspector,
+} from "./terminal-worker-processes.js";
+import { connectTerminalWorker } from "./terminal-worker-client.js";
 
 // Owner-only metadata used to find and authenticate workers in the locked home.
 
@@ -67,12 +76,38 @@ export type TerminalWorkerRecordFile =
       record: TerminalWorkerRecord;
       // The worker's own record file, when it still exists.
       workerRecordPath: string | null;
+      legacyOwnershipPath?: string;
     }
   | { path: string; error: Error };
+
+interface TerminalWorkerRecordEntry {
+  path: string;
+  record: TerminalWorkerRecord;
+  legacyOwnershipPath?: string;
+}
+
+interface TerminalWorkerRecordCollection {
+  workers: TerminalWorkerRecordEntry[];
+  cleanups: TerminalWorkerRecordEntry[];
+  errors: TerminalWorkerRecordFile[];
+}
+
+interface LegacyWorkerOwnershipContext {
+  directory: string;
+  serverId: string;
+  machineId: string;
+  inspector: TerminalWorkerProcessInspector;
+}
 
 // The worker's command line carries this marker followed by its record id, so a reused pid
 // running some other process (even another worker) never matches the record.
 export const TERMINAL_WORKER_MARKER_ARG = "--paseo-terminal-worker";
+
+/** Worker state home only: never use this as the shell's PASEO_HOME. */
+export function terminalWorkerHome(paseoHome: string, serverId: string): string {
+  if (!serverId) throw new Error("Terminal worker requires a serverId");
+  return path.join(paseoHome, "daemons", validateEnvironmentServerId(serverId));
+}
 
 export function terminalWorkerDirectory(paseoHome: string): string {
   return path.join(paseoHome, "terminal-worker");
@@ -145,43 +180,183 @@ function recordKindOf(fileName: string): TerminalWorkerRecordKind | null {
 }
 
 /**
- * Every record in the home. A cleanup record is merged with the worker record of the same
- * record id: its closing state wins, and terminals the worker recorded since join it, so the
- * retry covers everything the worker still runs.
+ * Every record in the supplied worker state home (terminalWorkerHome for daemon callers).
+ * Scoped homes also include safely attributed legacy root workers, retaining a private
+ * machine-bound receipt for cleanup retries. A cleanup record merges with its worker:
+ * closing state wins and newly recorded programs join it, so retries cover every program.
  */
 export async function listTerminalWorkerRecords(
   paseoHome: string,
 ): Promise<TerminalWorkerRecordFile[]> {
   const directory = terminalWorkerDirectory(paseoHome);
-  let names: string[];
+  const names = await readTerminalWorkerRecordNames(directory);
+  const entries = await readTerminalWorkerRecordEntries(directory, names);
+  await collectLegacyTerminalWorkerRecords(paseoHome, names, entries);
+  return mergeTerminalWorkerRecords(entries);
+}
+
+async function readTerminalWorkerRecordNames(directory: string): Promise<string[]> {
   try {
-    names = await readdir(directory);
+    return await readdir(directory);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return [];
   }
-  const errors: TerminalWorkerRecordFile[] = [];
-  const workers: Array<{ path: string; record: TerminalWorkerRecord }> = [];
-  const cleanups: Array<{ path: string; record: TerminalWorkerRecord }> = [];
+}
+
+async function readTerminalWorkerRecordEntries(
+  directory: string,
+  names: string[],
+): Promise<TerminalWorkerRecordCollection> {
+  const entries: TerminalWorkerRecordCollection = { workers: [], cleanups: [], errors: [] };
   for (const name of names.sort()) {
     const kind = recordKindOf(name);
     if (!kind) continue;
     const recordPath = path.join(directory, name);
     try {
       const record = await readTerminalWorkerRecord(recordPath);
-      (kind === "worker" ? workers : cleanups).push({ path: recordPath, record });
+      const target = kind === "worker" ? entries.workers : entries.cleanups;
+      target.push({ path: recordPath, record });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      errors.push({
+      entries.errors.push({
         path: recordPath,
         error: error instanceof Error ? error : new Error(String(error)),
       });
     }
   }
+  return entries;
+}
+
+function isCurrentLegacyWorker(record: TerminalWorkerRecord, bootId: string | null): boolean {
+  return (
+    writtenDuringThisBoot({ startedAt: record.createdAt, bootId: record.bootId }) &&
+    record.bootId === bootId &&
+    RECORD_ID_PATTERN.test(record.recordId)
+  );
+}
+
+// Old workers still rewrite their root record. Attribute them only to the original home
+// identity and local machine; foreign, old-boot and otherwise ambiguous state stays untouched.
+async function collectLegacyTerminalWorkerRecords(
+  paseoHome: string,
+  names: string[],
+  entries: TerminalWorkerRecordCollection,
+): Promise<void> {
+  const instances = path.dirname(paseoHome);
+  if (path.basename(instances) !== "daemons") return;
+  const root = path.dirname(instances);
+  const serverId = path.basename(paseoHome);
+  if (readServerId(root, {}) !== serverId) return;
+  const bootId = currentBootId();
+  const directory = terminalWorkerDirectory(paseoHome);
+  const legacyFiles = await listTerminalWorkerRecords(root);
+  let context: LegacyWorkerOwnershipContext | null = null;
+  for (const file of legacyFiles) {
+    if (!("record" in file) || !isCurrentLegacyWorker(file.record, bootId)) continue;
+    context ??= {
+      directory,
+      serverId,
+      machineId: await getMachineId(),
+      inspector: createTerminalWorkerProcessInspector(),
+    };
+    const legacyOwnershipPath = await preserveLegacyWorkerOwnership(file.record, context);
+    if (!legacyOwnershipPath) continue;
+    // Merge a scoped cleanup intent with the legacy worker it belongs to, too.
+    if (file.path !== file.workerRecordPath)
+      entries.cleanups.push({ ...file, legacyOwnershipPath });
+    if (file.workerRecordPath) {
+      entries.workers.push({
+        path: file.workerRecordPath,
+        record: file.record,
+        legacyOwnershipPath,
+      });
+    }
+  }
+  await retireLegacyOwnershipReceipts(directory, names, legacyFiles);
+}
+
+async function isLocallyOwnedLegacyWorker(
+  record: TerminalWorkerRecord,
+  context: LegacyWorkerOwnershipContext,
+): Promise<boolean> {
+  // Birth times only guard the environment read against pid reuse. Legacy record identity
+  // fields are not evidence: the authenticated socket must name this same live process.
+  const firstInspection = await context.inspector.inspect(record.pid);
+  if (firstInspection.status !== "alive" || !firstInspection.snapshot.startedAt) return false;
+  let override: string | null;
+  try {
+    override = await readTerminalWorkerServerId(record.pid);
+  } catch {
+    return false; // No inspectable environment means ownership remains ambiguous.
+  }
+  if (override !== null && override !== context.serverId) return false;
+  try {
+    const connection = await connectTerminalWorker({
+      socketPath: record.socketPath,
+      secret: record.secret,
+      timeoutMs: 1000,
+    });
+    try {
+      if (connection.workerPid !== record.pid) return false;
+      const lastInspection = await context.inspector.inspect(record.pid);
+      return (
+        lastInspection.status === "alive" &&
+        lastInspection.snapshot.startedAt === firstInspection.snapshot.startedAt
+      );
+    } finally {
+      connection.disconnect();
+    }
+  } catch {
+    return false; // An unreachable or unauthenticated socket cannot prove local ownership.
+  }
+}
+
+async function preserveLegacyWorkerOwnership(
+  record: TerminalWorkerRecord,
+  context: LegacyWorkerOwnershipContext,
+): Promise<string | null> {
+  const ownershipPath = path.join(context.directory, `legacy-owner-${record.recordId}.json`);
+  const proof = `${JSON.stringify({
+    machineId: context.machineId,
+    recordId: record.recordId,
+    pid: record.pid,
+    bootId: record.bootId,
+    createdAt: record.createdAt,
+    socketPath: record.socketPath,
+  })}\n`;
+  const recorded = await readRecordFile(ownershipPath).catch(() => null);
+  if (recorded === proof) return ownershipPath;
+  if (!(await isLocallyOwnedLegacyWorker(record, context))) return null;
+  // Preserve the proven owner for retries after the legacy worker dies.
+  await writePrivateFileAtomic(ownershipPath, proof);
+  return ownershipPath;
+}
+
+async function retireLegacyOwnershipReceipts(
+  directory: string,
+  names: string[],
+  legacyFiles: TerminalWorkerRecordFile[],
+): Promise<void> {
+  if (legacyFiles.some((file) => "error" in file)) return;
+  const retained = new Set(
+    legacyFiles.flatMap((file) => ("record" in file ? [file.record.recordId] : [])),
+  );
+  // An old worker deletes its root record on exit, but cannot remove our scoped receipt.
+  for (const name of names) {
+    const receipt = /^legacy-owner-([A-Za-z0-9-]+)\.json$/.exec(name);
+    if (!receipt || retained.has(receipt[1]!)) continue;
+    await rm(path.join(directory, name), { force: true });
+  }
+}
+
+function mergeTerminalWorkerRecords(
+  entries: TerminalWorkerRecordCollection,
+): TerminalWorkerRecordFile[] {
   const files: TerminalWorkerRecordFile[] = [];
   const merged = new Set<string>();
-  for (const cleanup of cleanups) {
-    const worker = workers.find(
+  for (const cleanup of entries.cleanups) {
+    const worker = entries.workers.find(
       (entry) =>
         entry.record.recordId === cleanup.record.recordId &&
         entry.record.pid === cleanup.record.pid,
@@ -195,13 +370,14 @@ export async function listTerminalWorkerRecords(
       path: cleanup.path,
       record: { ...cleanup.record, terminals: [...cleanup.record.terminals, ...added] },
       workerRecordPath: worker?.path ?? null,
+      ...(cleanup.legacyOwnershipPath ? { legacyOwnershipPath: cleanup.legacyOwnershipPath } : {}),
     });
   }
-  for (const worker of workers) {
+  for (const worker of entries.workers) {
     if (merged.has(worker.path)) continue;
-    files.push({ path: worker.path, record: worker.record, workerRecordPath: worker.path });
+    files.push({ ...worker, workerRecordPath: worker.path });
   }
-  return [...files, ...errors];
+  return [...files, ...entries.errors];
 }
 
 /**
@@ -212,6 +388,7 @@ export async function retireTerminalWorkerRecord(file: {
   path: string;
   record: TerminalWorkerRecord;
   workerRecordPath: string | null;
+  legacyOwnershipPath?: string;
 }): Promise<void> {
   if (file.path !== file.workerRecordPath) await rm(file.path, { force: true });
   if (file.workerRecordPath) {
@@ -221,6 +398,7 @@ export async function retireTerminalWorkerRecord(file: {
   if (process.platform !== "win32") {
     await rm(file.record.socketPath, { force: true });
   }
+  if (file.legacyOwnershipPath) await rm(file.legacyOwnershipPath, { force: true });
 }
 
 // True when the file now belongs to another worker, or cannot be read to tell.

@@ -7,6 +7,10 @@ stay with their owning daemon.
 This is server-side behavior. Clients need no changes: each daemon has its own
 `serverId`, so the app's existing multi-host support shows one host per machine.
 
+Schedule ownership is persisted privately by the server and is omitted from RPC and MCP
+schedule responses. Startup acquires the instance lease before activating terminal
+workers, repairing running statuses or recording resume intent. Foreign agent records,
+including records in foreign workspaces, are never repaired or resumed as writers here.
 
 ## Setup
 
@@ -53,6 +57,15 @@ The reverse also holds: a pairing offer generated after the first daemon boot mi
 that daemon's keypair to the legacy root `daemon-keypair.json`, so the CLI keeps reading
 the home root and offers always carry the live daemon's public key.
 
+`paseo.pid` remains a legacy discovery pointer, not mutual exclusion. Local discovery
+selects the requested serverId's registration, verifies machine and process birth
+identities, and reads that daemon's credential. Another host's root pointer is left alone.
+Registrations publish their listen address only after startup succeeds. Status reads do
+not create server or machine identities.
+
+On macOS, keep a previously persisted fallback machine ID even when the corrected
+hardware UUID query starts working. Changing that identity during an upgrade would
+invalidate the live local registrations and legacy-worker ownership receipts.
 
 Cross-daemon visibility is pull-based: the project/workspace registries reload when the
 file's mtime or size changes underneath them, and agent storage rescans the `agents/`
@@ -62,6 +75,9 @@ one journal.
 
 ## Known limitations
 
+- Remote instance/pid leases use file mtime. Keep machine clocks NTP-synced and mount
+  with normal attribute caching; clock skew or aggressive `actimeo` can make a remote
+  daemon look stale. A verified live local process is not reclaimed for stale mtime alone.
 - The shared storage must provide cross-client `flock`/`lockf` semantics (stock NFS
   with network locking; not `local_lock=local`). Instance and pid reclaims, schedule
   claim release, and label commits all rely on it.

@@ -136,32 +136,17 @@ function logFilePath(): string {
   return path.join(getPaseoHome(), DAEMON_LOG_FILENAME);
 }
 
-export function isDesktopManagedDaemonRunningSync(): boolean {
-  if (!ownedLaunch) return false;
-  try {
-    const lock = JSON.parse(readFileSync(path.join(ownedLaunch.home, "paseo.pid"), "utf8"));
-    return isSameDaemonInstance(lock, ownedLaunch.instance) && isProcessRunning(lock.pid);
-  } catch {
-    return false;
-  }
+export async function isDesktopManagedDaemonRunning(): Promise<boolean> {
+  const launch = ownedLaunch;
+  if (!launch) return false;
+  const instance = await readDaemonInstance(launch.home);
+  return instance !== null && isSameDaemonInstance(instance, launch.instance);
 }
 
 export async function stopDesktopDaemonViaCli(
   reason: DesktopDaemonStopReason = DEFAULT_DESKTOP_DAEMON_STOP_REASON,
 ): Promise<void> {
   await stopDesktopDaemon(reason);
-}
-
-function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    if (typeof err === "object" && err !== null && "code" in err && err.code === "EPERM") {
-      return true;
-    }
-    return false;
-  }
 }
 
 function logDesktopDaemonLifecycle(message: string, details?: Record<string, unknown>): void {

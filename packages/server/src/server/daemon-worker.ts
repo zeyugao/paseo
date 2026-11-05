@@ -4,8 +4,10 @@ import { initializeEnvironmentProxy } from "./network/index.js";
 import { createPaseoDaemon, formatListenTarget } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
 import { resolvePaseoHome } from "./paseo-home.js";
+import { daemonLogPath } from "./daemon-instance.js";
 import { createRootLogger } from "./logger.js";
 import type { DaemonLifecycleIntent } from "./bootstrap.js";
+import { releaseDaemonInstanceSync } from "./daemon-instance-registry.js";
 import { getProcessDiagnostics } from "./process-diagnostics.js";
 
 process.title = "Paseo Daemon";
@@ -51,7 +53,7 @@ function writeWorkerLifecycleLog(
   fields: Record<string, unknown> = {},
 ): void {
   try {
-    const logPath = path.join(paseoHome, "daemon.log");
+    const logPath = daemonLogPath(paseoHome);
     mkdirSync(path.dirname(logPath), { recursive: true });
     appendFileSync(
       logPath,
@@ -68,6 +70,35 @@ function writeWorkerLifecycleLog(
   } catch {
     // Exit-reason logging must never prevent the worker from exiting.
   }
+}
+
+export interface DaemonWorkerLeaseLostHandlerOptions {
+  paseoHome: string;
+  onLeaseLost?: (error: unknown) => void;
+  exit?: (code: number) => void;
+}
+
+/**
+ * Creates the worker-side terminal action for a lost daemon-instance lease.
+ * The handler is idempotent: only the first lease-loss notification can exit the worker.
+ */
+export function createDaemonWorkerLeaseLostHandler(
+  options: DaemonWorkerLeaseLostHandlerOptions,
+): (error: unknown) => void {
+  let handled = false;
+  return (error: unknown) => {
+    if (handled) return;
+    handled = true;
+    writeWorkerLifecycleLog(options.paseoHome, "Daemon instance lease lost; worker exiting", {
+      error: error instanceof Error ? error.message : String(error),
+      ...getProcessDiagnostics(),
+    });
+    try {
+      options.onLeaseLost?.(error);
+    } finally {
+      (options.exit ?? ((code: number) => process.exit(code)))(1);
+    }
+  };
 }
 
 function bootstrapFromEnvironment(): BootstrapResult {
@@ -293,6 +324,17 @@ async function main() {
       // The supervisor owns the worker's stdout/stderr pipes. Once it is gone,
       // logging during graceful shutdown can block on the broken pipe and leave
       // the daemon orphaned, so supervisor loss is a hard process boundary.
+      // Release the instance lease synchronously (no child processes — the
+      // tree-kill test expects the whole process tree to die): without it,
+      // the fresh mtime blocks restarts for up to 120 seconds.
+      const serverId = daemon?.getServerId() ?? process.env.PASEO_SERVER_ID;
+      if (serverId) {
+        try {
+          releaseDaemonInstanceSync(paseoHome, serverId, process.pid);
+        } catch {
+          // Best-effort only; the lease goes stale in 120s regardless.
+        }
+      }
       process.exit(0);
     };
 
@@ -342,6 +384,7 @@ async function main() {
       {
         ...config,
         onLifecycleIntent: handleLifecycleIntent,
+        onLeaseLost: createDaemonWorkerLeaseLostHandler({ paseoHome }),
       },
       logger,
     );

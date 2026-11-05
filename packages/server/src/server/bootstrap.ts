@@ -15,6 +15,7 @@ import { createServer as createHTTPServer, type IncomingMessage, type ServerResp
 import { constants, existsSync, unlinkSync } from "fs";
 import { open, rm, stat } from "fs/promises";
 import { randomUUID } from "node:crypto";
+import type { Socket } from "node:net";
 import { getHostName } from "./host-name.js";
 import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -237,7 +238,7 @@ import {
 import { setupAutoArchiveOnMerge } from "./auto-archive-on-merge/index.js";
 import { wrapSessionMessage, type SessionOutboundMessage } from "./messages.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
-import { startWorkerTerminalManager } from "../terminal/worker-terminal-manager.js";
+import { createDeferredWorkerTerminalManager } from "../terminal/worker-terminal-manager.js";
 import { applyTerminalAgentHookSetting } from "../terminal/agent-hooks/terminal-agent-hook-setting.js";
 import { loadOrCreateDaemonKeyPair } from "./daemon-keypair.js";
 import {
@@ -779,13 +780,8 @@ export async function createPaseoDaemon(
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, { serverId, logger });
   const managedProcesses = createBootstrapManagedProcessRegistry(config, serverId, logger);
-  // Reconcile the helper-process ledger in the background so it never blocks the
-  // daemon from coming up; terminating a live leftover can take a few seconds.
-  // Best-effort, so a failure is logged here rather than crashing startup.
-  void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
-    logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
-  });
   let relayRuntime: RelayRuntime | null = null;
+  let daemonInstanceRegistration: DaemonInstanceRegistration | null = null;
 
   const staticDir = config.staticDir;
   const downloadTokenTtlMs = config.downloadTokenTtlMs ?? 60000;
@@ -812,8 +808,9 @@ export async function createPaseoDaemon(
   });
   let boundListenTarget: ListenTarget | null = null;
   let workspaceRegistry: FileBackedWorkspaceRegistry | null = null;
-  const terminalManager = await startWorkerTerminalManager({
+  const terminalManager = createDeferredWorkerTerminalManager({
     paseoHome: config.paseoHome,
+    serverId,
     paseoVersion: daemonVersion,
     logger,
     getTerminalActivityUrl: () => createTerminalActivityUrl(boundListenTarget),
@@ -931,6 +928,7 @@ export async function createPaseoDaemon(
   mountWebUi(app, config, logger);
 
   let localCredential: string | null = null;
+  let mirrorsLegacyCredential = false;
   const daemonAuth = { ...config.auth, localCredential: () => localCredential };
   app.use(
     createRequireBearerMiddleware(daemonAuth, (context) => {
@@ -1018,6 +1016,14 @@ export async function createPaseoDaemon(
   });
 
   const httpServer = createHTTPServer(app);
+  // Track every accepted socket from birth so shutdown can destroy any that
+  // closeAllConnections() leaves behind (e.g. an unanswered WebSocket upgrade
+  // request arriving after the WS server stopped listening for upgrades).
+  const httpServerSockets = new Set<Socket>();
+  httpServer.on("connection", (socket) => {
+    httpServerSockets.add(socket);
+    socket.on("close", () => httpServerSockets.delete(socket));
+  });
 
   // Script proxy WebSocket upgrade handler — must be registered before the
   // VoiceAssistantWebSocketServer attaches its own "upgrade" listener so that
@@ -1164,7 +1170,6 @@ export async function createPaseoDaemon(
       sendPromptToAgent({ agentId, prompt, agentManager, agentStorage, logger, unarchive: false }),
     report: (agentId, err) => logger.error({ agentId, err }, "Agent restart recovery failed"),
   });
-  await restartRecovery.prepareStartup();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
   await bootstrapWorkspaceRegistries({
     serverId,
@@ -1603,8 +1608,8 @@ export async function createPaseoDaemon(
       assertCwdWorkspaceOwnedByThisServer(cwd, workspaceRegistry, serverId),
     resolveCwdWorkspaceHost: (cwd) => resolveCwdWorkspaceHost(cwd, workspaceRegistry),
   });
-  await scheduleService.start();
-
+  // Deferred to start() after the instance lease is held: a rejected
+  // competitor must never interrupt the live daemon's schedule recovery.
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {
       await scheduleService.completeForAgent(agentId);
@@ -1886,11 +1891,44 @@ export async function createPaseoDaemon(
   }
 
   logger.info({ elapsed: elapsed() }, "Bootstrap complete, ready to start listening");
+  // Defined before `start` so the heartbeat callback can trigger it without a
+  // promise chain inside a callback; `stop` is defined by the time it runs.
+  const shutdownAfterLeaseLoss = async (leaseError: unknown): Promise<void> => {
+    try {
+      await stop();
+    } catch (stopError) {
+      logger.error({ err: stopError, serverId }, "Shutdown after lease loss failed");
+    } finally {
+      config.onLeaseLost?.(leaseError);
+    }
+  };
+  const handleDaemonInstanceHeartbeatError = createDaemonInstanceHeartbeatErrorHandler({
+    serverId,
+    logger,
+    shutdown: (error) => void shutdownAfterLeaseLoss(error),
+  });
 
   const start = async () => {
     let mainStarted = false;
     try {
-      localCredential = await writeLocalCredential(config.paseoHome);
+      const registration = await registerDaemonInstance(config.paseoHome, serverId, {
+        onHeartbeatError: handleDaemonInstanceHeartbeatError,
+      });
+      daemonInstanceRegistration = registration;
+      await terminalManager.activate();
+      await restartRecovery.prepareStartup();
+      // Reconcile only after this daemon owns the instance lease. A rejected
+      // competitor must never terminate helpers owned by the live daemon.
+      // Best-effort and backgrounded because terminating leftovers can take seconds.
+      void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
+        logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
+      });
+      await scheduleService.start();
+      mirrorsLegacyCredential = process.env.PASEO_PID_LOCK_OWNER !== "0";
+      localCredential = await writeLocalCredential(config.paseoHome, {
+        serverId,
+        mirrorLegacy: mirrorsLegacyCredential,
+      });
       if (serviceProxyListenTarget) {
         const boundServiceProxyTarget = await serviceProxy.startStandalone({
           listenTarget: serviceProxyListenTarget,
@@ -2101,9 +2139,19 @@ export async function createPaseoDaemon(
       // model loading doesn't block the server from accepting connections.
       speechService.start();
       scriptHealthMonitor.start();
+      await registration.updateListen(formatListenTarget(boundListenTarget)!);
     } catch (error) {
+      const credentialToDelete = localCredential;
       localCredential = null;
-      await deleteLocalCredential(config.paseoHome);
+      if (credentialToDelete !== null) {
+        await deleteLocalCredential(config.paseoHome, {
+          serverId,
+          token: credentialToDelete,
+          deleteLegacy: mirrorsLegacyCredential,
+        }).catch((deleteError) => {
+          logger.warn({ err: deleteError, serverId }, "Failed to delete local credential");
+        });
+      }
       unsubscribePluginProviders();
       unsubscribePluginSessionChanges();
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
@@ -2111,8 +2159,15 @@ export async function createPaseoDaemon(
       await agentProviderRuntime.shutdown().catch(() => undefined);
       if (mainStarted) {
         httpServer.closeAllConnections();
-        await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+        // Promise.withResolvers is unavailable under the ES2023 lib target.
+        await new Promise<void>((resolve) => {
+          httpServer.close(() => resolve());
+        });
       }
+      await daemonInstanceRegistration?.release().catch((releaseError) => {
+        logger.warn({ err: releaseError, serverId }, "Failed to release daemon instance registry");
+      });
+      daemonInstanceRegistration = null;
       throw error;
     }
   };
@@ -2120,70 +2175,90 @@ export async function createPaseoDaemon(
   const stop = async (options?: { keepTerminals?: boolean }) => {
     const keepTerminals = options?.keepTerminals === true;
     let terminalShutdownError: unknown = null;
+    const credentialToDelete = localCredential;
     localCredential = null;
-    await deleteLocalCredential(config.paseoHome);
-    // Stop tracking plugin provider registrations before anything tears plugins
-    // down, so plugin shutdown cannot withdraw a provider from under an agent
-    // that is still open. Plugins themselves are stopped once every session
-    // they serve has been closed, further down.
-    unsubscribePluginProviders();
-    unsubscribePluginSessionChanges();
-    await hubRelationships.stop();
-    workspaceReconciliation.dispose();
-    scriptHealthMonitor.stop();
-    unsubscribeIdleRuntimeCleanup();
-    await idleRuntimeCleanup.close();
-    // Freeze both ingress and registration before taking the agent closure snapshot.
-    wsServer?.prepareForShutdown();
-    await finishSubscriptions.close();
-    await wsServer?.agentMessages.close();
-    agentManager.prepareForShutdown();
-    await restartRecovery.captureRunningAgents();
-    await closeAllAgents(logger, agentManager);
-    await withTimeout({
-      promise: pluginRuntime.drainEvents(),
-      timeoutMs: AGENT_CLOSE_TIMEOUT_MS,
-      label: "drain plugin lifecycle events",
-    }).catch((error) => logger.warn({ err: error }, "Plugin lifecycle events did not finish"));
-    await agentManager.flushForShutdown().catch(() => undefined);
-    detachAgentStoragePersistence();
-    await agentStorage.flush().catch(() => undefined);
-    await agentProviderRuntime.shutdown();
-    await pluginRuntime.stopAllPlugins();
     try {
-      if (keepTerminals) {
-        await terminalManager.detach();
-        logger.info("Terminals left running for the next daemon");
-      } else {
-        await terminalManager.closeTerminals();
+      if (credentialToDelete !== null) {
+        await deleteLocalCredential(config.paseoHome, {
+          serverId,
+          token: credentialToDelete,
+          deleteLegacy: mirrorsLegacyCredential,
+        }).catch((error) => {
+          logger.warn({ err: error, serverId }, "Failed to delete local credential");
+        });
       }
-    } catch (error) {
-      // Finish the rest of the shutdown, then report it: the supervisor and `daemon stop`
-      // retry the cleanup from the record the reaper kept.
-      terminalShutdownError = error;
-      logger.error({ err: error }, "Terminal shutdown failed");
-    }
-    await speechService.stop();
-    await scheduleService.stop().catch(() => undefined);
-    await relayRuntime?.stop().catch(() => undefined);
-    if (wsServer) {
-      await wsServer.close();
-    }
-    await serviceProxy.stopStandalone();
-    // Force-drop remaining sockets so httpServer.close() resolves promptly.
-    // We've already closed wsServer (which sent ws-layer close frames) and
-    // stopped every other service, so anything still attached is a TCP
-    // socket whose higher-level shutdown hasn't fully released it (e.g.
-    // upgraded WS sockets in the closing handshake, or HTTP keep-alive
-    // sockets in CLOSE_WAIT). closeIdleConnections() does not catch
-    // upgraded sockets, so we use closeAllConnections() here.
-    httpServer.closeAllConnections();
-    await new Promise<void>((resolve) => {
-      httpServer.close(() => resolve());
-    });
-    // Clean up socket files
-    if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
-      unlinkSync(listenTarget.path);
+      // Stop tracking plugin provider registrations before anything tears plugins
+      // down, so plugin shutdown cannot withdraw a provider from under an agent
+      // that is still open. Plugins themselves are stopped once every session
+      // they serve has been closed, further down.
+      unsubscribePluginProviders();
+      unsubscribePluginSessionChanges();
+      await hubRelationships.stop();
+      workspaceReconciliation.dispose();
+      scriptHealthMonitor.stop();
+      unsubscribeIdleRuntimeCleanup();
+      await idleRuntimeCleanup.close();
+      // Freeze both ingress and registration before taking the agent closure snapshot.
+      wsServer?.prepareForShutdown();
+      await finishSubscriptions.close();
+      await wsServer?.agentMessages.close();
+      agentManager.prepareForShutdown();
+      await restartRecovery.captureRunningAgents();
+      await closeAllAgents(logger, agentManager);
+      await withTimeout({
+        promise: pluginRuntime.drainEvents(),
+        timeoutMs: AGENT_CLOSE_TIMEOUT_MS,
+        label: "drain plugin lifecycle events",
+      }).catch((error) => logger.warn({ err: error }, "Plugin lifecycle events did not finish"));
+      await agentManager.flushForShutdown().catch(() => undefined);
+      detachAgentStoragePersistence();
+      await agentStorage.flush().catch(() => undefined);
+      await agentProviderRuntime.shutdown();
+      await pluginRuntime.stopAllPlugins();
+      try {
+        if (keepTerminals) {
+          await terminalManager.detach();
+          logger.info("Terminals left running for the next daemon");
+        } else {
+          await terminalManager.closeTerminals();
+        }
+      } catch (error) {
+        // Finish the rest of the shutdown, then report it: the supervisor and `daemon stop`
+        // retry the cleanup from the record the reaper kept.
+        terminalShutdownError = error;
+        logger.error({ err: error }, "Terminal shutdown failed");
+      }
+      await speechService.stop();
+      await scheduleService.stop().catch(() => undefined);
+      await relayRuntime?.stop().catch(() => undefined);
+      if (wsServer) {
+        await wsServer.close();
+      }
+      await serviceProxy.stopStandalone();
+      // Close the listener before dropping connections so the accept path is
+      // dead first: a client reconnecting between closeAllConnections() and
+      // close() would otherwise be accepted and keep the close callback
+      // pending forever. Once the WebSocket server has finished closing, its
+      // upgrade listener is gone and an unanswered upgrade request can also
+      // leak a half-closed socket that closeAllConnections() leaves behind,
+      // so destroy every tracked socket as a final sweep.
+      const httpServerClosed = new Promise<void>((resolve) => {
+        httpServer.close(() => resolve());
+      });
+      httpServer.closeAllConnections();
+      for (const socket of httpServerSockets) {
+        socket.destroy();
+      }
+      await httpServerClosed;
+      // Clean up socket files
+      if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
+        unlinkSync(listenTarget.path);
+      }
+    } finally {
+      await daemonInstanceRegistration?.release().catch((error) => {
+        logger.warn({ err: error, serverId }, "Failed to release daemon instance registry");
+      });
+      daemonInstanceRegistration = null;
     }
     if (terminalShutdownError) {
       throw terminalShutdownError;

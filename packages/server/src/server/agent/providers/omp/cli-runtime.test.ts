@@ -116,6 +116,22 @@ function exitOnCommand(child: OmpChild, type: string): void {
   });
 }
 
+function writeResponse(
+  child: OmpChild,
+  command: Record<string, unknown>,
+  data: unknown = {},
+): void {
+  child.stdout.write(
+    `${JSON.stringify({
+      id: command.id,
+      type: "response",
+      command: command.type,
+      success: true,
+      data,
+    })}\n`,
+  );
+}
+
 function withoutRequestId(command: Record<string, unknown>): Record<string, unknown> {
   const { id: _id, ...rest } = command;
   return rest;
@@ -164,6 +180,70 @@ describe("OMP CLI runtime", () => {
     }
     await session.close();
   });
+  test("waits for the matching steer acknowledgement", async () => {
+    const child = createOmpChild();
+    const pendingCommand = capturePendingCommand(child, "steer");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+    try {
+      let settled = false;
+      const images = [{ type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" }];
+      const steer = session.steer("change course", images).then(() => {
+        settled = true;
+        return undefined;
+      });
+      const command = await pendingCommand;
+      expect(command).toEqual({
+        type: "steer",
+        id: expect.any(String),
+        message: "change course",
+        images,
+      });
+      writeResponse(child, { ...command, id: "unrelated-request" });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      writeResponse(child, command);
+      await steer;
+      expect(settled).toBe(true);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("surfaces a rejected steer acknowledgement", async () => {
+    const child = createOmpChild();
+    const pendingCommand = capturePendingCommand(child, "steer");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+    try {
+      const steer = session.steer("change course");
+      const command = await pendingCommand;
+      const rejection = expect(steer).rejects.toThrow("steer rejected");
+      child.stdout.write(
+        `${JSON.stringify({ id: command.id, type: "response", command: "steer", success: false, error: "steer rejected" })}\n`,
+      );
+      await rejection;
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("times out a steer with no acknowledgement", async () => {
+    vi.useFakeTimers();
+    const child = createOmpChild();
+    const session = await createRuntime(child, [], { requestTimeoutMs: 100 }).startSession({
+      cwd: "/workspace/project",
+    });
+    try {
+      const rejection = expect(session.steer("change course")).rejects.toThrow(
+        "OMP RPC request timed out phase=steer",
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+      await session.close();
+    }
+  });
+
   test("uses the configured RPC timeout and attributes the pending phase", async () => {
     vi.useFakeTimers();
     const child = createOmpChild();
@@ -615,6 +695,47 @@ describe("OMP CLI runtime", () => {
       status: "error",
       error: { message: "No API key found for anthropic." },
     });
+  });
+
+  test("prompt waits beyond the default control-plane timeout for a late response", async () => {
+    vi.useFakeTimers();
+    const child = createOmpChild();
+    const pendingPrompt = capturePendingCommand(child, "prompt");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+
+    try {
+      const promptPromise = session.prompt({ message: "continue" });
+      const promptCommand = await pendingPrompt;
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(promptCommand).toMatchObject({
+        type: "prompt",
+        message: "continue",
+        id: expect.any(String),
+      });
+
+      writeResponse(child, promptCommand, {});
+
+      await expect(promptPromise).resolves.toEqual({ requestId: "req_1" });
+    } finally {
+      vi.useRealTimers();
+      await session.close();
+    }
+  });
+
+  test("prompt without a wall-clock timeout rejects when the session closes", async () => {
+    const child = createOmpChild();
+    const pendingPrompt = capturePendingCommand(child, "prompt");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+
+    const promptPromise = session.prompt({ message: "hello" });
+    const promptCommand = await pendingPrompt;
+    expect(promptCommand).toMatchObject({ type: "prompt", id: expect.any(String) });
+
+    const rejection = expect(promptPromise).rejects.toThrow("OMP RPC session is closed");
+    await session.close();
+
+    await rejection;
   });
 
   test("negotiates RPC protocol v2 when OMP advertises it", async () => {

@@ -49,6 +49,12 @@ import {
 
 const DEFAULT_OMP_COMMAND: [string, ...string[]] = [process.env.OMP_COMMAND ?? "omp"];
 const DEFAULT_COMMANDS_RPC_NAME = "get_available_commands";
+/**
+ * OMP can run auto-compaction before acknowledging a prompt, so the ack lags
+ * behind LLM summarization by minutes. Wait on the process/session lifecycle
+ * instead of the control-plane timeout.
+ */
+const OMP_PROMPT_REQUEST_TIMEOUT_MS = JSONL_RPC_NO_TIMEOUT;
 
 export interface OmpCliRuntimeOptions {
   logger: Logger;
@@ -166,12 +172,15 @@ class OmpCliRuntimeSession implements OmpRuntimeSession {
   }
 
   async prompt({ message, images, streamingBehavior }: OmpPromptInput): Promise<OmpPromptAck> {
-    const { id: requestId, promise } = this.process.startRequest({
-      type: "prompt",
-      message,
-      ...(images?.length ? { images } : {}),
-      ...(streamingBehavior ? { streamingBehavior: streamingBehavior } : {}),
-    });
+    const { id: requestId, promise } = this.process.startRequest(
+      {
+        type: "prompt",
+        message,
+        ...(images?.length ? { images } : {}),
+        ...(streamingBehavior ? { streamingBehavior: streamingBehavior } : {}),
+      },
+      OMP_PROMPT_REQUEST_TIMEOUT_MS,
+    );
     const ack = OmpPromptAckSchema.parse(await promise) ?? {};
     return { requestId, ...ack };
   }

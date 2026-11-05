@@ -114,6 +114,7 @@ import {
 import { DEFAULT_OMP_THINKING_LEVEL, mapOmpModel } from "./map-omp-model.js";
 
 const OMP_PROVIDER = "omp";
+const OMP_STEER_DRAIN_TIMEOUT_MS = 2_000;
 const OMP_CORE_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
   supportsSessionPersistence: true,
@@ -692,8 +693,23 @@ export class OmpAgentSession implements AgentSession {
   private readonly pendingExtensionUiRequests = new Map<string, AgentPermissionRequest>();
   private readonly questionUi = new OmpQuestionUi();
   private activeTurnId: string | null = null;
+  // Held from the admission check until activeTurnId is assigned so a prompt
+  // arriving while queued steers drain still rejects synchronously.
+  private turnAdmissionPending = false;
   private readonly pendingClientMessages: Array<{ clientMessageId: string | null; text: string }> =
     [];
+  private pendingSteerSubmissions: Array<{
+    text: string;
+    clientMessageId: string | null;
+    clientRecord: { clientMessageId: string | null; text: string };
+  }> = [];
+  private suppressingUnreadSteerRun = false;
+  private pendingSteerDrain: {
+    promise: Promise<boolean>;
+    resolve: (drained: boolean) => void;
+    timer: NodeJS.Timeout;
+  } | null = null;
+  private steerDrainBlocked = false;
   private activeAssistantMessageId: string | null = null;
   private activeTurnTerminalAssistantMessage: OmpAgentMessage | null = null;
   private activeTurnStarted = false;
@@ -854,8 +870,17 @@ export class OmpAgentSession implements AgentSession {
     streamingBehavior?: "steer" | "followUp";
     announceTurn?: boolean;
   }): Promise<StartTurnResult> {
-    if (this.activeTurnId) {
+    if (this.activeTurnId || this.turnAdmissionPending) {
       throw new Error("An OMP turn is already active");
+    }
+    this.turnAdmissionPending = true;
+    try {
+      await this.waitForPendingSteerDrain();
+      if (this.activeTurnId) {
+        throw new Error("An OMP turn became active while waiting for queued steers");
+      }
+    } finally {
+      this.turnAdmissionPending = false;
     }
 
     const turnId = randomUUID();
@@ -867,6 +892,8 @@ export class OmpAgentSession implements AgentSession {
     this.outOfBandTurnStartAnnounced = false;
     this.activeTurnHasUserMessage = false;
     this.activePromptRequestId = null;
+    this.pendingSteerSubmissions = [];
+    this.suppressingUnreadSteerRun = false;
     this.clearNoTurnBuffers();
     const payload = await convertPromptInput(prompt, { model: this.state.model });
     if (this.closed) throw new Error("OMP session is closed");
@@ -950,6 +977,11 @@ export class OmpAgentSession implements AgentSession {
       if (isOmpSteerTransportFailure(error)) throw error;
       return { status: "unavailable" };
     }
+    this.pendingSteerSubmissions.push({
+      text: payload.text,
+      clientMessageId: options.clientMessageId ?? null,
+      clientRecord: submission,
+    });
     if (this.closed || this.activeTurnId !== options.expectedTurnId)
       return { status: "unavailable" };
     if (options.clearPendingPermissions) {
@@ -961,6 +993,82 @@ export class OmpAgentSession implements AgentSession {
       }
     }
     return { status: "accepted" };
+  }
+
+  private handleUnreadSteerPhantomEvent(event: OmpAgentSessionEvent): void {
+    if (event.type === "agent_start") {
+      void this.runtimeSession.abort().catch((error: unknown) => {
+        this.logger.debug({ err: error }, "OMP unread-steer phantom abort failed");
+      });
+      return;
+    }
+    if (event.type === "message_end" && event.message.role === "user") {
+      // Consume the echoed steer so suppression ends once every queued steer surfaced.
+      const submission = this.takePendingSteerSubmission(getUserMessageText(event.message.content));
+      if (submission) {
+        this.forgetClientMessage(submission.clientRecord);
+      }
+      return;
+    }
+    if (event.type === "agent_end" && this.pendingSteerSubmissions.length === 0) {
+      this.suppressingUnreadSteerRun = false;
+      this.steerDrainBlocked = false;
+      this.finishPendingSteerDrain(true);
+    }
+  }
+
+  private beginPendingSteerDrain(): void {
+    if (this.pendingSteerDrain) {
+      return;
+    }
+    let resolve!: (drained: boolean) => void;
+    const promise = new Promise<boolean>((resolvePromise) => {
+      resolve = resolvePromise;
+    });
+    const timer = setTimeout(() => {
+      this.pendingSteerDrain = null;
+      this.steerDrainBlocked = true;
+      resolve(false);
+    }, OMP_STEER_DRAIN_TIMEOUT_MS);
+    this.pendingSteerDrain = { promise, resolve, timer };
+  }
+
+  private finishPendingSteerDrain(drained: boolean): void {
+    const pending = this.pendingSteerDrain;
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingSteerDrain = null;
+    pending.resolve(drained);
+  }
+
+  private async waitForPendingSteerDrain(): Promise<void> {
+    if (this.steerDrainBlocked) {
+      throw new Error("OMP queued steer did not drain; refusing to start a replacement turn");
+    }
+    const pending = this.pendingSteerDrain;
+    if (!pending) {
+      return;
+    }
+    const drained = await pending.promise;
+    if (!drained) {
+      throw new Error("OMP queued steer did not drain; refusing to start a replacement turn");
+    }
+  }
+
+  private takePendingSteerSubmission(text: string):
+    | {
+        text: string;
+        clientMessageId: string | null;
+        clientRecord: { clientMessageId: string | null; text: string };
+      }
+    | undefined {
+    const index = this.pendingSteerSubmissions.findIndex((submission) => submission.text === text);
+    if (index < 0) {
+      return undefined;
+    }
+    return this.pendingSteerSubmissions.splice(index, 1)[0];
   }
 
   private rememberClientMessage(
@@ -981,7 +1089,15 @@ export class OmpAgentSession implements AgentSession {
     if (index >= 0) this.pendingClientMessages.splice(index, 1);
   }
 
-  private takeClientMessage(): { clientMessageId: string | null; text: string } | undefined {
+  private takeClientMessage(
+    text?: string,
+  ): { clientMessageId: string | null; text: string } | undefined {
+    if (text) {
+      const index = this.pendingClientMessages.findIndex((submission) => submission.text === text);
+      if (index >= 0) {
+        return this.pendingClientMessages.splice(index, 1)[0];
+      }
+    }
     return this.pendingClientMessages.shift();
   }
 
@@ -1140,6 +1256,13 @@ export class OmpAgentSession implements AgentSession {
 
   async interrupt(): Promise<void> {
     const turnId = this.activeTurnId;
+    // OMP has no clear_queue RPC: a steer it has not read yet survives abort and starts a
+    // phantom run. Keep the submissions so that run can be re-aborted and swallowed instead
+    // of resuming the turn the user just stopped.
+    if (this.pendingSteerSubmissions.length > 0) {
+      this.beginPendingSteerDrain();
+      this.suppressingUnreadSteerRun = true;
+    }
     await this.runtimeSession.abort();
     if (turnId && this.activeTurnId === turnId) {
       this.usagePoller.stopTurn();
@@ -1200,6 +1323,10 @@ export class OmpAgentSession implements AgentSession {
     } finally {
       await this.hostTools?.close();
       this.clearOmpSessionState();
+      this.pendingSteerSubmissions = [];
+      this.suppressingUnreadSteerRun = false;
+      this.steerDrainBlocked = false;
+      this.finishPendingSteerDrain(false);
     }
   }
 
@@ -1394,7 +1521,7 @@ export class OmpAgentSession implements AgentSession {
     const outputs = this.pendingNoTurnOutputs.filter((output) => output.turnId === turnId);
     this.clearNoTurnBuffers();
     if (promptText) {
-      const clientMessageId = this.takeClientMessage()?.clientMessageId;
+      const clientMessageId = this.takeClientMessage(promptText)?.clientMessageId;
       this.emit({
         type: "timeline",
         provider: this.provider,
@@ -1840,6 +1967,11 @@ export class OmpAgentSession implements AgentSession {
     if (event.type === "agent_end" && event.isTerminal === false) {
       return;
     }
+    if (this.suppressingUnreadSteerRun && !this.activeTurnId) {
+      this.handleUnreadSteerPhantomEvent(event);
+      return;
+    }
+
     const turnId = this.currentTurnIdForEvent();
 
     switch (event.type) {
@@ -2090,7 +2222,16 @@ export class OmpAgentSession implements AgentSession {
         }
         this.emittedUserMessageIds.add(resolvedMessageId);
       }
-      const clientMessageId = this.takeClientMessage()?.clientMessageId;
+      const consumed = this.takeClientMessage(text);
+      if (consumed) {
+        const submissionIndex = this.pendingSteerSubmissions.findIndex(
+          (submission) => submission.clientRecord === consumed,
+        );
+        if (submissionIndex >= 0) {
+          this.pendingSteerSubmissions.splice(submissionIndex, 1);
+        }
+      }
+      const clientMessageId = consumed?.clientMessageId;
       this.emit({
         type: "timeline",
         provider: this.provider,

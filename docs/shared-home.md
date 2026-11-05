@@ -100,9 +100,9 @@ one journal.
 - Plugins with platform-specific dependencies (native modules) only load on machines
   matching the installing machine's OS/arch, and a plugin update requires restarting
   the other machines' daemons to pick up the new path.
-- The Hub relationship is per-home and single-connection: one daemon holds the
-  `hub-connection.lock` lease and the others start with Hub disabled (the log names
-  the owner). If that daemon dies, the lease goes stale and another host takes over.
+- The Hub relationship is per-home and single-connection. A blocked daemon retries
+  the `hub-connection.lock` lease with bounded backoff and takes over after release or
+  expiry. Stopping cancels takeover; losing the lease fences the former connection.
 - A client-supplied `agentId` in a create request can collide with a foreign record
   written by another host within the local 5-second rescan window. Today's clients
   generate IDs server-side; if a future client retries a create with the same ID

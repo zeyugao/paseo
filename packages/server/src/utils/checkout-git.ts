@@ -6,6 +6,7 @@ import {
   stat as statFile,
   mkdtemp,
   copyFile,
+  utimes,
   realpath,
   access,
   rm,
@@ -3677,16 +3678,27 @@ export async function snapshotComparisonIndex(cwd: string) {
     });
     const source = resolveGitRevParsePath(cwd, index.stdout);
     if (!source) throw new Error("Git did not return an index path");
+    let sourceMtime: Date | null = null;
     try {
+      sourceMtime = (await statFile(source)).mtime;
       await copyFile(source, indexFile);
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+      sourceMtime = null;
       await runGitCommand(["read-tree", "--empty"], {
         cwd,
         envOverlay: { ...READ_ONLY_GIT_ENV, GIT_INDEX_FILE: indexFile },
       });
     }
-    return { indexFile, cleanup: () => rm(directory, { recursive: true, force: true }) };
+    return {
+      indexFile,
+      // Git's racy-clean check compares entry mtimes with the index mtime.
+      // Restore it after write-tree/update-index, before reading the working tree.
+      restoreTimestamp: async () => {
+        if (sourceMtime !== null) await utimes(indexFile, sourceMtime, sourceMtime);
+      },
+      cleanup: () => rm(directory, { recursive: true, force: true }),
+    };
   } catch (error) {
     await rm(directory, { recursive: true, force: true });
     throw error;
@@ -3709,6 +3721,7 @@ export async function getCheckoutDiff(
   const index =
     compare.mode === "all" ? await prepareAllChangesIndex(cwd, refsForDiff.baseRef) : null;
   try {
+    await index?.restoreTimestamp();
     return await readCheckoutDiff(
       cwd,
       compare,

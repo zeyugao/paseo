@@ -655,7 +655,11 @@ class ProtectedChannel implements InnerChannel {
       this.fail(this.role.failureCloseCode, err.message);
       throw err;
     }
-    if (this.params.binaryCiphertext && kind === "binary") {
+    // Protected clients recover text from the authenticated record kind, not the WebSocket kind.
+    // Keep client sends unchanged; only daemon text records skip base64.
+    const useBinaryCiphertext =
+      this.params.binaryCiphertext && (kind === "binary" || this.role.retry !== null);
+    if (useBinaryCiphertext) {
       await this.transport.send(toArrayBuffer(wire));
       return;
     }
@@ -665,7 +669,9 @@ class ProtectedChannel implements InnerChannel {
   outboundWireByteLength(data: string | ArrayBuffer): number {
     const plaintextBytes = typeof data === "string" ? utf8ByteLength(data) : data.byteLength;
     const wireBytes = protectedRecordByteLength(plaintextBytes);
-    if (this.params.binaryCiphertext && typeof data !== "string") return wireBytes;
+    const useBinaryCiphertext =
+      this.params.binaryCiphertext && (typeof data !== "string" || this.role.retry !== null);
+    if (useBinaryCiphertext) return wireBytes;
     return 4 * Math.ceil(wireBytes / 3);
   }
 

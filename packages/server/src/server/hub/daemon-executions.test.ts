@@ -1,8 +1,11 @@
+import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import type { AgentClient } from "../agent/agent-sdk-types.js";
+import type { AgentStorage, StoredAgentRecord } from "../agent/agent-storage.js";
 import { validateProviderOptions } from "../agent/provider-options.js";
 import { CodexProviderOptionsSchema } from "../agent/providers/codex/options.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
+import { DaemonExecutions } from "./daemon-executions.js";
 import { HubRelationshipHarness } from "./test-utils/relationship-harness.js";
 
 let relationship: HubRelationshipHarness | null = null;
@@ -347,4 +350,69 @@ test("failed create never archives a reused worktree", async () => {
     payload: { success: false, executionId: "reused-execution" },
   });
   expect(await hub.worktreeState(worktreeCwd!)).toEqual({ exists: true, listed: true });
+});
+
+test("foreign-host records cannot satisfy, control, or publish a Hub execution", async () => {
+  const owner = { kind: "daemon" as const, daemonId: "daemon-shared", executionId: "exec-1" };
+  const foreignRecord = {
+    id: "agent-foreign",
+    hostId: "server-foreign",
+    workspaceId: "workspace-foreign",
+    owner,
+    archivedAt: null,
+  } as unknown as StoredAgentRecord;
+  let emit!: Parameters<AgentManager["subscribe"]>[0];
+  const agentManager = {
+    subscribe(listener: Parameters<AgentManager["subscribe"]>[0]) {
+      emit = listener;
+      return () => undefined;
+    },
+    getAgent: vi.fn(() => null),
+    getRegisteredProviderIds: vi.fn(() => []),
+  } as unknown as AgentManager;
+  const agentStorage = {
+    findByDaemonExecution: vi.fn(async () => foreignRecord),
+    getFresh: vi.fn(async () => foreignRecord),
+  } as unknown as AgentStorage;
+  const createAgent = vi.fn();
+  const interruptAgent = vi.fn();
+  const archiveWorkspace = vi.fn();
+  const executions = new DaemonExecutions({
+    daemonId: owner.daemonId,
+    serverId: "server-local",
+    agentManager,
+    agentStorage,
+    createAgent,
+    interruptAgent,
+    archiveWorkspace,
+  });
+  const createInput = {
+    executionId: owner.executionId,
+    provider: "codex",
+    cwd: "/repo",
+    prompt: "must not resolve foreign record",
+  };
+
+  await expect(executions.create(createInput)).rejects.toThrow(
+    "Agent agent-foreign is owned by host server-foreign",
+  );
+  await expect(
+    executions.control({
+      requestId: "control-1",
+      executionId: owner.executionId,
+      action: "interrupt",
+    }),
+  ).rejects.toThrow("Agent agent-foreign is owned by host server-foreign");
+
+  const listener = vi.fn();
+  executions.subscribe(listener);
+  emit({
+    type: "agent_state",
+    agent: { id: foreignRecord.id, hostId: foreignRecord.hostId, owner } as ManagedAgent,
+  });
+
+  expect(createAgent).not.toHaveBeenCalled();
+  expect(interruptAgent).not.toHaveBeenCalled();
+  expect(archiveWorkspace).not.toHaveBeenCalled();
+  expect(listener).not.toHaveBeenCalled();
 });

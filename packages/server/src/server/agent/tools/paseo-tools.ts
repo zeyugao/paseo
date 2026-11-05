@@ -2246,6 +2246,7 @@ function createToolCatalog(
         manager: agentManager,
         storage: agentStorage,
         workspaces: options.workspaceRegistry,
+        serverId: options.serverId,
         projectLive: (snapshot) =>
           serializeSnapshotWithMetadata(agentStorage, snapshot, childLogger),
         projectStored: (record) =>

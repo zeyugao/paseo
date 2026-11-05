@@ -576,6 +576,7 @@ function createSessionForWorkspaceTests(
     workspaceRuntimeStore?: WorkspaceRuntimeStore;
     workspaceGitService?: ReturnType<typeof createNoopWorkspaceGitService>;
     terminalManager?: TerminalManager | null;
+    providerSnapshotManager?: SessionOptions["providerSnapshotManager"];
     agentManager?: { [K in keyof SessionOptions["agentManager"]]?: unknown };
     agentStorage?: { [K in keyof SessionOptions["agentStorage"]]?: unknown };
     projectRegistry?: SessionOptions["projectRegistry"];
@@ -654,7 +655,8 @@ function createSessionForWorkspaceTests(
     remove: async () => {},
   };
   const workspaceGitService = options.workspaceGitService ?? createNoopWorkspaceGitService();
-  const providerSnapshotManager = createProviderSnapshotManagerStub().manager;
+  const providerSnapshotManager =
+    options.providerSnapshotManager ?? createProviderSnapshotManagerStub().manager;
 
   const session = asTestSession(
     new Session({
@@ -3084,6 +3086,134 @@ test("workspace placements preserve checkout facts independently from the projec
       }),
     }),
   );
+});
+
+test("host-scoped discovery hides foreign workspaces in lists, history search, and live observations", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "session-directory-ownership-"));
+  const logger = pino({ level: "silent" });
+  const storage = new AgentStorage(path.join(home, "agents"), logger);
+  const projectRegistry = new FileBackedProjectRegistry(path.join(home, "projects.json"), logger);
+  const workspaceRegistry = new FileBackedWorkspaceRegistry(
+    path.join(home, "workspaces.json"),
+    logger,
+  );
+  const now = "2026-03-01T12:00:00.000Z";
+  const project = createPersistedProjectRecord({
+    projectId: "proj-directory",
+    rootPath: home,
+    kind: "non_git",
+    displayName: "directory",
+    createdAt: now,
+    updatedAt: now,
+  });
+  const workspaces = ["local", "legacy", "foreign"].map((name) =>
+    createPersistedWorkspaceRecord({
+      workspaceId: `ws-${name}`,
+      projectId: project.projectId,
+      cwd: path.join(home, name),
+      kind: "directory",
+      displayName: name,
+      ...(name === "legacy" ? {} : { hostId: name === "local" ? "srv-local" : "srv-other" }),
+      createdAt: now,
+      updatedAt: now,
+    }),
+  );
+  const live = workspaces.map((workspace) =>
+    makeManagedAgent({
+      id: `live-${workspace.displayName}`,
+      cwd: workspace.cwd,
+      workspaceId: workspace.workspaceId,
+      lifecycle: "idle",
+      updatedAt: now,
+    }),
+  );
+  const emitted: SessionOutboundMessage[] = [];
+  try {
+    await projectRegistry.upsert(project);
+    for (const workspace of workspaces) {
+      await workspaceRegistry.upsert(workspace);
+      await storage.upsert({
+        id: `stored-${workspace.displayName}`,
+        provider: "codex",
+        cwd: workspace.cwd,
+        workspaceId: workspace.workspaceId,
+        hostId: workspace.hostId,
+        title: "matching history",
+        createdAt: now,
+        updatedAt: now,
+        lastStatus: "idle",
+        labels: {},
+      });
+    }
+    const providers = createProviderSnapshotManagerStub();
+    providers.listRegisteredProviderIds.mockReturnValue(["codex"]);
+    const session = createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      projectRegistry,
+      workspaceRegistry,
+      providerSnapshotManager: providers.manager,
+      agentStorage: {
+        get: storage.get.bind(storage),
+        listAll: storage.listAll.bind(storage),
+        listActive: storage.listActive.bind(storage),
+        listByWorkspaces: storage.listByWorkspaces.bind(storage),
+        lastUserMessageAtByWorkspace: storage.lastUserMessageAtByWorkspace.bind(storage),
+      },
+      agentManager: { listAgents: () => live },
+      onMessage: (message) => emitted.push(message),
+    });
+    const expected = ["live-legacy", "live-local", "stored-legacy", "stored-local"];
+    for (const scope of [undefined, "active"] as const) {
+      await session.handleMessage({
+        type: "fetch_agents_request",
+        requestId: `list-${scope}`,
+        scope,
+      });
+      const response = filterByType(emitted, "fetch_agents_response").at(-1)!;
+      expect(response.payload.entries.map((entry) => entry.agent.id).toSorted()).toEqual(expected);
+    }
+    await session.handleMessage({
+      type: "fetch_agent_history_request",
+      requestId: "history-search",
+      search: "matching",
+    });
+    expect(
+      findByType(emitted, "fetch_agent_history_response")
+        ?.payload.entries.map((entry) => entry.agent.id)
+        .toSorted(),
+    ).toEqual(["stored-legacy", "stored-local"]);
+    await session.handleMessage({
+      type: "fetch_agents_request",
+      requestId: "owned-observer",
+      scope: "active",
+      sync: {},
+      subscribe: { subscriptionId: "owned-observer" },
+    });
+    emitted.length = 0;
+    for (const agent of live) await session.agentUpdates.forwardLiveAgent(agent as ManagedAgent);
+    const upserts = filterByType(emitted, "agent_update").flatMap((message) =>
+      message.payload.kind === "upsert" ? [message.payload.agent.id] : [],
+    );
+    expect(upserts.toSorted()).toEqual(["live-legacy", "live-local"]);
+    expect(await session.agentUpdates.includesLiveAgent(live[2] as ManagedAgent)).toBe(false);
+    expect(await session.agentUpdates.includesLiveAgent(live[0] as ManagedAgent)).toBe(true);
+    for (const workspace of workspaces) {
+      const record = (await storage.get(`stored-${workspace.displayName}`))!;
+      await session.agentUpdates.emitStoredRecord(record);
+    }
+    expect(
+      filterByType(emitted, "agent_update")
+        .flatMap((message) => (message.payload.kind === "upsert" ? [message.payload.agent.id] : []))
+        .toSorted(),
+    ).toEqual(expected);
+    expect(await session.buildProjectPlacementForWorkspaceId("ws-foreign")).toBeNull();
+    expect(await session.getAgentPayloadById("stored-foreign")).toMatchObject({
+      id: "stored-foreign",
+      workspaceId: "ws-foreign",
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("active-scoped fetch_agents includes only unarchived agents in active workspaces", async () => {

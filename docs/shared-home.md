@@ -1,8 +1,8 @@
 # Shared PASEO_HOME
 
-Running one Paseo daemon on each of several machines, all pointing `PASEO_HOME` at the
-same directory on shared storage (NFS-class). Each machine sees every agent and project;
-workspaces, terminals, and live agent processes stay on the machine that created them.
+Run one Paseo daemon on each machine with the same `PASEO_HOME` on shared storage
+(NFS-class). Project and agent records are shared; execution, workspaces and terminals
+stay with their owning daemon.
 
 This is server-side behavior. Clients need no changes: each daemon has its own
 `serverId`, so the app's existing multi-host support shows one host per machine.
@@ -21,8 +21,9 @@ foreign workspaces, are never repaired, captured for shutdown recovery, or resum
    `daemon.{serverId}.log` file, and one entry in a host-local `projectKey`.
 2. For cross-machine agent history reads, point the provider session directories at the
    shared volume too (for example `CLAUDE_CONFIG_DIR`, `CODEX_HOME`). Provider transcripts
-   live outside PASEO_HOME; without sharing them, a foreign agent's record is visible but
-   its timeline is not.
+   live outside PASEO_HOME. Explicit agent-ID reads can load foreign history without
+   starting its provider, but client directories omit agents whose workspace belongs to
+   another host: the unchanged app cannot open that host's workspace on this connection.
 3. Prefer per-machine settings for machine-local config: `log.file.path` (the default
    becomes `daemon.{serverId}.log` when `PASEO_SERVER_ID` is set), `worktrees.root`, and
    `providers.local.modelsDir`.

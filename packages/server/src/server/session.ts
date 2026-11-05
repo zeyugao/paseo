@@ -1182,6 +1182,7 @@ export class Session {
       manager: this.agentManager,
       storage: this.agentStorage,
       workspaces: this.workspaceRegistry,
+      serverId: this.serverId,
       projectLive: (agent) => this.buildAgentPayload(agent),
       projectStored: (record) => this.buildStoredAgentPayload(record),
       isProviderVisible: (provider) => this.isProviderVisibleToClient(provider),
@@ -2261,7 +2262,7 @@ export class Session {
     workspaceId: string,
   ): Promise<ProjectPlacementPayload | null> {
     const workspace = await this.workspaceRegistry.get(workspaceId);
-    if (!workspace) return null;
+    if (!workspace || !isWorkspaceVisibleToServer(workspace, this.serverId)) return null;
 
     const project = await this.projectRegistry.get(workspace.projectId);
     if (!project) return null;
@@ -5782,7 +5783,7 @@ export class Session {
     const placementsByWorkspaceId = new Map<string, ProjectPlacementPayload>();
 
     const pairs = persistedWorkspaces.flatMap((workspace) => {
-      if (workspace.archivedAt) return [];
+      if (workspace.archivedAt || !isWorkspaceVisibleToServer(workspace, this.serverId)) return [];
       const project = activeProjects.get(workspace.projectId);
       if (!project) return [];
       return [{ workspace, project }];

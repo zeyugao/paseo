@@ -15,6 +15,7 @@ const NOW = "2026-03-01T12:00:00.000Z";
 let home: string;
 let storage: AgentStorage;
 let directory: AgentDirectory;
+let workspaces: PersistedWorkspaceRecord[];
 
 function workspace(workspaceId: string, background: boolean): PersistedWorkspaceRecord {
   return {
@@ -45,9 +46,10 @@ beforeEach(async () => {
   await storage.upsert({ ...base, id: "background", workspaceId: "open", background: true });
   await storage.upsert({ ...base, id: "in-background-workspace", workspaceId: "hidden" });
   await storage.upsert({ ...base, id: "internal", workspaceId: "open", internal: true });
-  const workspaces = [workspace("open", false), workspace("hidden", true)];
+  workspaces = [workspace("open", false), workspace("hidden", true)];
   directory = new AgentDirectory({
     storage,
+    serverId: "srv-local",
     manager: { listAgents: () => [] },
     workspaces: {
       get: async (id) => workspaces.find((entry) => entry.workspaceId === id) ?? null,
@@ -89,6 +91,45 @@ test("includes applies the same visibility to a single agent", async () => {
   expect(await directory.includes(background, true)).toBe(true);
   expect(await directory.includes(inBackgroundWorkspace)).toBe(false);
   expect(await directory.includes(inBackgroundWorkspace, "workspaces")).toBe(true);
+});
+
+test("workspace ownership gates inclusive discovery and update eligibility, not explicit storage reads", async () => {
+  workspaces.push({ ...workspace("foreign", false), hostId: "srv-other" });
+  workspaces.push({ ...workspace("local", false), hostId: "srv-local" });
+  const base = {
+    provider: "codex",
+    cwd: home,
+    createdAt: NOW,
+    updatedAt: NOW,
+    lastStatus: "idle" as const,
+  };
+  await storage.upsert({ ...base, id: "foreign", workspaceId: "foreign" });
+  await storage.upsert({ ...base, id: "local", workspaceId: "local" });
+  await storage.upsert({ ...base, id: "host-agent" });
+
+  expect(await listedIds(true)).toEqual([
+    "background",
+    "host-agent",
+    "in-background-workspace",
+    "local",
+    "visible",
+  ]);
+  expect(
+    (
+      await directory.list({
+        workspaceIds: ["foreign"],
+        includeArchived: true,
+        includeBackground: true,
+      })
+    ).map((agent) => agent.id),
+  ).toEqual([]);
+  for (const visibility of [false, true, "workspaces"] as const) {
+    expect(await directory.includes({ workspaceId: "foreign" }, visibility)).toBe(false);
+    expect(await directory.includes({ workspaceId: "local" }, visibility)).toBe(true);
+    expect(await directory.includes({ workspaceId: "open" }, visibility)).toBe(true);
+    expect(await directory.includes({}, visibility)).toBe(true);
+  }
+  expect((await storage.get("foreign"))?.workspaceId).toBe("foreign");
 });
 
 test("prompt recency ignores background agents", async () => {

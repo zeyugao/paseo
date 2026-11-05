@@ -1645,6 +1645,10 @@ export class OmpAgentSession implements AgentSession {
   }
 
   private handleExtraRuntimeEvent(event: OmpRuntimeEvent): boolean {
+    if (event.type === "session_settled") {
+      this.settleTurnAfterSessionSettled();
+      return true;
+    }
     if (event.type === "model_changed") {
       void this.refreshState()
         .then(() =>
@@ -1829,12 +1833,16 @@ export class OmpAgentSession implements AgentSession {
   }
 
   private handleSessionEvent(event: OmpAgentSessionEvent): void {
+    // OMP can be briefly idle between cycles while queued work is still scheduled.
+    // Only its terminal agent_end may settle the turn or finish an interrupted drain.
+    if (event.type === "agent_end" && event.isTerminal === false) {
+      return;
+    }
     const turnId = this.currentTurnIdForEvent();
 
     switch (event.type) {
       case "agent_start":
-        this.activeTurnStarted = true;
-        this.clearNoTurnBuffers();
+        this.emitTurnStarted(turnId);
         this.emit({
           type: "thread_started",
           provider: this.provider,
@@ -1842,13 +1850,9 @@ export class OmpAgentSession implements AgentSession {
         });
         return;
       case "turn_start":
-        this.activeTurnStarted = true;
-        this.clearNoTurnBuffers();
-        if (this.outOfBandTurnStartAnnounced) {
-          this.outOfBandTurnStartAnnounced = false;
-        } else {
-          this.emit({ type: "turn_started", provider: this.provider, turnId });
-        }
+        // OMP emits turn_start for each model cycle inside one agent run. Older compatible
+        // runtimes may omit agent_start, so retain the first turn_start as a fallback.
+        this.emitTurnStartedIfNeeded(turnId);
         return;
       case "message_start":
         this.handleMessageStart(event);
@@ -1909,6 +1913,27 @@ export class OmpAgentSession implements AgentSession {
       default:
         return;
     }
+  }
+
+  private emitTurnStarted(turnId: string | undefined): void {
+    this.activeTurnStarted = true;
+    this.clearNoTurnBuffers();
+    if (this.outOfBandTurnStartAnnounced) {
+      // The prompt already announced turn_started so the lifecycle event must not repeat it.
+      this.outOfBandTurnStartAnnounced = false;
+      return;
+    }
+    this.emit({
+      type: "turn_started",
+      provider: this.provider,
+      turnId,
+    });
+  }
+  private emitTurnStartedIfNeeded(turnId: string | undefined): void {
+    if (this.activeTurnStarted) {
+      return;
+    }
+    this.emitTurnStarted(turnId);
   }
 
   private handleToolExecutionEnd(
@@ -2186,6 +2211,23 @@ export class OmpAgentSession implements AgentSession {
       turnId,
     });
     void this.refreshAfterTurn(finalUsage);
+  }
+
+  // OMP's settle watcher reports `session_settled` once a stretch of agent
+  // activity is fully quiet: the terminal `agent_end` went out and nothing
+  // queued or running in the background can re-wake the session. When the
+  // terminal `agent_end` never reached this side (a frame dropped mid-flight),
+  // this is the last chance to settle the turn instead of advertising
+  // "running" forever on a session OMP already considers idle.
+  private settleTurnAfterSessionSettled(): void {
+    if (!this.activeTurnId || !this.activeTurnStarted) {
+      return;
+    }
+    const turnId = this.activeTurnId;
+    const messages = this.activeTurnTerminalAssistantMessage
+      ? [this.activeTurnTerminalAssistantMessage]
+      : [];
+    void this.completeTurnAfterProviderIdle(turnId, messages);
   }
 
   private async completeTurnAfterProviderIdle(

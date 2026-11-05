@@ -105,6 +105,7 @@ import { extractAttention } from "../persistence-hooks.js";
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
 const IMPORTABLE_SESSION_LIST_TIMEOUT_MS = 90_000;
+const PROVIDER_USER_ECHO_TIMESTAMP_TOLERANCE_MS = 5_000;
 const READ_ONLY_HISTORY_PROVIDERS: Readonly<Record<string, true>> = {
   claude: true,
   codex: true,
@@ -5060,6 +5061,19 @@ export class AgentManager {
         this.reconcileSubmittedPromptEcho(agent, item, event.turnId)
       )
         continue;
+      if (
+        item.type === "user_message" &&
+        !item.clientMessageId &&
+        ((event.turnId &&
+          this.reconcileUnidentifiedSubmittedPromptEcho(agent, item, event.turnId)) ||
+          (!event.turnId &&
+            this.reconcileLateSubmittedPromptEcho(
+              agent,
+              item,
+              event.timestamp ?? new Date().toISOString(),
+            )))
+      )
+        continue;
 
       if (options?.fromHistory) {
         this.recordTimeline(
@@ -5398,6 +5412,51 @@ export class AgentManager {
     return existing;
   }
 
+  private reconcileUnidentifiedSubmittedPromptEcho(
+    agent: ActiveManagedAgent,
+    item: Extract<AgentTimelineItem, { type: "user_message" }>,
+    turnId: string,
+  ): AgentTimelineRow | null {
+    const existing = this.timelineStore.getSubmittedUserMessageForTurn(agent.id, turnId, item.text);
+    if (!existing || existing.item.type !== "user_message" || !existing.item.clientMessageId) {
+      return null;
+    }
+    if (item.messageId) {
+      const enriched = this.timelineStore.enrichSubmittedUserMessage(
+        agent.id,
+        existing.item.clientMessageId,
+        item.messageId,
+      );
+      if (enriched) this.enqueueDurableTimelineUpdate(agent.id, enriched);
+    }
+    return existing;
+  }
+
+  private reconcileLateSubmittedPromptEcho(
+    agent: ActiveManagedAgent,
+    item: Extract<AgentTimelineItem, { type: "user_message" }>,
+    timestamp: string,
+  ): AgentTimelineRow | null {
+    const existing = this.timelineStore.getUnconfirmedSubmittedUserMessageNearTimestamp(
+      agent.id,
+      item.text,
+      timestamp,
+      PROVIDER_USER_ECHO_TIMESTAMP_TOLERANCE_MS,
+    );
+    if (!existing || existing.item.type !== "user_message" || !existing.item.clientMessageId) {
+      return null;
+    }
+    if (item.messageId) {
+      const enriched = this.timelineStore.enrichSubmittedUserMessage(
+        agent.id,
+        existing.item.clientMessageId,
+        item.messageId,
+      );
+      if (enriched) this.enqueueDurableTimelineUpdate(agent.id, enriched);
+    }
+    return existing;
+  }
+
   private async appendSystemErrorTimelineMessage(
     agent: ActiveManagedAgent,
     provider: AgentProvider,
@@ -5589,10 +5648,7 @@ export class AgentManager {
   private enqueueDurableTimelineUpdate(agentId: string, row: AgentTimelineRow): void {
     if (!this.durableTimelineStore || this.isForeignAgentResident(agentId)) return;
     const task = this.durableTimelineStore.updateCommittedRow(agentId, row).catch((err) => {
-      this.logger.error(
-        { err, agentId, seq: row.seq, itemType: row.item.type },
-        "Failed to enrich durable timeline row",
-      );
+      this.logger.error({ err, agentId, seq: row.seq }, "Failed to update durable timeline row");
     });
     this.trackBackgroundTask(task);
   }

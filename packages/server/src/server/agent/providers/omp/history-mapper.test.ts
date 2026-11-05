@@ -398,7 +398,7 @@ describe("OMP history mapper", () => {
     ]);
   });
 
-  test("maps replayed OMP system-notice custom messages to notifications", async () => {
+  test("maps replayed OMP system-notice custom messages to tool-call rows", async () => {
     const notice = [
       "<system-notice>",
       "Background job DocsSmokeTwo has completed. Resume your work using the result below.",
@@ -412,7 +412,7 @@ describe("OMP history mapper", () => {
       collectHistory(
         [
           { role: "user", content: "first prompt" },
-          { role: "custom", content: notice },
+          { role: "custom", content: notice, id: "notice-entry-1" },
           { role: "user", content: "second prompt" },
         ],
         [
@@ -434,9 +434,23 @@ describe("OMP history mapper", () => {
         type: "timeline",
         provider: "omp",
         item: {
-          type: "notification",
-          level: "info",
-          message: "Background job DocsSmokeTwo completed",
+          type: "tool_call",
+          callId: "omp-notice:notice-entry-1",
+          name: "system_notice",
+          status: "completed",
+          detail: {
+            type: "plain_text",
+            label: "Background job DocsSmokeTwo completed",
+            text: [
+              "Background job DocsSmokeTwo has completed. Resume your work using the result below.",
+              '<task-result id="DocsSmokeTwo" agent="explore" status="completed" duration="21.6s">',
+              "<output>done</output>",
+              "</task-result>",
+            ].join("\n"),
+            icon: "bot",
+          },
+          metadata: { synthetic: true, source: "omp_system_notice" },
+          error: null,
         },
       },
       {
@@ -447,6 +461,44 @@ describe("OMP history mapper", () => {
           text: "second prompt",
           messageId: "entry-user-2",
         },
+      },
+    ]);
+  });
+
+  test("replays every job in a parallel notice payload as its own row", async () => {
+    const notice = [
+      "<system-notice>",
+      "2 background jobs have completed. Resume your work using the results below.",
+      "",
+      "── Job FixBuild (FixBuild) ──",
+      '<task-result id="FixBuild" status="completed">',
+      "<output>build ok</output>",
+      "</task-result>",
+      "── Job Sweep2161 (Sweep2161) ──",
+      '<task-result id="Sweep2161" status="failed">',
+      "<output>sweep blew up</output>",
+      "</task-result>",
+      "</system-notice>",
+    ].join("\n");
+
+    const events = await collectHistory([
+      { role: "custom", content: notice, id: "notice-parallel-1" },
+    ]);
+
+    expect(events.map((event) => event.item)).toMatchObject([
+      {
+        type: "tool_call",
+        callId: "omp-notice:notice-parallel-1#0",
+        status: "completed",
+        detail: { type: "plain_text", label: "Background job FixBuild completed" },
+        error: null,
+      },
+      {
+        type: "tool_call",
+        callId: "omp-notice:notice-parallel-1#1",
+        status: "failed",
+        detail: { type: "plain_text", label: "Background job Sweep2161 failed" },
+        error: "sweep blew up",
       },
     ]);
   });

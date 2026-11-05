@@ -127,6 +127,53 @@ export async function fanOutReconciledWorkspaceUpdates(input: {
   );
 }
 
+const DAEMON_INSTANCE_HEARTBEAT_INTERVAL_MS = 30_000;
+const DAEMON_INSTANCE_HEARTBEAT_FAILURE_LIMIT = 3;
+
+export function createDaemonInstanceHeartbeatErrorHandler(input: {
+  serverId: string;
+  logger: Pick<Logger, "error" | "fatal">;
+  shutdown: (error: unknown) => void;
+  now?: () => number;
+}): (error: unknown) => void {
+  const recentFailures: number[] = [];
+  const now = input.now ?? Date.now;
+  let shutdownRequested = false;
+
+  return (error) => {
+    if (shutdownRequested) return;
+    if (error instanceof DaemonInstanceLeaseLostError) {
+      shutdownRequested = true;
+      input.logger.fatal(
+        { err: error, serverId: input.serverId },
+        "Daemon instance lease lost to another daemon; stopping",
+      );
+      input.shutdown(error);
+      return;
+    }
+
+    const failedAt = now();
+    const failureWindowMs =
+      DAEMON_INSTANCE_HEARTBEAT_INTERVAL_MS * DAEMON_INSTANCE_HEARTBEAT_FAILURE_LIMIT;
+    recentFailures.push(failedAt);
+    while (recentFailures[0] !== undefined && failedAt - recentFailures[0] >= failureWindowMs) {
+      recentFailures.shift();
+    }
+    input.logger.error(
+      { err: error, serverId: input.serverId },
+      "Daemon instance heartbeat failed",
+    );
+    if (recentFailures.length < DAEMON_INSTANCE_HEARTBEAT_FAILURE_LIMIT) return;
+
+    shutdownRequested = true;
+    input.logger.fatal(
+      { err: error, serverId: input.serverId, consecutiveFailures: recentFailures.length },
+      "Daemon instance heartbeat failed repeatedly; stopping",
+    );
+    input.shutdown(error);
+  };
+}
+
 import { VoiceAssistantWebSocketServer } from "./websocket-server.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { createWorkspaceLabelService } from "./workspace-labels/index.js";
@@ -185,6 +232,11 @@ import type { TerminalManager } from "../terminal/terminal-manager.js";
 import { startWorkerTerminalManager } from "../terminal/worker-terminal-manager.js";
 import { applyTerminalAgentHookSetting } from "../terminal/agent-hooks/terminal-agent-hook-setting.js";
 import { loadOrCreateDaemonKeyPair } from "./daemon-keypair.js";
+import {
+  DaemonInstanceLeaseLostError,
+  registerDaemonInstance,
+  type DaemonInstanceRegistration,
+} from "./daemon-instance-registry.js";
 import { createRelayRuntime, type RelayRuntime } from "./relay-runtime.js";
 import { admitSecuredRelaySocket } from "./websocket/secure-relay-ingress.js";
 import type { PushNotificationSender } from "./push/index.js";
@@ -480,6 +532,8 @@ export interface PaseoDaemonConfig {
   providerOverrides?: Record<string, ProviderOverride>;
   log?: PersistedConfig["log"];
   onLifecycleIntent?: (intent: DaemonLifecycleIntent) => void;
+  /** Called after a lost instance lease has shut the daemon down; the supervised worker uses it to exit the process. */
+  onLeaseLost?: (error: unknown) => void;
   pushNotificationSender?: PushNotificationSender;
   managedProcesses?: ManagedProcessRegistry;
   configReload?: {
@@ -524,6 +578,7 @@ function resolveBuiltinPluginLoader(dependencies: PaseoDaemonDependencies): Buil
 
 function createBootstrapManagedProcessRegistry(
   config: Pick<PaseoDaemonConfig, "paseoHome" | "managedProcesses">,
+  serverId: string,
   logger: Logger,
 ): ManagedProcessRegistry {
   if (config.managedProcesses) {
@@ -532,6 +587,7 @@ function createBootstrapManagedProcessRegistry(
 
   return createManagedProcessRegistry({
     paseoHome: config.paseoHome,
+    serverId,
     processTable: createSystemManagedProcessTable(),
     terminateProcess: terminateWithTreeKill,
     logger,
@@ -685,15 +741,10 @@ export async function createPaseoDaemon(
   });
 
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
-  const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
-  const managedProcesses = createBootstrapManagedProcessRegistry(config, logger);
-  // Reconcile the helper-process ledger in the background so it never blocks the
-  // daemon from coming up; terminating a live leftover can take a few seconds.
-  // Best-effort, so a failure is logged here rather than crashing startup.
-  void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
-    logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
-  });
+  const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, { serverId, logger });
+  const managedProcesses = createBootstrapManagedProcessRegistry(config, serverId, logger);
   let relayRuntime: RelayRuntime | null = null;
+  let daemonInstanceRegistration: DaemonInstanceRegistration | null = null;
 
   const staticDir = config.staticDir;
   const downloadTokenTtlMs = config.downloadTokenTtlMs ?? 60000;
@@ -839,6 +890,7 @@ export async function createPaseoDaemon(
   mountWebUi(app, config, logger);
 
   let localCredential: string | null = null;
+  let mirrorsLegacyCredential = false;
   const daemonAuth = { ...config.auth, localCredential: () => localCredential };
   app.use(
     createRequireBearerMiddleware(daemonAuth, (context) => {
@@ -1056,7 +1108,6 @@ export async function createPaseoDaemon(
       sendPromptToAgent({ agentId, prompt, agentManager, agentStorage, logger, unarchive: false }),
     report: (agentId, err) => logger.error({ agentId, err }, "Agent restart recovery failed"),
   });
-  await restartRecovery.prepareStartup();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
   await bootstrapWorkspaceRegistries({
     serverId,
@@ -1735,11 +1786,42 @@ export async function createPaseoDaemon(
   }
 
   logger.info({ elapsed: elapsed() }, "Bootstrap complete, ready to start listening");
+  // Defined before `start` so the heartbeat callback can trigger it without a
+  // promise chain inside a callback; `stop` is defined by the time it runs.
+  const shutdownAfterLeaseLoss = async (leaseError: unknown): Promise<void> => {
+    try {
+      await stop();
+    } catch (stopError) {
+      logger.error({ err: stopError, serverId }, "Shutdown after lease loss failed");
+    } finally {
+      config.onLeaseLost?.(leaseError);
+    }
+  };
+  const handleDaemonInstanceHeartbeatError = createDaemonInstanceHeartbeatErrorHandler({
+    serverId,
+    logger,
+    shutdown: (error) => void shutdownAfterLeaseLoss(error),
+  });
 
   const start = async () => {
     let mainStarted = false;
     try {
-      localCredential = await writeLocalCredential(config.paseoHome);
+      daemonInstanceRegistration = await registerDaemonInstance(config.paseoHome, serverId, {
+        listen: formatListenTarget(listenTarget) ?? undefined,
+        onHeartbeatError: handleDaemonInstanceHeartbeatError,
+      });
+      await restartRecovery.prepareStartup();
+      // Reconcile only after this daemon owns the instance lease. A rejected
+      // competitor must never terminate helpers owned by the live daemon.
+      // Best-effort and backgrounded because terminating leftovers can take seconds.
+      void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
+        logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
+      });
+      mirrorsLegacyCredential = process.env.PASEO_PID_LOCK_OWNER !== "0";
+      localCredential = await writeLocalCredential(config.paseoHome, {
+        serverId,
+        mirrorLegacy: mirrorsLegacyCredential,
+      });
       if (serviceProxyListenTarget) {
         const boundServiceProxyTarget = await serviceProxy.startStandalone({
           listenTarget: serviceProxyListenTarget,
@@ -1766,6 +1848,9 @@ export async function createPaseoDaemon(
           mainStarted = true;
           const logAndResolve = async () => {
             boundListenTarget = resolveBoundListenTarget(listenTarget, httpServer);
+            if (daemonInstanceRegistration) {
+              await daemonInstanceRegistration.updateListen(formatListenTarget(boundListenTarget)!);
+            }
             const mcpBaseUrl = createAgentMcpBaseUrl(boundListenTarget);
             agentMcpBaseUrl =
               !mcpEnabled || config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
@@ -1951,8 +2036,17 @@ export async function createPaseoDaemon(
       speechService.start();
       scriptHealthMonitor.start();
     } catch (error) {
+      const credentialToDelete = localCredential;
       localCredential = null;
-      await deleteLocalCredential(config.paseoHome);
+      if (credentialToDelete !== null) {
+        await deleteLocalCredential(config.paseoHome, {
+          serverId,
+          token: credentialToDelete,
+          deleteLegacy: mirrorsLegacyCredential,
+        }).catch((deleteError) => {
+          logger.warn({ err: deleteError, serverId }, "Failed to delete local credential");
+        });
+      }
       unsubscribePluginProviders();
       unsubscribePluginSessionChanges();
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
@@ -1960,8 +2054,15 @@ export async function createPaseoDaemon(
       await agentProviderRuntime.shutdown().catch(() => undefined);
       if (mainStarted) {
         httpServer.closeAllConnections();
-        await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+        // Promise.withResolvers is unavailable under the ES2023 lib target.
+        await new Promise<void>((resolve) => {
+          httpServer.close(() => resolve());
+        });
       }
+      await daemonInstanceRegistration?.release().catch((releaseError) => {
+        logger.warn({ err: releaseError, serverId }, "Failed to release daemon instance registry");
+      });
+      daemonInstanceRegistration = null;
       throw error;
     }
   };
@@ -1969,70 +2070,86 @@ export async function createPaseoDaemon(
   const stop = async (options?: { keepTerminals?: boolean }) => {
     const keepTerminals = options?.keepTerminals === true;
     let terminalShutdownError: unknown = null;
+    const credentialToDelete = localCredential;
     localCredential = null;
-    await deleteLocalCredential(config.paseoHome);
-    // Stop tracking plugin provider registrations before anything tears plugins
-    // down, so plugin shutdown cannot withdraw a provider from under an agent
-    // that is still open. Plugins themselves are stopped once every session
-    // they serve has been closed, further down.
-    unsubscribePluginProviders();
-    unsubscribePluginSessionChanges();
-    await hubRelationships.stop();
-    workspaceReconciliation.dispose();
-    scriptHealthMonitor.stop();
-    unsubscribeIdleRuntimeCleanup();
-    await idleRuntimeCleanup.close();
-    // Freeze both ingress and registration before taking the agent closure snapshot.
-    wsServer?.prepareForShutdown();
-    await finishSubscriptions.close();
-    await wsServer?.agentMessages.close();
-    agentManager.prepareForShutdown();
-    await restartRecovery.captureRunningAgents();
-    await closeAllAgents(logger, agentManager);
-    await withTimeout({
-      promise: pluginRuntime.drainEvents(),
-      timeoutMs: AGENT_CLOSE_TIMEOUT_MS,
-      label: "drain plugin lifecycle events",
-    }).catch((error) => logger.warn({ err: error }, "Plugin lifecycle events did not finish"));
-    await agentManager.flushForShutdown().catch(() => undefined);
-    detachAgentStoragePersistence();
-    await agentStorage.flush().catch(() => undefined);
-    await agentProviderRuntime.shutdown();
-    await pluginRuntime.stopAllPlugins();
     try {
-      if (keepTerminals) {
-        await terminalManager.detach();
-        logger.info("Terminals left running for the next daemon");
-      } else {
-        await terminalManager.closeTerminals();
+      if (credentialToDelete !== null) {
+        await deleteLocalCredential(config.paseoHome, {
+          serverId,
+          token: credentialToDelete,
+          deleteLegacy: mirrorsLegacyCredential,
+        }).catch((error) => {
+          logger.warn({ err: error, serverId }, "Failed to delete local credential");
+        });
       }
-    } catch (error) {
-      // Finish the rest of the shutdown, then report it: the supervisor and `daemon stop`
-      // retry the cleanup from the record the reaper kept.
-      terminalShutdownError = error;
-      logger.error({ err: error }, "Terminal shutdown failed");
-    }
-    await speechService.stop();
-    await scheduleService.stop().catch(() => undefined);
-    await relayRuntime?.stop().catch(() => undefined);
-    if (wsServer) {
-      await wsServer.close();
-    }
-    await serviceProxy.stopStandalone();
-    // Force-drop remaining sockets so httpServer.close() resolves promptly.
-    // We've already closed wsServer (which sent ws-layer close frames) and
-    // stopped every other service, so anything still attached is a TCP
-    // socket whose higher-level shutdown hasn't fully released it (e.g.
-    // upgraded WS sockets in the closing handshake, or HTTP keep-alive
-    // sockets in CLOSE_WAIT). closeIdleConnections() does not catch
-    // upgraded sockets, so we use closeAllConnections() here.
-    httpServer.closeAllConnections();
-    await new Promise<void>((resolve) => {
-      httpServer.close(() => resolve());
-    });
-    // Clean up socket files
-    if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
-      unlinkSync(listenTarget.path);
+      // Stop tracking plugin provider registrations before anything tears plugins
+      // down, so plugin shutdown cannot withdraw a provider from under an agent
+      // that is still open. Plugins themselves are stopped once every session
+      // they serve has been closed, further down.
+      unsubscribePluginProviders();
+      unsubscribePluginSessionChanges();
+      await hubRelationships.stop();
+      workspaceReconciliation.dispose();
+      scriptHealthMonitor.stop();
+      unsubscribeIdleRuntimeCleanup();
+      await idleRuntimeCleanup.close();
+      // Freeze both ingress and registration before taking the agent closure snapshot.
+      wsServer?.prepareForShutdown();
+      await finishSubscriptions.close();
+      await wsServer?.agentMessages.close();
+      agentManager.prepareForShutdown();
+      await restartRecovery.captureRunningAgents();
+      await closeAllAgents(logger, agentManager);
+      await withTimeout({
+        promise: pluginRuntime.drainEvents(),
+        timeoutMs: AGENT_CLOSE_TIMEOUT_MS,
+        label: "drain plugin lifecycle events",
+      }).catch((error) => logger.warn({ err: error }, "Plugin lifecycle events did not finish"));
+      await agentManager.flushForShutdown().catch(() => undefined);
+      detachAgentStoragePersistence();
+      await agentStorage.flush().catch(() => undefined);
+      await agentProviderRuntime.shutdown();
+      await pluginRuntime.stopAllPlugins();
+      try {
+        if (keepTerminals) {
+          await terminalManager.detach();
+          logger.info("Terminals left running for the next daemon");
+        } else {
+          await terminalManager.closeTerminals();
+        }
+      } catch (error) {
+        // Finish the rest of the shutdown, then report it: the supervisor and `daemon stop`
+        // retry the cleanup from the record the reaper kept.
+        terminalShutdownError = error;
+        logger.error({ err: error }, "Terminal shutdown failed");
+      }
+      await speechService.stop();
+      await scheduleService.stop().catch(() => undefined);
+      await relayRuntime?.stop().catch(() => undefined);
+      if (wsServer) {
+        await wsServer.close();
+      }
+      await serviceProxy.stopStandalone();
+      // Force-drop remaining sockets so httpServer.close() resolves promptly.
+      // We've already closed wsServer (which sent ws-layer close frames) and
+      // stopped every other service, so anything still attached is a TCP
+      // socket whose higher-level shutdown hasn't fully released it (e.g.
+      // upgraded WS sockets in the closing handshake, or HTTP keep-alive
+      // sockets in CLOSE_WAIT). closeIdleConnections() does not catch
+      // upgraded sockets, so we use closeAllConnections() here.
+      httpServer.closeAllConnections();
+      await new Promise<void>((resolve) => {
+        httpServer.close(() => resolve());
+      });
+      // Clean up socket files
+      if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
+        unlinkSync(listenTarget.path);
+      }
+    } finally {
+      await daemonInstanceRegistration?.release().catch((error) => {
+        logger.warn({ err: error, serverId }, "Failed to release daemon instance registry");
+      });
+      daemonInstanceRegistration = null;
     }
     if (terminalShutdownError) {
       throw terminalShutdownError;

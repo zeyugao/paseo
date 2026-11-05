@@ -10,6 +10,7 @@ import {
 } from "../src/server/pid-lock.js";
 import { resolvePaseoHome } from "../src/server/paseo-home.js";
 import { daemonLogPath } from "../src/server/daemon-instance.js";
+import { releaseDaemonInstanceForExitedWorker } from "../src/server/daemon-instance-registry.js";
 import { PRIVATE_FILE_MODE } from "../src/server/private-files.js";
 import { loadPersistedConfig } from "../src/server/persisted-config.js";
 import { reapTerminalWorkers } from "../src/terminal/terminal-worker-reaper.js";
@@ -98,6 +99,36 @@ function resolvePackagedNodeEntrypointRunnerPath(currentScriptPath: string): str
   return existsSync(runnerPath) ? runnerPath : null;
 }
 
+export const PID_LOCK_HEARTBEAT_FAILURE_LIMIT = 3;
+
+export function createPidLockHeartbeatCallbacks(input: {
+  reportError: (message: string) => void;
+  requestShutdown: (reason: string) => void;
+}): { onSuccess: () => void; onError: (error: unknown) => void } {
+  let consecutiveFailures = 0;
+  let shutdownRequested = false;
+  return {
+    onSuccess: () => {
+      consecutiveFailures = 0;
+    },
+    onError: (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      input.reportError(message);
+      if (shutdownRequested) return;
+      consecutiveFailures += 1;
+      if (error instanceof PidLockError) {
+        shutdownRequested = true;
+        input.requestShutdown("pid_lock_ownership_lost");
+        return;
+      }
+      if (consecutiveFailures >= PID_LOCK_HEARTBEAT_FAILURE_LIMIT) {
+        shutdownRequested = true;
+        input.requestShutdown("pid_lock_heartbeat_failed");
+      }
+    },
+  };
+}
+
 async function main(): Promise<void> {
   const config = parseConfig(process.argv.slice(2));
   const workerEntry = config.devMode ? resolveDevWorkerEntry() : resolveWorkerEntry();
@@ -112,8 +143,9 @@ async function main(): Promise<void> {
   const persistedConfig = loadPersistedConfig(paseoHome);
   const supervisorLogFile = resolveSupervisorLogFile(paseoHome, persistedConfig, workerEnv);
 
+  let ownsPidLock: boolean;
   try {
-    await acquirePidLock(paseoHome, null, {
+    ownsPidLock = await acquirePidLock(paseoHome, null, {
       ownerPid: process.pid,
     });
   } catch (error) {
@@ -122,28 +154,38 @@ async function main(): Promise<void> {
     }
     throw error;
   }
+  workerEnv.PASEO_PID_LOCK_OWNER = ownsPidLock ? "1" : "0";
+  if (!ownsPidLock) {
+    process.stderr.write(
+      "Another daemon owns paseo.pid; continuing without CLI discovery ownership\n",
+    );
+  }
 
   let lockReleased = false;
   let requestSupervisorShutdown: ((reason: string) => void) | null = null;
-  const stopLockHeartbeat = startPidLockHeartbeat(paseoHome, {
-    ownerPid: process.pid,
-    onError: (error) => {
-      const message = error instanceof Error ? error.message : String(error);
+  const heartbeatCallbacks = createPidLockHeartbeatCallbacks({
+    reportError: (message) => {
       process.stderr.write(`PID lock heartbeat failed: ${message}\n`);
-      if (error instanceof PidLockError) {
-        requestSupervisorShutdown?.("pid_lock_ownership_lost");
-      }
     },
+    requestShutdown: (reason) => requestSupervisorShutdown?.(reason),
   });
+  const stopLockHeartbeat = ownsPidLock
+    ? startPidLockHeartbeat(paseoHome, {
+        ownerPid: process.pid,
+        ...heartbeatCallbacks,
+      })
+    : () => {};
   const releaseLock = async (): Promise<void> => {
     if (lockReleased) {
       return;
     }
     lockReleased = true;
     stopLockHeartbeat();
-    await releasePidLock(paseoHome, {
-      ownerPid: process.pid,
-    });
+    if (ownsPidLock) {
+      await releasePidLock(paseoHome, {
+        ownerPid: process.pid,
+      });
+    }
   };
 
   const supervisor = runSupervisor({
@@ -170,11 +212,19 @@ async function main(): Promise<void> {
       : undefined,
     restartOnCrash: true,
     logFile: supervisorLogFile,
-    onWorkerReady: async ({ listen, serverId }) => {
-      await updatePidLock(paseoHome, { listen, serverId }, { ownerPid: process.pid });
+    onWorkerReady: ownsPidLock
+      ? async ({ listen, serverId }) => {
+          await updatePidLock(paseoHome, { listen, serverId }, { ownerPid: process.pid });
+        }
+      : undefined,
+    onWorkerExit: async ({ pid, serverId }) => {
+      if (pid !== null && serverId !== null) {
+        await releaseDaemonInstanceForExitedWorker(paseoHome, serverId, pid);
+      }
+      if (ownsPidLock) {
+        await updatePidLock(paseoHome, { listen: null, serverId: null }, { ownerPid: process.pid });
+      }
     },
-    onWorkerExit: () =>
-      updatePidLock(paseoHome, { listen: null, serverId: null }, { ownerPid: process.pid }),
     onSupervisorExit: releaseLock,
     cleanupTerminals: async (log) => {
       const result = await reapTerminalWorkers({ paseoHome, log });
@@ -208,7 +258,9 @@ function failStartup(detail: string, summary: string): never {
   process.exit(1);
 }
 
-void main().catch((error) => {
-  if (error instanceof Error) failStartup(error.stack ?? error.message, error.message);
-  failStartup(String(error), String(error));
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  void main().catch((error) => {
+    if (error instanceof Error) failStartup(error.stack ?? error.message, error.message);
+    failStartup(String(error), String(error));
+  });
+}

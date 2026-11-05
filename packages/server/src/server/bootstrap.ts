@@ -1001,6 +1001,7 @@ export async function createPaseoDaemon(
   const workspaceLabelService = createWorkspaceLabelService({
     paseoHome: config.paseoHome,
     workspaceRegistry,
+    serverId,
   });
   const github = createGitHubService();
   const workspaceGitService = new WorkspaceGitServiceImpl({

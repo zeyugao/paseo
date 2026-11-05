@@ -207,6 +207,8 @@
               "server/web-ui.ts": ["readFileSync", "statSync"],
               // Startup registry hydration: check persisted workspace directories before the runtime reconciliation service starts.
               "server/workspace-registry-bootstrap.ts": ["statSync"],
+              // TODO: registry writes dereference workspace symlinks synchronously to keep atomic-replace semantics; migrate together with atomic-file.
+              "server/workspace-registry.ts": ["realpathSync"],
               // Terminal child process: hook config installation/removal is owned by terminal creation and teardown in the worker.
               "terminal/agent-hooks/agent-hook-installer.ts": [
                 "existsSync",

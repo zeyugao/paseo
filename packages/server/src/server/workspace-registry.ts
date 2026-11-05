@@ -1,15 +1,20 @@
+import { realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { withReclaimLock } from "./pid-lock.js";
 
 import type { Logger } from "pino";
 import { z } from "zod";
 
 import { writeJsonFileAtomic } from "./atomic-file.js";
-import { areEquivalentPaths } from "../utils/path.js";
+import { areEquivalentPaths, expandTilde } from "../utils/path.js";
+import { isSameOrDescendantPath } from "./path-utils.js";
 import {
   generateProjectId,
   type PersistedProjectKind,
   type PersistedWorkspaceKind,
 } from "./workspace-registry-model.js";
+import { mergeLocalProjectKeyServerIds } from "./project-key.js";
 import type { UntrustedWorkspaceSource } from "./workspace-automation-gate.js";
 
 const UntrustedWorkspaceSourceSchema = z.object({
@@ -53,6 +58,7 @@ const PersistedWorkspaceRecordSchema = z.object({
   workspaceId: z.string(),
   projectId: z.string(),
   cwd: z.string(),
+  hostId: z.string().optional(),
   kind: z.enum(["local_checkout", "worktree", "directory"]),
   displayName: z.string(),
   // User-set title layered over the derived displayName. In Model B the title is
@@ -179,13 +185,20 @@ export interface WorkspaceRegistry {
 
 type RegistryRecord = PersistedProjectRecord | PersistedWorkspaceRecord;
 
+interface RegistryFileMetadata {
+  mtimeMs: number;
+  size: number;
+}
+
 class FileBackedRegistry<TRecord extends RegistryRecord> {
   private readonly filePath: string;
+  private readonly mutationLockPath: string;
   protected readonly logger: Logger;
   private readonly schema: z.ZodType<TRecord, unknown>;
   private readonly getId: (record: TRecord) => string;
   private readonly activeIds = new Set<string>();
   private loaded = false;
+  private fileMetadata: RegistryFileMetadata | null = null;
   private readonly cache = new Map<string, TRecord>();
   private mutationQueue: Promise<void> = Promise.resolve();
   private mutationsBlockedUntilRestart = false;
@@ -200,6 +213,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     writeRecords?: (filePath: string, records: readonly TRecord[]) => Promise<void>;
   }) {
     this.filePath = options.filePath;
+    this.mutationLockPath = join(dirname(options.filePath), ".labels.lock");
     this.schema = options.schema;
     this.getId = options.getId;
     this.logger = options.logger.child({
@@ -210,7 +224,9 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
   }
 
   async initialize(): Promise<void> {
-    await this.load();
+    await this.runInMutationQueue(async () => {
+      await this.refreshCacheFromDisk();
+    });
   }
 
   async existsOnDisk(): Promise<boolean> {
@@ -223,18 +239,24 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
   }
 
   async listAll(): Promise<TRecord[]> {
-    await this.load();
-    return Array.from(this.cache.values());
+    return this.runInMutationQueue(async () => {
+      await this.refreshCacheFromDisk();
+      return Array.from(this.cache.values());
+    });
   }
 
   async listActive(): Promise<TRecord[]> {
-    await this.load();
-    return Array.from(this.activeIds, (id) => this.cache.get(id)!);
+    return this.runInMutationQueue(async () => {
+      await this.refreshCacheFromDisk();
+      return Array.from(this.activeIds, (id) => this.cache.get(id)!);
+    });
   }
 
   async get(id: string): Promise<TRecord | null> {
-    await this.load();
-    return this.cache.get(id) ?? null;
+    return this.runInMutationQueue(async () => {
+      await this.refreshCacheFromDisk();
+      return this.cache.get(id) ?? null;
+    });
   }
 
   async upsert(record: TRecord): Promise<void> {
@@ -278,26 +300,66 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     });
   }
 
-  private async load(): Promise<void> {
-    if (this.loaded) {
+  private diskStateUncertain = false;
+
+  private async refreshCacheFromDisk(): Promise<void> {
+    if (this.mutationsBlockedUntilRestart) {
+      // Frozen after an uncertain label commit: reads keep serving the last
+      // acknowledged cache; restart recovery is what reloads from disk.
+      return;
+    }
+    let metadata: RegistryFileMetadata | null;
+    try {
+      metadata = await this.readFileMetadata();
+    } catch (error) {
+      this.logger.error({ err: error, filePath: this.filePath }, "Failed to inspect registry file");
+      return;
+    }
+    if (
+      this.loaded &&
+      ((!this.fileMetadata && !metadata) ||
+        (this.fileMetadata?.mtimeMs === metadata?.mtimeMs &&
+          this.fileMetadata?.size === metadata?.size))
+    ) {
       return;
     }
 
-    this.cache.clear();
+    const nextCache = new Map<string, TRecord>();
     try {
-      const raw = await fs.readFile(this.filePath, "utf8");
-      const parsed = z.array(this.schema).parse(JSON.parse(raw));
-      for (const record of parsed) {
-        this.cache.set(this.getId(record), record);
+      if (metadata) {
+        const raw = await fs.readFile(this.filePath, "utf8");
+        const parsed = z.array(this.schema).parse(JSON.parse(raw));
+        for (const record of parsed) {
+          nextCache.set(this.getId(record), record);
+        }
       }
+      this.cache.clear();
+      for (const [id, record] of nextCache) this.cache.set(id, record);
+      this.fileMetadata = metadata;
+      this.diskStateUncertain = false;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") {
         this.logger.error({ err: error, filePath: this.filePath }, "Failed to load registry file");
+        // The file exists but cannot be read or parsed. Writing the stale
+        // cache back would silently destroy concurrent records from other
+        // daemons; block mutations until a successful refresh.
+        this.diskStateUncertain = true;
       }
+      this.fileMetadata = null;
     }
     this.rebuildActiveIndex();
     this.loaded = true;
+  }
+
+  private async readFileMetadata(): Promise<RegistryFileMetadata | null> {
+    try {
+      const metadata = await fs.stat(this.filePath);
+      return { mtimeMs: metadata.mtimeMs, size: metadata.size };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
   }
 
   protected async mutateMany(
@@ -316,22 +378,27 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
     updater: (records: Map<string, TRecord>) => TResult,
     hooks?: {
       forcePersist?: (result: TResult) => boolean;
+      beforeUpdate?: () => Promise<void>;
       beforeWrite?: (records: readonly TRecord[]) => Promise<void>;
       afterWrite?: () => Promise<void>;
       afterCommit?: () => void;
+      lockHeld?: boolean;
     },
   ): Promise<TResult> {
-    const previous = this.mutationQueue;
-    let release!: () => void;
-    this.mutationQueue = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      await this.load();
+    // Reserve the queue slot synchronously at call time: acquiring the
+    // cross-process lock first would let two concurrent mutations race for
+    // the lock and invert their call order in the queue.
+    const operation = async (): Promise<TResult> => {
+      await this.refreshCacheFromDisk();
       if (this.mutationsBlockedUntilRestart) {
         throw new Error("Workspace registry mutations are blocked until daemon restart");
       }
+      if (this.diskStateUncertain) {
+        throw new Error(
+          "Workspace registry file is unreadable; mutations are blocked until it can be refreshed",
+        );
+      }
+      await hooks?.beforeUpdate?.();
       const staged = new Map(this.cache);
       const result = updater(staged);
       const recordsChanged = !mapsEqual(this.cache, staged);
@@ -343,10 +410,26 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
       if (recordsChanged) {
         this.cache.clear();
         for (const [id, record] of staged) this.cache.set(id, record);
+        this.fileMetadata = await this.readFileMetadata();
       }
       this.rebuildActiveIndex();
       hooks?.afterCommit?.();
       return result;
+    };
+    return this.runInMutationQueue(() =>
+      hooks?.lockHeld ? operation() : withReclaimLock(this.mutationLockPath, operation),
+    );
+  }
+
+  private async runInMutationQueue<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
+    const previous = this.mutationQueue;
+    let release!: () => void;
+    this.mutationQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
     } finally {
       release();
     }
@@ -422,32 +505,39 @@ export class FileBackedProjectRegistry
     this.allocationQueue = new Promise<void>((resolve) => (release = resolve));
     await previous;
     try {
-      const active = (await this.list())
-        .filter(
-          (project) => !project.archivedAt && areEquivalentPaths(project.rootPath, input.rootPath),
-        )
-        .sort(
-          (left, right) =>
-            Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
-            left.projectId.localeCompare(right.projectId),
-        )[0];
-      if (active) {
-        if (active.kind === input.kind && active.projectKey === (input.projectKey ?? null))
-          return active;
-        const refreshed = {
-          ...active,
-          kind: input.kind,
-          projectKey: input.projectKey ?? null,
-          updatedAt: input.timestamp,
-        };
-        await this.upsert(refreshed);
-        return refreshed;
-      }
+      const { record, changed } = await this.mutateCache((records) => {
+        const active = [...records.values()]
+          .filter(
+            (project) =>
+              !project.archivedAt && areEquivalentPaths(project.rootPath, input.rootPath),
+          )
+          .sort(
+            (left, right) =>
+              Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
+              left.projectId.localeCompare(right.projectId),
+          )[0];
+        if (active) {
+          const requestedKey = input.projectKey ?? null;
+          const projectKey =
+            requestedKey === null
+              ? null
+              : mergeLocalProjectKeyServerIds(active.projectKey, requestedKey);
+          if (active.kind === input.kind && active.projectKey === projectKey) {
+            return { record: active, changed: false };
+          }
+          const refreshed = {
+            ...active,
+            kind: input.kind,
+            projectKey,
+            updatedAt: input.timestamp,
+          };
+          records.set(active.projectId, refreshed);
+          return { record: refreshed, changed: true };
+        }
 
-      for (;;) {
-        const projectId = this.projectIdFactory();
-        if (await this.get(projectId)) continue;
-        const record = createPersistedProjectRecord({
+        let projectId = this.projectIdFactory();
+        while (records.has(projectId)) projectId = this.projectIdFactory();
+        const created = createPersistedProjectRecord({
           projectId,
           rootPath: input.rootPath,
           kind: input.kind,
@@ -456,9 +546,20 @@ export class FileBackedProjectRegistry
           createdAt: input.timestamp,
           updatedAt: input.timestamp,
         });
-        await this.upsert(record);
-        return record;
+        records.set(projectId, created);
+        return { record: created, changed: true };
+      });
+      // The atomic cache mutation above replaced the pre-refactor `upsert`
+      // call, which notified listeners; publish after commit so subscribers
+      // (session directory pushes) still learn about new/refreshed projects.
+      if (changed) {
+        await this.notifyMutation({
+          kind: "upsert",
+          projectId: record.projectId,
+          project: record,
+        });
       }
+      return record;
     } finally {
       release();
     }
@@ -550,7 +651,12 @@ export class FileBackedWorkspaceRegistry
     workspaceId: string,
     updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
   ): Promise<PersistedWorkspaceRecord | null> {
-    const workspace = await super.update(workspaceId, updater);
+    const workspace = await super.update(workspaceId, (current) => {
+      const next = updater(current);
+      return current.hostId !== undefined && next.hostId === undefined
+        ? { ...next, hostId: current.hostId }
+        : next;
+    });
     if (workspace) {
       await this.notifyMutation({ kind: "upsert", workspaceId, workspace });
     }
@@ -606,10 +712,12 @@ export class FileBackedWorkspaceRegistry
       result: TResult;
       forcePersist: boolean;
     };
+    beforeStage?: () => Promise<void>;
     beforeWorkspaceWrite: (records: readonly PersistedWorkspaceRecord[]) => Promise<void>;
     afterWorkspaceWrite: () => Promise<void>;
     afterCommit: () => void;
     publish?: boolean;
+    lockHeld?: boolean;
   }): Promise<TResult> {
     let changed: PersistedWorkspaceRecord[] = [];
     const committed = await this.mutateCache(
@@ -620,10 +728,12 @@ export class FileBackedWorkspaceRegistry
         return { result: staged.result, forcePersist: staged.forcePersist };
       },
       {
+        beforeUpdate: input.beforeStage,
         forcePersist: (output) => output.forcePersist,
         beforeWrite: input.beforeWorkspaceWrite,
         afterWrite: input.afterWorkspaceWrite,
         afterCommit: input.afterCommit,
+        lockHeld: input.lockHeld,
       },
     );
     if (input.publish !== false) {
@@ -678,6 +788,94 @@ export function createPersistedProjectRecord(input: {
 export function resolveProjectDisplayName(record: PersistedProjectRecord): string {
   return record.customName ?? record.displayName;
 }
+export function isWorkspaceVisibleToServer(
+  record: PersistedWorkspaceRecord,
+  serverId: string | undefined,
+): boolean {
+  return serverId === undefined || record.hostId === undefined || record.hostId === serverId;
+}
+
+// Cwd operations are allowed when the current host has an active workspace
+// covering the path. Archived local records cannot authorize a foreign-only path.
+// Explicit workspace IDs always use the stricter owner check.
+export async function assertCwdWorkspaceOwnedByThisServer(
+  cwd: string,
+  registry: Pick<WorkspaceRegistry, "listAll"> | undefined,
+  serverId: string | undefined,
+): Promise<void> {
+  if (!registry) {
+    throw new Error("Workspace registry is required for ownership checks");
+  }
+  assertCwdWorkspaceRecordsOwnedByThisServer(cwd, await registry.listAll(), serverId);
+}
+
+export function assertCwdWorkspaceRecordsOwnedByThisServer(
+  cwd: string,
+  workspaces: Iterable<PersistedWorkspaceRecord>,
+  serverId: string | undefined,
+): void {
+  const target = resolveRealpathWithMissingSuffix(expandTilde(cwd));
+  let firstForeignOverlap: PersistedWorkspaceRecord | null = null;
+  for (const workspace of workspaces) {
+    const workspaceCwd = resolveRealpathWithMissingSuffix(workspace.cwd);
+    if (
+      !isSameOrDescendantPath(target, workspaceCwd) &&
+      !isSameOrDescendantPath(workspaceCwd, target)
+    )
+      continue;
+    if (isWorkspaceVisibleToServer(workspace, serverId)) {
+      if (!workspace.archivedAt) return;
+    } else {
+      firstForeignOverlap ??= workspace;
+    }
+  }
+  if (firstForeignOverlap) {
+    throw new Error(
+      `Workspace ${firstForeignOverlap.workspaceId} is owned by host ${firstForeignOverlap.hostId}`,
+    );
+  }
+}
+
+// Migrating a legacy schedule needs an owner, not just permission for the current
+// host. Only a path with workspace records from exactly one host is unambiguous;
+// a host-less legacy workspace is visible everywhere and cannot pin an owner.
+export async function resolveCwdWorkspaceHost(
+  cwd: string,
+  registry: Pick<WorkspaceRegistry, "listAll">,
+): Promise<string | null> {
+  const target = resolveRealpathWithMissingSuffix(expandTilde(cwd));
+  let hostId: string | null = null;
+  for (const workspace of await registry.listAll()) {
+    const workspaceCwd = resolveRealpathWithMissingSuffix(workspace.cwd);
+    if (
+      !isSameOrDescendantPath(target, workspaceCwd) &&
+      !isSameOrDescendantPath(workspaceCwd, target)
+    )
+      continue;
+    if (workspace.hostId === undefined) return null;
+    if (hostId === null) {
+      hostId = workspace.hostId;
+    } else if (hostId !== workspace.hostId) {
+      return null;
+    }
+  }
+  return hostId;
+}
+
+function resolveRealpathWithMissingSuffix(path: string): string {
+  const suffix: string[] = [];
+  let candidate = path;
+  while (true) {
+    try {
+      return join(realpathSync(candidate), ...suffix);
+    } catch {
+      const parent = dirname(candidate);
+      if (parent === candidate) return path;
+      suffix.unshift(basename(candidate));
+      candidate = parent;
+    }
+  }
+}
 
 export function createPersistedWorkspaceRecord(input: {
   parentWorkspaceId?: string;
@@ -686,6 +884,7 @@ export function createPersistedWorkspaceRecord(input: {
   cwd: string;
   kind: PersistedWorkspaceKind;
   displayName: string;
+  hostId?: string;
   title?: string | null;
   branch?: string | null;
   worktreeRoot?: string | null;

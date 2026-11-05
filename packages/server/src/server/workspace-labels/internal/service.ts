@@ -9,7 +9,10 @@ import {
   type WorkspaceLabelChange,
   type WorkspaceLabelCursor,
 } from "./sequence.js";
-import type { PersistedWorkspaceRecord } from "../../workspace-registry.js";
+import {
+  isWorkspaceVisibleToServer,
+  type PersistedWorkspaceRecord,
+} from "../../workspace-registry.js";
 
 interface AssignmentCommit {
   definition: WorkspaceLabelDefinition;
@@ -45,10 +48,12 @@ export class WorkspaceLabelError extends Error {
 
 export class WorkspaceLabelService {
   private operations: Promise<void> = Promise.resolve();
+  private knownLabels: WorkspaceLabelDefinition[] | null = null;
 
   constructor(
     private readonly catalog: WorkspaceLabelCatalogStore,
     private readonly sequence = new WorkspaceLabelSequence(),
+    private readonly serverId?: string,
   ) {}
 
   async initialize(): Promise<void> {
@@ -58,7 +63,11 @@ export class WorkspaceLabelService {
   async list(
     cursor?: WorkspaceLabelCursor,
   ): Promise<ReturnType<WorkspaceLabelSequence["synchronize"]>> {
-    return this.exclusive(async () => this.sequence.synchronize(await this.catalog.list(), cursor));
+    return this.exclusive(async () => {
+      const labels = await this.catalog.list();
+      this.publishExternalChanges(labels);
+      return this.sequence.synchronize(labels, cursor);
+    });
   }
 
   async subscribe(input: {
@@ -74,6 +83,7 @@ export class WorkspaceLabelService {
       );
       try {
         const labels = await this.catalog.list();
+        this.publishExternalChanges(labels);
         return { snapshot: this.sequence.synchronize(labels, input.cursor), unsubscribe };
       } catch (error) {
         unsubscribe();
@@ -121,7 +131,7 @@ export class WorkspaceLabelService {
         };
       });
       if (committed.catalogChanged) {
-        this.sequence.publish({ kind: "upsert", label: committed.definition });
+        this.publishChange({ kind: "upsert", label: committed.definition });
       }
       return { label: committed.definition, workspaceLabels: committed.workspaceLabels };
     });
@@ -173,8 +183,9 @@ export class WorkspaceLabelService {
           color: input.color ?? existing.color,
         };
         // Workspaces store names, so only a rename rewrites assignments; a recolour is catalog-only.
+        // Reject the whole atomic commit when the rewrite would touch another host's record.
         const workspaceUpdates = nameChanged
-          ? rewriteAssignments(workspaces, fromKey, label.name)
+          ? rewriteAssignments(workspaces, fromKey, label.name, this.serverId)
           : [];
         return {
           labels: catalog.map((candidate) => (candidate === existing ? label : candidate)),
@@ -188,7 +199,7 @@ export class WorkspaceLabelService {
         };
       });
       if (committed.changed) {
-        this.sequence.publish({
+        this.publishChange({
           kind: "upsert",
           label: committed.label,
           previousName: committed.previousName,
@@ -213,7 +224,7 @@ export class WorkspaceLabelService {
             result: { affectedWorkspaceCount: 0, deletedName: null },
           };
         }
-        const workspaceUpdates = rewriteAssignments(workspaces, key);
+        const workspaceUpdates = rewriteAssignments(workspaces, key, undefined, this.serverId);
         return {
           labels: catalog.filter((label) => label !== existing),
           workspaceUpdates,
@@ -224,7 +235,7 @@ export class WorkspaceLabelService {
         };
       });
       if (committed.deletedName) {
-        this.sequence.publish({ kind: "remove", name: committed.deletedName });
+        this.publishChange({ kind: "remove", name: committed.deletedName });
       }
       return { affectedWorkspaceCount: committed.affectedWorkspaceCount };
     });
@@ -240,6 +251,47 @@ export class WorkspaceLabelService {
           .length,
       }));
     });
+  }
+
+  private publishChange(change: WorkspaceLabelChange): void {
+    this.sequence.publish(change);
+    const labels = this.knownLabels ?? [];
+    if (change.kind === "remove") {
+      this.knownLabels = labels.filter(
+        (label) => workspaceLabelKey(label.name) !== workspaceLabelKey(change.name),
+      );
+      return;
+    }
+    const previousKey = change.previousName
+      ? workspaceLabelKey(change.previousName)
+      : workspaceLabelKey(change.label.name);
+    this.knownLabels = [
+      ...labels.filter((label) => workspaceLabelKey(label.name) !== previousKey),
+      { ...change.label },
+    ];
+  }
+
+  private publishExternalChanges(labels: readonly WorkspaceLabelDefinition[]): void {
+    if (this.knownLabels === null) {
+      this.knownLabels = labels.map((label) => ({ ...label }));
+      return;
+    }
+    const previousLabels = this.knownLabels;
+    const nextKeys = new Set(labels.map((label) => workspaceLabelKey(label.name)));
+    for (const previous of previousLabels) {
+      if (!nextKeys.has(workspaceLabelKey(previous.name))) {
+        this.publishChange({ kind: "remove", name: previous.name });
+      }
+    }
+    for (const label of labels) {
+      const previous = previousLabels.find(
+        (candidate) => workspaceLabelKey(candidate.name) === workspaceLabelKey(label.name),
+      );
+      if (!previous || previous.color !== label.color || previous.name !== label.name) {
+        this.publishChange({ kind: "upsert", label: { ...label } });
+      }
+    }
+    this.knownLabels = labels.map((label) => ({ ...label }));
   }
 
   private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -275,9 +327,19 @@ function workspaceHasLabel(workspace: PersistedWorkspaceRecord, key: string): bo
 function rewriteAssignments(
   workspaces: ReadonlyMap<string, PersistedWorkspaceRecord>,
   fromKey: string,
-  to?: string,
+  to: string | undefined,
+  serverId: string | undefined,
 ): PersistedWorkspaceRecord[] {
   const now = new Date().toISOString();
+  const foreignWorkspace = [...workspaces.values()].find(
+    (workspace) =>
+      workspaceHasLabel(workspace, fromKey) && !isWorkspaceVisibleToServer(workspace, serverId),
+  );
+  if (foreignWorkspace) {
+    throw new Error(
+      `Workspace ${foreignWorkspace.workspaceId} is owned by host ${foreignWorkspace.hostId}`,
+    );
+  }
   return [...workspaces.values()].flatMap((workspace) => {
     const labels = workspace.labels ?? [];
     if (!labels.some((label) => workspaceLabelKey(label) === fromKey)) return [];

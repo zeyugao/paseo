@@ -12,6 +12,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "zx";
+import { getHostName } from "../../server/src/server/host-name.js";
 
 $.verbose = false;
 
@@ -118,7 +119,7 @@ try {
     join(paseoHome, "paseo.pid"),
     JSON.stringify({
       pid: ownerProcess.pid,
-      hostname: "test",
+      hostname: getHostName(),
       uid: process.getuid?.() ?? -1,
       listen: "127.0.0.1:1",
       startedAt: new Date().toISOString(),

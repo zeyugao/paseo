@@ -122,8 +122,8 @@ vi.mock("./session.js", () => ({
 
 vi.mock("./push/index.js", () => ({
   createPushNotifications: () => ({
-    renew: () => undefined,
-    revoke: () => undefined,
+    renew: async () => undefined,
+    revoke: async () => undefined,
     send: async () => undefined,
   }),
 }));

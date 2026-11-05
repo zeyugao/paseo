@@ -2960,8 +2960,7 @@ export class Session {
           keepTerminals: msg.keepTerminals === true,
         });
       case "client_heartbeat":
-        this.handleClientHeartbeat(msg);
-        return undefined;
+        return this.handleClientHeartbeat(msg);
       case "ping": {
         const now = Date.now();
         this.emit({
@@ -3500,10 +3499,10 @@ export class Session {
         await this.handleListCommandsRequest(msg);
         return;
       case "register_push_token":
-        this.handleRegisterPushToken(msg.token);
+        await this.handleRegisterPushToken(msg.token);
         return;
       case "push.unregister.request":
-        this.pushNotifications.revoke(msg.token);
+        await this.pushNotifications.revoke(msg.token);
         if (this.currentClientMetadata().pushToken?.trim() === msg.token.trim()) {
           this.currentClientMetadata().pushToken = null;
         }
@@ -5336,14 +5335,14 @@ export class Session {
   /**
    * Handle client heartbeat for activity tracking
    */
-  private handleClientHeartbeat(msg: {
+  private async handleClientHeartbeat(msg: {
     deviceType: "web" | "mobile";
     focusedAgentId: string | null;
     focusedTerminalId?: string | null;
     lastActivityAt: string;
     appVisible: boolean;
     appVisibilityChangedAt?: string;
-  }): void {
+  }): Promise<void> {
     const focusedTerminalId = msg.focusedTerminalId?.trim() || null;
     const appVisibilityChangedAt = msg.appVisibilityChangedAt
       ? new Date(msg.appVisibilityChangedAt)
@@ -5361,7 +5360,7 @@ export class Session {
       void this.clearFocusedTerminalAttention(focusedTerminalId);
     }
     if (metadata.pushToken) {
-      this.pushNotifications.renew(metadata.pushToken);
+      await this.pushNotifications.renew(metadata.pushToken);
     }
   }
 
@@ -5380,9 +5379,9 @@ export class Session {
   /**
    * Handle push token registration
    */
-  private handleRegisterPushToken(token: string): void {
+  private async handleRegisterPushToken(token: string): Promise<void> {
+    await this.pushNotifications.renew(token);
     this.currentClientMetadata().pushToken = token;
-    this.pushNotifications.renew(token);
     this.sessionLogger.info("Registered push token");
   }
 

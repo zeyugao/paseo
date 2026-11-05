@@ -26,11 +26,12 @@ test("a silently lost Hub connection leaves connected state and reconnects when 
   const webSockets = new WebSocketServer({ server: hub });
   const peers = new Set<WebSocket>();
   let connections = 0;
-  let pongs = 0;
+  let pings = 0;
   webSockets.on("connection", (peer) => {
     connections += 1;
     peers.add(peer);
     peer.on("close", () => peers.delete(peer));
+    peer.on("ping", () => (pings += 1));
   });
   await listen(hub);
   const hubPort = (hub.address() as AddressInfo).port;
@@ -74,10 +75,7 @@ test("a silently lost Hub connection leaves connected state and reconnects when 
         return { cancel: () => (retry = undefined) };
       },
     },
-    attachSocket: async (socket) => {
-      if (!(socket instanceof WebSocket)) throw new Error("Expected a real WebSocket");
-      socket.on("pong", () => (pongs += 1));
-    },
+    attachSocket: async () => undefined,
     updateAttachedPermissions: () => undefined,
     createExecutionAgents: () => ({
       create: async () => {
@@ -121,9 +119,9 @@ test("a silently lost Hub connection leaves connected state and reconnects when 
 
     // A healthy idle connection survives multiple liveness windows.
     for (let tick = 0; tick < 12; tick += 1) {
-      const before = pongs;
+      const before = pings;
       await vi.advanceTimersByTimeAsync(10_000);
-      await expect.poll(() => pongs).toBeGreaterThan(before);
+      await expect.poll(() => pings).toBeGreaterThan(before);
     }
     expect(controller.status().state).toBe("connected");
     expect(connections).toBe(2);

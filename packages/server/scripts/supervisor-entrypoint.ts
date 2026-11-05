@@ -14,6 +14,8 @@ import { releaseDaemonInstanceForExitedWorker } from "../src/server/daemon-insta
 import { PRIVATE_FILE_MODE } from "../src/server/private-files.js";
 import { loadPersistedConfig } from "../src/server/persisted-config.js";
 import { reapTerminalWorkers } from "../src/terminal/terminal-worker-reaper.js";
+import { terminalWorkerHome } from "../src/terminal/terminal-worker-record.js";
+import { readServerId } from "../src/server/server-id.js";
 import { runSupervisor } from "./supervisor.js";
 import { resolveSupervisorLogFile } from "./supervisor-log-config.js";
 
@@ -143,6 +145,7 @@ async function main(): Promise<void> {
   const paseoHome = resolvePaseoHome(workerEnv);
   const persistedConfig = loadPersistedConfig(paseoHome);
   const supervisorLogFile = resolveSupervisorLogFile(paseoHome, persistedConfig, workerEnv);
+  const selectedServerId = readServerId(paseoHome, workerEnv);
 
   let ownsPidLock: boolean;
   try {
@@ -189,6 +192,9 @@ async function main(): Promise<void> {
     }
   };
 
+  // Keep the selected/ready identity after worker exit clears the discovery pointer, including
+  // a stop during startup before a replacement can announce ready.
+  let terminalServerId: string | null = selectedServerId;
   const supervisor = runSupervisor({
     name: "DaemonRunner",
     startupMessage: "Starting daemon worker (IPC restart and crash restart enabled)",
@@ -213,11 +219,12 @@ async function main(): Promise<void> {
       : undefined,
     restartOnCrash: true,
     logFile: supervisorLogFile,
-    onWorkerReady: ownsPidLock
-      ? async ({ listen, serverId }) => {
-          await updatePidLock(paseoHome, { listen, serverId }, { ownerPid: process.pid });
-        }
-      : undefined,
+    onWorkerReady: async ({ listen, serverId }) => {
+      terminalServerId = serverId;
+      if (ownsPidLock) {
+        await updatePidLock(paseoHome, { listen, serverId }, { ownerPid: process.pid });
+      }
+    },
     onWorkerExit: async ({ pid, serverId }) => {
       if (pid !== null && serverId !== null) {
         await releaseDaemonInstanceForExitedWorker(paseoHome, serverId, pid);
@@ -228,7 +235,11 @@ async function main(): Promise<void> {
     },
     onSupervisorExit: releaseLock,
     cleanupTerminals: async (log) => {
-      const result = await reapTerminalWorkers({ paseoHome, log });
+      if (terminalServerId === null) return;
+      const result = await reapTerminalWorkers({
+        paseoHome: terminalWorkerHome(paseoHome, terminalServerId),
+        log,
+      });
       log("Terminal worker cleanup result", { ...result });
     },
   });

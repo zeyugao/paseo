@@ -27,6 +27,7 @@ import { reapTerminalWorkers } from "./terminal-worker-reaper.js";
 import {
   listTerminalWorkerRecords,
   terminalWorkerRecordPath,
+  terminalWorkerHome,
   type TerminalWorkerRecord,
 } from "./terminal-worker-record.js";
 import {
@@ -34,6 +35,7 @@ import {
   NoTerminalWorkerAvailableError,
   TerminalWorkerIncompatibleError,
   type TerminalWorkerPoolMember,
+  type TerminalWorkerPoolOptions,
 } from "./terminal-worker-pool.js";
 import { pruneTerminalWorkerRuntimes } from "./terminal-worker-runtime.js";
 import type {
@@ -131,6 +133,11 @@ export interface DaemonTerminalManager extends TerminalManager {
    * `afterPendingRequests`, requests already sent get their answers first.
    */
   detach(options?: { afterPendingRequests?: boolean }): Promise<void>;
+}
+
+export interface ActivatableDaemonTerminalManager extends DaemonTerminalManager {
+  /** Acquire the daemon instance lease before activation: this may adopt, reap or launch. */
+  activate(): Promise<void>;
 }
 
 function createActivityToken(): string {
@@ -986,10 +993,28 @@ export function createWorkerTerminalManager(
 
 export interface StartWorkerTerminalManagerOptions {
   paseoHome: string;
+  serverId: string;
   paseoVersion: string;
   logger: Logger;
   getTerminalActivityUrl?: () => string | null;
   requestTimeoutMs?: number;
+}
+
+/** Construct without reading records, connecting workers, reaping, or launching processes. */
+export function createDeferredWorkerTerminalManager(
+  options: StartWorkerTerminalManagerOptions,
+): ActivatableDaemonTerminalManager {
+  const input = { ...options };
+  return createTerminalWorkerPool(() => initializeWorkerTerminalManager(input));
+}
+
+/** Eager convenience for callers that already own their lifecycle (including isolated tests). */
+export async function startWorkerTerminalManager(
+  options: StartWorkerTerminalManagerOptions,
+): Promise<DaemonTerminalManager> {
+  const manager = createDeferredWorkerTerminalManager(options);
+  await manager.activate();
+  return manager;
 }
 
 // The current worker plus one draining a previous protocol. Every live worker counts,
@@ -1014,9 +1039,10 @@ interface LiveWorkerRecord {
  * never finished, a dead worker whose programs survived it) go through the reaper first, so a
  * daemon never adopts terminals someone asked to close.
  */
-export async function startWorkerTerminalManager(
-  options: StartWorkerTerminalManagerOptions,
-): Promise<DaemonTerminalManager> {
+async function initializeWorkerTerminalManager(
+  input: StartWorkerTerminalManagerOptions,
+): Promise<TerminalWorkerPoolOptions> {
+  const options = { ...input, paseoHome: terminalWorkerHome(input.paseoHome, input.serverId) };
   const logger = options.logger.child({ module: "terminal-worker" });
   const inspector = createTerminalWorkerProcessInspector();
   const log = (message: string, fields?: Record<string, unknown>) => logger.info(fields, message);
@@ -1120,17 +1146,18 @@ export async function startWorkerTerminalManager(
     });
     logger.error({ pid: newer.record.pid }, incompatible.message);
     await prune();
-    return createTerminalWorkerPool({
+    return {
       current: null,
       draining: [],
       incompatible,
       closeAll,
-    });
+    };
   }
 
   const createMember = async (
     record: TerminalWorkerRecord,
     connection: TerminalWorkerConnection,
+    workerRecordPath: string,
   ): Promise<TerminalWorkerPoolMember> => {
     let alive = true;
     let resolveExit!: () => void;
@@ -1146,7 +1173,7 @@ export async function startWorkerTerminalManager(
           if (ownership.status === "gone" || ownership.status === "unrelated") {
             await reapTerminalWorkers({
               paseoHome: options.paseoHome,
-              recordPaths: [terminalWorkerRecordPath(options.paseoHome, record.pid)],
+              recordPaths: [workerRecordPath],
               inspector,
               log,
               gracefulMs: 0,
@@ -1222,7 +1249,7 @@ export async function startWorkerTerminalManager(
       );
       continue;
     }
-    const member = await createMember(entry.record, connection);
+    const member = await createMember(entry.record, connection, entry.path);
     if (entry.fit === "current" && !current) {
       logger.info({ pid: entry.record.pid }, "Adopting running terminal worker");
       current = member;
@@ -1258,7 +1285,7 @@ export async function startWorkerTerminalManager(
       { pid: launched.record.pid, runtime: launched.record.runtime ?? null },
       "Launched terminal worker",
     );
-    return createMember(launched.record, connection);
+    return createMember(launched.record, connection, launched.recordPath);
   };
 
   await prune();
@@ -1280,7 +1307,7 @@ export async function startWorkerTerminalManager(
     }
   }
 
-  return createTerminalWorkerPool({
+  return {
     current,
     draining,
     incompatible: null,
@@ -1290,7 +1317,7 @@ export async function startWorkerTerminalManager(
       log("Released drained terminal worker", { pid: member.workerPid });
       void pruneAfterExit(member.workerPid);
     },
-  });
+  };
 }
 
 // Every worker that may still run in this home, one per record: a worker and its cleanup record

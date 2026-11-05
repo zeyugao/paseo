@@ -1,0 +1,128 @@
+name: iOS TestFlight
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "!v*-rc.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build (e.g. v0.14.1-beta.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: ios-testflight-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  testflight:
+    runs-on: xcode-27
+    timeout-minutes: 120
+    environment: production
+    env:
+      APP_VARIANT: production
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      CI: "1"
+      ONNXRUNTIME_NODE_INSTALL: skip
+      FASTLANE_SKIP_UPDATE_CHECK: "1"
+      FASTLANE_HIDE_CHANGELOG: "1"
+      SOURCE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@boudra"
+
+      - name: Install JS dependencies
+        run: node scripts/npm-retry.mjs ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve iOS release version
+        run: |
+          node scripts/ios-release-env.mjs >> "$GITHUB_ENV"
+          echo "IOS_OUTPUT_DIRECTORY=$RUNNER_TEMP/ios-release" >> "$GITHUB_ENV"
+
+      - name: Resolve TestFlight test notes
+        run: |
+          node --input-type=module <<'NODE' >> "$GITHUB_ENV"
+          import { randomUUID } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          import { parseChangelogBody, parseChangelogEntries } from "./scripts/changelog-utils.mjs";
+
+          const version = process.env.SOURCE_TAG.slice(1);
+          const entry = parseChangelogEntries(readFileSync("CHANGELOG.md", "utf8"))
+            .find((entry) => entry.version === version);
+          if (!entry) throw new Error(`No changelog entry for ${version}`);
+          const notes = parseChangelogBody(entry.bodyLines).notes.join("\n\n");
+          if (!notes || notes.length > 4000) {
+            throw new Error("TestFlight needs a changelog summary of 1–4000 characters");
+          }
+          const delimiter = randomUUID();
+          console.log(`PILOT_CHANGELOG<<${delimiter}\n${notes}\n${delimiter}`);
+          NODE
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: packages/app
+
+      - name: Build workspace dependencies
+        run: npm run build:app-deps
+
+      - name: Generate iOS project
+        working-directory: packages/app
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Install CocoaPods dependencies
+        working-directory: packages/app
+        run: bundle exec pod install --project-directory=ios
+
+      - name: Install signing credentials
+        working-directory: packages/app
+        run: bundle exec ruby ../../scripts/ios-signing.rb setup
+        env:
+          IOS_DISTRIBUTION_P12_BASE64: ${{ secrets.IOS_DISTRIBUTION_P12_BASE64 }}
+          IOS_DISTRIBUTION_P12_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_P12_PASSWORD }}
+          IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+
+      - name: Build and distribute to Overkite Internal
+        working-directory: packages/app
+        run: bundle exec fastlane ios build_testflight
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+
+      - name: Remove signing credentials
+        if: ${{ always() }}
+        working-directory: packages/app
+        run: ruby ../../scripts/ios-signing.rb cleanup
+
+      - name: Upload iOS artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: overkite-${{ env.SOURCE_TAG }}-ios
+          path: |
+            ${{ runner.temp }}/ios-release/*.ipa
+            ${{ runner.temp }}/ios-release/*.dSYM.zip
+            ${{ runner.temp }}/ios-release/logs/**
+          if-no-files-found: ignore
+          retention-days: 7

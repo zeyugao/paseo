@@ -1499,6 +1499,7 @@ export class AgentManager {
         workspaceId: options.workspaceId ?? null,
         title: options.initialTitle ?? storedConfig.title ?? null,
         labels: options.labels ?? {},
+        internal: config.internal === true,
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -1801,6 +1802,7 @@ export class AgentManager {
         workspaceId: existing.workspaceId,
         title: await this.resolveInitialPersistedTitle(agentId, existing.config, null),
         labels: existing.labels,
+        internal: refreshConfig.internal === true,
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -5780,35 +5782,20 @@ export class AgentManager {
       workspaceId?: string | null;
       title?: string | null;
       labels?: Record<string, string>;
+      /** Internal agents (title refiner, branch naming) skip plugin hooks,
+       * mirroring the `agent.create` hook's `!config.internal` gate. */
+      internal?: boolean;
     },
   ): Promise<AgentLaunchContext> {
     // A plugin changing during this open must still make the resulting session stale.
     const generation = this.sessionOpenGeneration;
     this.detachPluginTools(agentId);
-    let mcpServers: AgentSessionConfig["mcpServers"];
-    let mcpServerOwners: Record<string, string> | undefined;
-    if (this.pluginLifecycle) {
-      const request = {
-        agentId,
-        provider: client.provider,
-        cwd,
-        workspaceId: opening?.workspaceId ?? null,
-        reason: opening?.reason ?? "resume",
-        purpose: opening?.purpose ?? "interactive",
-        env: { ...env },
-        title: opening?.title ?? null,
-        labels: opening?.labels ?? {},
-        tools: [],
-        mcpServers: {},
-      };
-      const transformed = await this.pluginLifecycle.before("agent.open.before", request);
-      env = transformed.env;
-      if (request.purpose === "interactive") {
-        this.attachedPluginTools.set(agentId, transformed.tools as AttachedAgentTool[]);
-        mcpServers = transformed.mcpServers;
-        mcpServerOwners = transformed.mcpServerOwners;
-      }
-    }
+    const {
+      env: sessionOpenEnv,
+      mcpServers,
+      mcpServerOwners,
+    } = await this.runSessionOpenPluginHooks(agentId, client, cwd, env, opening);
+    env = sessionOpenEnv;
     const context: AgentLaunchContext = {
       agentId,
       mcpServers,
@@ -5839,6 +5826,45 @@ export class AgentManager {
     }
     this.sessionOpenGenerations.set(agentId, generation);
     return context;
+  }
+
+  private async runSessionOpenPluginHooks(
+    agentId: string,
+    client: AgentClient,
+    cwd: string,
+    env: Record<string, string> | undefined,
+    opening: Parameters<AgentManager["buildLaunchContext"]>[5],
+  ): Promise<{
+    env: Record<string, string> | undefined;
+    mcpServers: AgentSessionConfig["mcpServers"];
+    mcpServerOwners: Record<string, string> | undefined;
+  }> {
+    if (!this.pluginLifecycle || opening?.internal === true) {
+      return { env, mcpServers: undefined, mcpServerOwners: undefined };
+    }
+    const request = {
+      agentId,
+      provider: client.provider,
+      cwd,
+      workspaceId: opening?.workspaceId ?? null,
+      reason: opening?.reason ?? "resume",
+      purpose: opening?.purpose ?? "interactive",
+      env: { ...env },
+      title: opening?.title ?? null,
+      labels: opening?.labels ?? {},
+      tools: [],
+      mcpServers: {},
+    };
+    const transformed = await this.pluginLifecycle.before("agent.open.before", request);
+    if (request.purpose !== "interactive") {
+      return { env: transformed.env, mcpServers: undefined, mcpServerOwners: undefined };
+    }
+    this.attachedPluginTools.set(agentId, transformed.tools as AttachedAgentTool[]);
+    return {
+      env: transformed.env,
+      mcpServers: transformed.mcpServers,
+      mcpServerOwners: transformed.mcpServerOwners,
+    };
   }
 
   private resolveProviderLaunchConfig(

@@ -365,6 +365,27 @@ describe("OMP agent client and session", () => {
     expect(omp.completedTurnCount()).toBe(1);
   });
 
+  test("starts Paseo lifecycle on agent_start and ignores later model-cycle starts", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    await omp.startActiveTurn("inspect the project");
+    const runtime = omp.runtime();
+    runtime.emit({ type: "agent_start" });
+    runtime.emit({
+      type: "message_update",
+      message: { role: "assistant", content: [], responseId: "reasoning-1" },
+      assistantMessageEvent: { type: "thinking_delta", delta: "Checking files" },
+    });
+    runtime.beginTurn();
+
+    expect(omp.eventTypes().slice(0, 3)).toEqual(["turn_started", "thread_started", "timeline"]);
+    expect(omp.eventTypes().filter((type) => type === "turn_started")).toHaveLength(1);
+    expect(omp.timeline()).toEqual([{ type: "reasoning", text: "Checking files" }]);
+
+    runtime.finishTurn();
+  });
+
   test("streams OMP advisor messages as distinct tool-call blocks", async () => {
     const omp = new OmpHarness();
     await omp.start();
@@ -541,6 +562,49 @@ describe("OMP agent client and session", () => {
     scheduler.retry();
     await expect(completion).rejects.toThrow(/provider idle/i);
     expect(omp.runningToolCallIds()).toEqual([]);
+  });
+
+  test("settles an active turn when OMP reports the session settled without a terminal agent_end", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const runtime = omp.runtime();
+    const promptStarted = runtime.nextPrompt();
+    const run = omp.requireSession().run("first");
+    await promptStarted;
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "user-1");
+    runtime.streamAssistantText("first done");
+    runtime.emit({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "first done" }] },
+    });
+    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+    // The terminal agent_end never arrived (e.g. the frame was dropped after a
+    // protocol drift); OMP's settle watcher still reports the session quiet.
+    runtime.emit({ type: "session_settled" });
+
+    await expect(run).resolves.toMatchObject({ finalText: "first done" });
+    expect(omp.completedTurnCount()).toBe(1);
+  });
+
+  test("ignores session_settled when no turn is active", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const runtime = omp.runtime();
+    const promptStarted = runtime.nextPrompt();
+    const run = omp.requireSession().run("first");
+    await promptStarted;
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "user-1");
+    runtime.streamAssistantText("first done");
+    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+    runtime.finishTurn();
+    await expect(run).resolves.toMatchObject({ finalText: "first done" });
+    expect(omp.completedTurnCount()).toBe(1);
+
+    runtime.emit({ type: "session_settled" });
+    await waitForImmediate();
+    expect(omp.completedTurnCount()).toBe(1);
   });
 
   test("steers a running turn and correlates a template-expanded echo exactly once", async () => {
@@ -1254,6 +1318,70 @@ describe("OMP agent client and session", () => {
       { label: "First" },
       { label: "Second" },
     ]);
+  });
+
+  test("normalizes unknown OMP message roles so a terminal agent_end still parses", () => {
+    const parsed = OmpRuntimeEventSchema.safeParse({
+      type: "agent_end",
+      isTerminal: true,
+      messages: [
+        { role: "user", content: "fix the slides" },
+        {
+          role: "developer",
+          content: [
+            {
+              type: "text",
+              text: "<system-reminder>Rule: prefer arrays over Sets</system-reminder>",
+            },
+          ],
+        },
+        { role: "developer", content: "passive tool context follows" },
+        { role: "assistant", content: [{ type: "text", text: "done" }] },
+      ],
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw new Error("Expected unknown-role agent_end to parse");
+    if (parsed.data.type !== "agent_end") throw new Error("Expected an agent_end event");
+    expect(parsed.data.messages).toEqual([
+      { role: "user", content: "fix the slides" },
+      {
+        role: "custom",
+        content: "<system-reminder>Rule: prefer arrays over Sets</system-reminder>",
+        display: false,
+      },
+      { role: "custom", content: "[developer] passive tool context follows" },
+      { role: "assistant", content: [{ type: "text", text: "done" }] },
+    ]);
+  });
+
+  test("still rejects malformed known-role messages inside an agent_end", () => {
+    const parsed = OmpRuntimeEventSchema.safeParse({
+      type: "agent_end",
+      isTerminal: true,
+      messages: [{ role: "user", content: 42 }],
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  test("renders a live unknown-role message as a fallback row", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    await omp.startActiveTurn("first");
+    const parsed = OmpRuntimeEventSchema.safeParse({
+      type: "message_end",
+      message: { role: "developer", content: "prefer arrays over Sets" },
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw new Error("Expected unknown-role message_end to parse");
+
+    omp.emit(parsed.data);
+    expect(omp.timeline()).toContainEqual(
+      expect.objectContaining({
+        type: "tool_call",
+        name: "custom-message",
+        detail: { type: "plain_text", text: "[developer] prefer arrays over Sets" },
+      }),
+    );
   });
 
   test("exposes OMP modes and commands through the domain session", async () => {

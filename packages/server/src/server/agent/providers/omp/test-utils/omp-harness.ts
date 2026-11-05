@@ -578,6 +578,16 @@ export class OmpHarness {
     return this.requireSession().startTurn(message);
   }
 
+  async startActiveTurn(message: string, clientMessageId?: string): Promise<string> {
+    const promptStarted = this.omp.latestSession().nextPrompt();
+    const { turnId } = await this.requireSession().startTurn(
+      message,
+      clientMessageId ? { clientMessageId } : undefined,
+    );
+    await promptStarted;
+    return turnId;
+  }
+
   async interrupt(): Promise<void> {
     await this.requireSession().interrupt();
   }

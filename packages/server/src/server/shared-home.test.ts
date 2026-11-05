@@ -121,15 +121,29 @@ test("two daemons share one home with per-host workspaces and cross-host agent r
       hostId: "srv_shared_a",
     } satisfies StoredAgentRecord);
 
-    const listedOnB = await waitFor(async () => {
-      const agents = await clientB.fetchAgents();
-      return agents.entries.some((entry) => entry.agent.id === foreignAgentId);
+    const readableOnB = await waitFor(async () => {
+      const agent = await clientB.fetchAgent({ agentId: foreignAgentId });
+      return agent?.agent.id === foreignAgentId;
     });
-    expect(listedOnB).toBe(true);
+    expect(readableOnB).toBe(true);
 
-    const agentsB = await clientB.fetchAgents();
-    const seenOnB = agentsB.entries.find((entry) => entry.agent.id === foreignAgentId);
-    expect(seenOnB?.agent.status).toBe("running");
+    const seenOnB = await clientB.fetchAgent({ agentId: foreignAgentId });
+    expect(seenOnB?.agent).toMatchObject({ status: "running", workspaceId: createdId });
+    for (const scope of [undefined, "active"] as const) {
+      const agentsB = await clientB.fetchAgents({ scope });
+      expect(agentsB.entries.map((entry) => entry.agent.id)).not.toContain(foreignAgentId);
+    }
+    const historyB = await clientB.fetchAgentHistory();
+    expect(historyB.entries.map((entry) => entry.agent.id)).not.toContain(foreignAgentId);
+    const observedB = clientB.observeAgents({ scope: "active", sync: {} });
+    try {
+      const snapshot = await observedB.ready;
+      expect(snapshot.entries.map((entry) => entry.agent.id)).not.toContain(foreignAgentId);
+    } finally {
+      await observedB.release();
+    }
+
+    await expect(clientB.clearAgentAttention(foreignAgentId)).rejects.toThrow(/owned by host/);
 
     await expect(clientB.sendMessage(foreignAgentId, "hello from B")).rejects.toThrow(
       /owned by host/,

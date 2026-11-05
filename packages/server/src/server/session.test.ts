@@ -499,9 +499,12 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
       existsOnDisk: vi.fn(),
       ...options.projectRegistry,
     },
-    workspaceRegistry: options.workspaceRegistry ?? {
+    workspaceRegistry: {
       get: vi.fn(),
       list: vi.fn().mockResolvedValue([]),
+      listAll: options.workspaceRegistry?.list ?? vi.fn().mockResolvedValue([]),
+      listActive: options.workspaceRegistry?.list ?? vi.fn().mockResolvedValue([]),
+      ...options.workspaceRegistry,
     },
     workspaceLabelService: options.workspaceLabelService,
     scheduleService: asScheduleService(),

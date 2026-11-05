@@ -370,6 +370,10 @@ dependency asset names and package versions include the source commit so Bun can
 previous rolling dependency. Dependencies upload before the CLI entry tarball. The workflow
 smoke-installs over the previous rolling CLI and checks the installed server's commit.
 
+`Server Tarball Release` updates `server-latest` on `main` pushes or manual dispatch. It publishes
+only `paseo-server.tgz` and does not replace the CLI's dependency package set. Both workflows use
+the repository's existing package build/prepack scripts; committed npm dependency specifications
+and workspace versions remain upstream.
 - **Android (Play Store)** — EAS builds with profile `production` and auto-submits to the Play Store via `eas submit` (EAS-managed credentials). A Fastlane lane then replaces the store screenshots.
 - **iOS (TestFlight + App Store)** — EAS builds with profile `production`, uploads once through a `testflight` job, distributes the build to the `Paseo Beta` external group with Beta App Review submission, and a Fastlane lane uploads the store screenshots and submits that same build for App Store review.
 - **Android APK (GitHub Release asset)** — separate, via `.github/workflows/android-apk-release.yml`. This is the only Android-related workflow that lives in this repo.

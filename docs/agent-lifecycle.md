@@ -345,9 +345,12 @@ Attention is set by the agent finishing or failing and acknowledged by deliberat
 interaction with its chat, including repeat clicks in an already focused pane. A completion
 arriving while focused stays unread until the next interaction; leaving does not acknowledge it. Loading an agent's runtime is
 neither, so resuming carries the stored attention and the stored last-activity time through
-untouched. Forging either makes a background resume look like the user read a workspace and like the
-agent worked in it just now, which rewrites the sidebar timestamp permanently — persisted
-`updatedAt` is what workspace `statusEnteredAt` is re-derived from on the next daemon start.
+untouched. Provider connection metadata is not activity either: OMP reads context usage the moment
+a resumed session is subscribed, and providers emit thread startup and mode/model refreshes, all of
+which arrive on the live event stream. Forging either makes a background resume look like the user
+read a workspace and like the agent worked in it just now, which rewrites the sidebar timestamp
+permanently — persisted `updatedAt` is what workspace `statusEnteredAt` is re-derived from on the
+next daemon start.
 
 The `failed` bucket follows unread `error` attention, not lifecycle status. An agent stays `error`
 until its next turn starts, so reading the chat dismisses the red dot the same way it dismisses the

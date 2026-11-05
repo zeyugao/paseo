@@ -237,6 +237,8 @@ type ScheduleAgentManager = Pick<
   Pick<
     AgentManager,
     | "createAgentFromRecord"
+    | "serverId"
+    | "createAgent"
     | "getRegisteredProviderIds"
     | "hydrateTimelineFromProvider"
     | "resumeAgentFromPersistence"

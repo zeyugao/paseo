@@ -10,6 +10,7 @@ import type {
   PersistedProjectRecord,
   PersistedWorkspaceRecord,
 } from "./workspace-registry.js";
+import { isWorkspaceVisibleToServer } from "./workspace-registry.js";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import { areEquivalentPaths } from "../utils/path.js";
 import {
@@ -18,7 +19,7 @@ import {
   type MutableWorkspacePlacement,
 } from "./workspace-registry-model.js";
 import { workspaceIdsForProjects } from "./workspace-directory.js";
-import { deriveProjectKey } from "./project-key.js";
+import { deriveProjectKey, mergeLocalProjectKeyServerIds } from "./project-key.js";
 
 const DEFAULT_RESCAN_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_DEBOUNCE_MS = 100;
@@ -215,10 +216,13 @@ export class WorkspaceReconciliationService {
   async reconcileGitMetadata(): Promise<ReconciliationResult> {
     const start = Date.now();
     const changes: ReconciliationChange[] = [];
-    const [projects, workspaces] = await Promise.all([
+    const [projects, allWorkspaces] = await Promise.all([
       this.projectRegistry.list(),
       this.workspaceRegistry.listActive(),
     ]);
+    const workspaces = allWorkspaces.filter((workspace) =>
+      isWorkspaceVisibleToServer(workspace, this.serverId),
+    );
     const workspacesByProject = new Map<string, PersistedWorkspaceRecord[]>();
     const workspaceStates = await mapBounded(
       workspaces.filter((w) => !w.archivedAt),
@@ -250,12 +254,14 @@ export class WorkspaceReconciliationService {
 
     const allProjects = await this.projectRegistry.list();
     const allWorkspaces = await this.workspaceRegistry.listActive();
-
+    const allWorkspacesForServer = allWorkspaces.filter((workspace) =>
+      isWorkspaceVisibleToServer(workspace, this.serverId),
+    );
     const activeProjects = allProjects.filter((p) => !p.archivedAt);
     const activeProjectsById = new Map(
       activeProjects.map((project) => [project.projectId, project]),
     );
-    const activeWorkspaces = allWorkspaces.filter((w) => !w.archivedAt);
+    const activeWorkspaces = allWorkspacesForServer.filter((w) => !w.archivedAt);
     const workspaceDirectoryStates = await mapBounded(activeWorkspaces, async (workspace) => ({
       workspace,
       state: await this.inspectDirectory(workspace.cwd),
@@ -289,7 +295,11 @@ export class WorkspaceReconciliationService {
     const missingWorkspaces = workspaceDirectoryStates
       .filter(
         ({ workspace, state }) =>
-          state === "missing" && reachableProjectIds.has(workspace.projectId),
+          state === "missing" &&
+          reachableProjectIds.has(workspace.projectId) &&
+          // In multi-host mode, a missing cwd on this host proves nothing about
+          // other hosts; only hostId-stamped records carry that authority.
+          (workspace.hostId !== undefined || this.serverId === undefined),
       )
       .map(({ workspace }) => workspace);
     await mapBounded(missingWorkspaces, async (workspace) => {
@@ -405,13 +415,16 @@ export class WorkspaceReconciliationService {
     if (!project || project.archivedAt || project.rootPath !== input.project.rootPath) return;
     const projectUpdates: Partial<Pick<PersistedProjectRecord, "kind" | "projectKey">> = {};
     const mappedKind = deriveProjectKind(currentGit);
-    const projectKey = deriveProjectKey({
-      rootPath: project.rootPath,
-      remoteUrl: currentGit.remoteUrl,
-      worktreeRoot: currentGit.worktreeRoot,
-      mainRepoRoot: currentGit.mainRepoRoot,
-      serverId: this.serverId,
-    });
+    const projectKey = mergeLocalProjectKeyServerIds(
+      project.projectKey,
+      deriveProjectKey({
+        rootPath: project.rootPath,
+        remoteUrl: currentGit.remoteUrl,
+        worktreeRoot: currentGit.worktreeRoot,
+        mainRepoRoot: currentGit.mainRepoRoot,
+        serverId: this.serverId,
+      }),
+    );
 
     if (project.kind !== mappedKind) {
       projectUpdates.kind = mappedKind;
@@ -552,7 +565,9 @@ export class WorkspaceReconciliationService {
         if (change.kind === "project_updated") projectIds.add(change.projectId);
       }
       if (projectIds.size > 0) {
-        const workspaces = await this.workspaceRegistry.listActive();
+        const workspaces = (await this.workspaceRegistry.listActive()).filter((workspace) =>
+          isWorkspaceVisibleToServer(workspace, this.serverId),
+        );
         for (const workspaceId of workspaceIdsForProjects(workspaces, projectIds)) {
           workspaceIds.add(workspaceId);
         }

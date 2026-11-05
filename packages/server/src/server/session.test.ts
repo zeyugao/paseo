@@ -48,7 +48,10 @@ import type { StoredAgentRecord } from "./agent/agent-storage.js";
 import type { AgentManagerEvent } from "./agent/agent-manager.js";
 import type { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
 import { WorkspaceLabelError, type WorkspaceLabelService } from "./workspace-labels/index.js";
-import { createPersistedProjectRecord } from "./workspace-registry.js";
+import {
+  createPersistedProjectRecord,
+  createPersistedWorkspaceRecord,
+} from "./workspace-registry.js";
 import { deriveProjectKey } from "./project-key.js";
 import type { SessionOptions } from "./session.js";
 import type { SessionInboundMessage, SessionOutboundMessage } from "./messages.js";
@@ -202,6 +205,69 @@ test("legacy cancel_agent_request reports refusal through the activity log", asy
       },
     },
   ]);
+});
+
+test("refused clear_agent_attention returns a source-correlated rpc_error", async () => {
+  const source = {};
+  const messages: SessionOutboundMessage[] = [];
+  const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];
+  const session = createSessionForTest({
+    messages,
+    targetedMessages,
+    agentManager: {
+      waitForAgentClose: async () => {},
+      getAgent: () => ({ id: "foreign-agent" }),
+      clearAgentAttention: async () => {
+        throw new Error("agent is owned by host srv-other");
+      },
+    },
+  });
+
+  await session.handleMessage(
+    {
+      type: "clear_agent_attention",
+      agentId: "foreign-agent",
+      requestId: "clear-refused",
+    },
+    source,
+  );
+
+  expect(targetedMessages).toContainEqual({
+    source,
+    message: {
+      type: "rpc_error",
+      payload: {
+        requestId: "clear-refused",
+        requestType: "clear_agent_attention",
+        code: "handler_error",
+        error: "Request failed: agent is owned by host srv-other",
+      },
+    },
+  });
+  expect(messages).not.toContainEqual(expect.objectContaining({ type: "rpc_error" }));
+  expect(targetedMessages).not.toContainEqual(
+    expect.objectContaining({
+      message: expect.objectContaining({ type: "clear_agent_attention_response" }),
+    }),
+  );
+});
+
+test("refused fire-and-forget clear_agent_attention stays response-free", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      waitForAgentClose: async () => {},
+      getAgent: () => ({ id: "foreign-agent" }),
+      clearAgentAttention: async () => {
+        throw new Error("agent is owned by host srv-other");
+      },
+    },
+  });
+
+  await session.handleMessage({ type: "clear_agent_attention", agentId: "foreign-agent" });
+
+  expect(messages).toEqual([]);
 });
 
 const checkoutGitMocks = vi.hoisted(() => ({
@@ -395,12 +461,14 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
     onMessage: (message) => messages.push(message),
     ...(options.targetedMessages
       ? {
-          onMessageToSource: (source: object, message: SessionOutboundMessage) =>
-            options.targetedMessages?.push({ source, message }),
+          onMessageToSource: (source: object, message: SessionOutboundMessage) => {
+            options.targetedMessages?.push({ source, message });
+          },
         }
       : {
-          onMessageToSource: (_source: object, message: SessionOutboundMessage) =>
-            messages.push(message),
+          onMessageToSource: (_source: object, message: SessionOutboundMessage) => {
+            messages.push(message);
+          },
         }),
     onBinaryMessage: createBinaryMessageHandler(options.binaryMessages),
     clientCapabilities: options.clientCapabilities,
@@ -431,9 +499,12 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
       existsOnDisk: vi.fn(),
       ...options.projectRegistry,
     },
-    workspaceRegistry: options.workspaceRegistry ?? {
+    workspaceRegistry: {
       get: vi.fn(),
       list: vi.fn().mockResolvedValue([]),
+      listAll: options.workspaceRegistry?.list ?? vi.fn().mockResolvedValue([]),
+      listActive: options.workspaceRegistry?.list ?? vi.fn().mockResolvedValue([]),
+      ...options.workspaceRegistry,
     },
     workspaceLabelService: options.workspaceLabelService,
     scheduleService: asScheduleService(),
@@ -2592,6 +2663,11 @@ describe("session checkout merge handling", () => {
       workspaceGitService,
       messages,
     });
+    gitCommandMocks.runGitCommand.mockResolvedValue({
+      stdout: "refs/heads/main\0/tmp/base-worktree\0",
+      stderr: "",
+      exitCode: 0,
+    });
 
     checkoutGitMocks.mergeToBase.mockResolvedValue("/tmp/base-worktree");
 
@@ -2626,6 +2702,99 @@ describe("session checkout merge handling", () => {
         success: true,
         error: null,
         requestId: "request-1",
+      },
+    });
+  });
+
+  test("rejects merge-to-base when the base worktree belongs to another host", async () => {
+    const messages: unknown[] = [];
+    const foreignBase = createPersistedWorkspaceRecord({
+      workspaceId: "ws-foreign-base",
+      projectId: "project-repo",
+      cwd: "/tmp/foreign-base-worktree",
+      kind: "worktree",
+      displayName: "foreign-base",
+      hostId: "srv-other",
+      branch: "main",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const workspaceGitService = {
+      getSnapshot: vi.fn().mockResolvedValue(
+        createWorkspaceGitSnapshot("/tmp/request-worktree", {
+          git: { isGit: true, baseRef: "main", isDirty: false },
+        }),
+      ),
+    };
+    gitCommandMocks.runGitCommand.mockResolvedValue({
+      stdout: "refs/heads/main\0/tmp/foreign-base-worktree\0",
+      stderr: "",
+      exitCode: 0,
+    });
+    const session = createSessionForTest({
+      serverId: "srv-local",
+      workspaceRegistry: {
+        get: vi.fn(),
+        list: vi.fn().mockResolvedValue([foreignBase]),
+      },
+      workspaceGitService,
+      messages,
+    });
+
+    await session.handleMessage({
+      type: "checkout_merge_request",
+      cwd: "/tmp/request-worktree",
+      baseRef: "main",
+      requestId: "foreign-base",
+    });
+
+    expect(checkoutGitMocks.mergeToBase).not.toHaveBeenCalled();
+    expect(messages).toContainEqual({
+      type: "checkout_merge_response",
+      payload: {
+        cwd: "/tmp/request-worktree",
+        success: false,
+        error: {
+          code: "UNKNOWN",
+          message: "Workspace ws-foreign-base is owned by host srv-other",
+        },
+        requestId: "foreign-base",
+      },
+    });
+  });
+
+  test("falls back to the current worktree when the base worktree cannot be resolved", async () => {
+    const messages: unknown[] = [];
+    const workspaceGitService = {
+      getSnapshot: vi.fn().mockResolvedValue(
+        createWorkspaceGitSnapshot("/tmp/request-worktree", {
+          git: { isGit: true, baseRef: "main", isDirty: false },
+        }),
+      ),
+    };
+    gitCommandMocks.runGitCommand.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+    checkoutGitMocks.mergeToBase.mockResolvedValue("/tmp/request-worktree");
+    const session = createSessionForTest({ workspaceGitService, messages });
+
+    await session.handleMessage({
+      type: "checkout_merge_request",
+      cwd: "/tmp/request-worktree",
+      baseRef: "main",
+      requestId: "fallback-current-worktree",
+    });
+
+    expect(checkoutGitMocks.mergeToBase).toHaveBeenCalledWith(
+      "/tmp/request-worktree",
+      { baseRef: "main", mode: "merge" },
+      { paseoHome: "/tmp/paseo-home", worktreesRoot: undefined },
+    );
+    expect(messages).toContainEqual({
+      type: "checkout_merge_response",
+      payload: {
+        cwd: "/tmp/request-worktree",
+        success: true,
+        error: null,
+        requestId: "fallback-current-worktree",
       },
     });
   });

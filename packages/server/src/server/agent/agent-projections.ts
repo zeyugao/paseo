@@ -88,6 +88,7 @@ export function toStoredAgentRecord(
     provider: agent.provider,
     cwd: agent.cwd,
     workspaceId: agent.workspaceId,
+    hostId: agent.hostId,
     createdAt,
     updatedAt: agent.updatedAt.toISOString(),
     lastActivityAt: agent.updatedAt.toISOString(),
@@ -95,7 +96,7 @@ export function toStoredAgentRecord(
     title: options?.title ?? null,
     labels: agent.labels,
     metadata: agent.metadata,
-    lastStatus: agent.lifecycle,
+    lastStatus: agent.projectedLifecycle ?? agent.lifecycle,
     lastModeId: agent.currentModeId ?? config?.modeId ?? null,
     config: config ?? null,
     launchEnv: agent.launchEnv ? { ...agent.launchEnv } : undefined,
@@ -143,7 +144,7 @@ export function toAgentPayload(
     createdAt: agent.createdAt.toISOString(),
     updatedAt: agent.updatedAt.toISOString(),
     lastUserMessageAt: agent.lastUserMessageAt ? agent.lastUserMessageAt.toISOString() : null,
-    status: agent.lifecycle,
+    status: agent.projectedLifecycle ?? agent.lifecycle,
     activeTurn: agent.activeTurnId
       ? {
           turnId: agent.activeTurnId,
@@ -619,7 +620,7 @@ function sanitizeRuntimeInfo(
   }
   const sanitized: AgentRuntimeInfo = {
     provider: runtimeInfo.provider,
-    sessionId: runtimeInfo.sessionId,
+    sessionId: runtimeInfo.sessionId ?? null,
   };
   if (runtimeInfo.model !== undefined) {
     sanitized.model = runtimeInfo.model;

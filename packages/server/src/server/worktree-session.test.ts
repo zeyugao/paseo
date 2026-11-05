@@ -347,7 +347,9 @@ function createPaseoWorktreeForTest(options: {
     },
     archive: async (workspaceId, archivedAt) => {
       const workspace = workspaces.get(workspaceId);
-      if (workspace) workspaces.set(workspaceId, { ...workspace, archivedAt });
+      if (!workspace || workspace.archivedAt) return false;
+      workspaces.set(workspaceId, { ...workspace, archivedAt, updatedAt: archivedAt });
+      return true;
     },
     remove: async (workspaceId) => {
       workspaces.delete(workspaceId);
@@ -473,6 +475,47 @@ describe("create-agent worktree setup boundary", () => {
           payload: expect.objectContaining({ status: "blocked" }),
         }),
       );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("createPaseoWorktreeWorkflow source ownership", () => {
+  test("allows a source checkout owned by another host", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "paseo-workflow-shared-source-"));
+    const sourceCwd = path.join(tempDir, "foreign-checkout");
+    const createPaseoWorktree = vi.fn(async () => {
+      throw new Error("create invoked");
+    });
+
+    try {
+      await expect(
+        createPaseoWorktreeWorkflow(
+          {
+            paseoHome: path.join(tempDir, ".paseo"),
+            createPaseoWorktree,
+            warmWorkspaceGitData: async () => {},
+            autoNameWorkspaceBranchForFirstAgent: () => {},
+            emitWorkspaceUpdateForWorkspaceId: async () => {},
+            cacheWorkspaceSetupSnapshot: () => {},
+            emit: () => {},
+            sessionLogger: createLogger(),
+            terminalManager: null,
+            serviceProxy: null,
+            scriptRuntimeStore: null,
+            getDaemonTcpPort: null,
+            getDaemonTcpHost: null,
+            onScriptsChanged: null,
+          },
+          {
+            cwd: sourceCwd,
+            worktreeSlug: "shared-source",
+            runSetup: false,
+          },
+        ),
+      ).rejects.toThrow("create invoked");
+      expect(createPaseoWorktree).toHaveBeenCalledOnce();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -1726,6 +1769,7 @@ describe("handlePaseoWorktreeArchiveRequest worktree scope", () => {
     ];
     const archivedWorkspaceRecords: string[] = [];
     const listActiveWorkspaces = vi.fn(async () => activeWorkspaces);
+    const listAllActiveWorkspaces = vi.fn(async () => activeWorkspaces);
     const emitted: SessionOutboundMessage[] = [];
 
     await handlePaseoWorktreeArchiveRequest(
@@ -1747,6 +1791,8 @@ describe("handlePaseoWorktreeArchiveRequest worktree scope", () => {
         agentStorage: createAgentStorageStub(),
         findWorkspaceIdForCwd: vi.fn(async () => workspaceA),
         listActiveWorkspaces,
+        listAllActiveWorkspaces,
+        assertCwdWorkspaceOwnedByThisServer: async () => {},
         archiveWorkspaceRecord: createArchiveWorkspaceRecordMutator(
           activeWorkspaces,
           archivedWorkspaceRecords,
@@ -1821,6 +1867,8 @@ describe("handlePaseoWorktreeArchiveRequest worktree scope", () => {
           cwd === created.worktreePath ? workspaceId : null,
         ),
         listActiveWorkspaces: vi.fn(async () => activeWorkspaces),
+        listAllActiveWorkspaces: vi.fn(async () => activeWorkspaces),
+        assertCwdWorkspaceOwnedByThisServer: async () => {},
         archiveWorkspaceRecord: vi.fn(async (id: string) => {
           archivedWorkspaceRecords.push(id);
           if (activeWorkspaces[0]?.workspaceId === id) {
@@ -1898,6 +1946,8 @@ describe("handlePaseoWorktreeArchiveRequest worktree scope", () => {
           cwd === sharedCwd ? workspaceA : null,
         ),
         listActiveWorkspaces: vi.fn(async () => activeWorkspaces),
+        listAllActiveWorkspaces: vi.fn(async () => activeWorkspaces),
+        assertCwdWorkspaceOwnedByThisServer: async () => {},
         archiveWorkspaceRecord: vi.fn(async (id: string) => {
           archivedWorkspaceRecords.push(id);
           if (activeWorkspaces[0]?.workspaceId === id) {
@@ -1954,6 +2004,7 @@ describe("handlePaseoWorktreeArchiveRequest worktree scope", () => {
     const archivedWorkspaceRecords: string[] = [];
     const emitted: SessionOutboundMessage[] = [];
     const listActiveWorkspaces = vi.fn(async () => activeWorkspaces);
+    const listAllActiveWorkspaces = vi.fn(async () => activeWorkspaces);
 
     const deps = {
       paseoHome,
@@ -1973,6 +2024,8 @@ describe("handlePaseoWorktreeArchiveRequest worktree scope", () => {
       agentStorage: createAgentStorageStub(),
       findWorkspaceIdForCwd: vi.fn(async (cwd: string) => (cwd === sharedCwd ? workspaceA : null)),
       listActiveWorkspaces,
+      listAllActiveWorkspaces,
+      assertCwdWorkspaceOwnedByThisServer: async () => {},
       archiveWorkspaceRecord: createArchiveWorkspaceRecordMutator(
         activeWorkspaces,
         archivedWorkspaceRecords,

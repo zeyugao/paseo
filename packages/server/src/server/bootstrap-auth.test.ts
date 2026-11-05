@@ -307,7 +307,7 @@ describe("daemon bearer auth", () => {
       clientId: "desktop-managed-test",
       clientType: "browser",
       localCredential: async () =>
-        readLocalCredentialForTarget(daemonHandle.paseoHome, target) ?? undefined,
+        (await readLocalCredentialForTarget(daemonHandle.paseoHome, target)) ?? undefined,
       webSocketFactory: (url, options) =>
         new WebSocket(url, options?.protocols, { headers: options?.headers }),
       reconnect: { enabled: false },

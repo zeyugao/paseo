@@ -2,6 +2,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { chmod, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { readDaemonInstance } from "./daemon-instance.js";
 import { ensurePrivateDirectory } from "./private-files.js";
 import { withReclaimLock } from "./pid-lock.js";
 import {
@@ -83,9 +84,9 @@ export async function deleteLocalCredential(
   }
 }
 
-export function readLocalCredential(home: string): string | null {
+export function readLocalCredential(home: string, serverId?: string): string | null {
   try {
-    const token = readFileSync(join(home, FILE_NAME), "utf8").trim();
+    const token = readFileSync(credentialPath(home, serverId), "utf8").trim();
     return /^[A-Za-z0-9_-]{43}$/.test(token) ? token : null;
   } catch {
     return null;
@@ -118,16 +119,19 @@ function normalizeTarget(target: string): string | null {
   }
 }
 
-export function readLocalCredentialForTarget(home: string, target: string): string | null {
+export async function readLocalCredentialForTarget(
+  home: string,
+  target: string,
+): Promise<string | null> {
   try {
-    const lock = JSON.parse(readFileSync(join(home, "paseo.pid"), "utf8")) as {
-      listen?: unknown;
-    };
-    if (typeof lock.listen !== "string") return null;
     const selected = normalizeTarget(target);
-    const listening = normalizeTarget(lock.listen);
-    if (!selected || !listening || selected !== listening) return null;
-    return readLocalCredential(home);
+    if (!selected) return null;
+    const instance = await readDaemonInstance(home);
+    if (!instance?.listen || normalizeTarget(instance.listen) !== selected) return null;
+    const token = (
+      await readFile(credentialPath(home, instance.serverId ?? undefined), "utf8")
+    ).trim();
+    return /^[A-Za-z0-9_-]{43}$/.test(token) ? token : null;
   } catch {
     return null;
   }

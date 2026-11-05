@@ -1,6 +1,7 @@
 import { readdir, readFile, rm } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
+import { validateEnvironmentServerId } from "../server/server-id.js";
 import { z } from "zod";
 import { writePrivateFileAtomicSync, writePrivateFileAtomic } from "../server/private-files.js";
 
@@ -70,6 +71,12 @@ export type TerminalWorkerRecordFile =
 // The worker's command line carries this marker followed by its record id, so a reused pid
 // running some other process (even another worker) never matches the record.
 export const TERMINAL_WORKER_MARKER_ARG = "--paseo-terminal-worker";
+
+/** Worker state home only: never use this as the shell's PASEO_HOME. */
+export function terminalWorkerHome(paseoHome: string, serverId: string): string {
+  if (!serverId) throw new Error("Terminal worker requires a serverId");
+  return path.join(paseoHome, "daemons", validateEnvironmentServerId(serverId));
+}
 
 export function terminalWorkerDirectory(paseoHome: string): string {
   return path.join(paseoHome, "terminal-worker");

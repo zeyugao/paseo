@@ -8,6 +8,8 @@ import { dirname, join } from "node:path";
 import { uptime } from "node:os";
 import { getHostName } from "./host-name.js";
 import { z } from "zod";
+import { getMachineId, readMachineId } from "./machine-id.js";
+import { createTerminalWorkerProcessInspector } from "../terminal/terminal-worker-processes.js";
 
 function removeMarkerIfExists(markerPath: string): void {
   try {
@@ -26,6 +28,8 @@ export const pidLockInfoSchema = z.object({
   desktopManaged: z.boolean().optional(),
   heartbeat: z.literal(true).optional(),
   bootId: z.string().optional(),
+  processStartedAt: z.string().optional(),
+  machineId: z.string().optional(),
 });
 
 export interface PidLockInfo extends z.infer<typeof pidLockInfoSchema> {}
@@ -302,6 +306,15 @@ export function isPidLockOwnerRunning(lock: PidLockInfo): boolean {
   return isPidRunning(lock.pid);
 }
 
+async function isLocalPidLockOwnerRunning(lock: PidLockInfo): Promise<boolean> {
+  if (lock.machineId && lock.machineId !== (await readMachineId())) return false;
+  if (!isPidLockOwnerRunning(lock)) return false;
+  if (!lock.processStartedAt) return true;
+  const inspection = await createTerminalWorkerProcessInspector().inspect(lock.pid);
+  if (inspection.status === "error") throw inspection.error;
+  return inspection.status === "alive" && inspection.snapshot.startedAt === lock.processStartedAt;
+}
+
 function getPidFilePath(paseoHome: string): string {
   return join(paseoHome, "paseo.pid");
 }
@@ -352,7 +365,13 @@ interface AcquirePidLockOptions {
 
 export function isSamePidLock(left: PidLockInfo, right: PidLockInfo): boolean {
   return (
-    left.hostname === right.hostname && left.pid === right.pid && left.startedAt === right.startedAt
+    left.hostname === right.hostname &&
+    left.pid === right.pid &&
+    left.startedAt === right.startedAt &&
+    (!left.machineId || !right.machineId || left.machineId === right.machineId) &&
+    (!left.processStartedAt ||
+      !right.processStartedAt ||
+      left.processStartedAt === right.processStartedAt)
   );
 }
 
@@ -362,15 +381,17 @@ async function clearExistingPidLock(
   lockOwnerPid: number,
 ): Promise<"already_owned" | "occupied" | "cleared"> {
   const localHostname = getHostName();
-  const sameHost = existingLock.hostname === localHostname;
-  const lockOwnerRunning = isPidLockOwnerRunning(existingLock);
+  const sameHost = existingLock.machineId
+    ? existingLock.machineId === (await readMachineId())
+    : existingLock.hostname === localHostname;
+  const lockOwnerRunning = await isLocalPidLockOwnerRunning(existingLock);
   if (sameHost && existingLock.pid === lockOwnerPid && lockOwnerRunning) {
     await touchPidLockFile(pidPath);
     return "already_owned";
   }
   const lockStat = await stat(pidPath);
   const stale = Date.now() - lockStat.mtimeMs > PID_LOCK_STALE_AFTER_MS;
-  if (!stale && (lockOwnerRunning || !sameHost)) return "occupied";
+  if (lockOwnerRunning || (!stale && !sameHost)) return "occupied";
 
   const confirmedLock = await readPidLock(pidPath);
   if (!confirmedLock || !isSamePidLock(existingLock, confirmedLock)) {
@@ -379,8 +400,11 @@ async function clearExistingPidLock(
   const confirmedStat = await stat(pidPath);
   const confirmedStale = Date.now() - confirmedStat.mtimeMs > PID_LOCK_STALE_AFTER_MS;
   if (
-    !confirmedStale &&
-    (isPidLockOwnerRunning(confirmedLock) || confirmedLock.hostname !== localHostname)
+    (await isLocalPidLockOwnerRunning(confirmedLock)) ||
+    (!confirmedStale &&
+      (confirmedLock.machineId
+        ? confirmedLock.machineId !== (await readMachineId())
+        : confirmedLock.hostname !== localHostname))
   ) {
     return "occupied";
   }
@@ -431,6 +455,9 @@ export async function acquirePidLock(
   ensurePrivateDirectory(paseoHome);
   return withReclaimLock(reclaimLockPath, async () => {
     const lockOwnerPid = resolveOwnerPid(options?.ownerPid);
+    const machineId = await getMachineId();
+    const inspection = await createTerminalWorkerProcessInspector().inspect(lockOwnerPid);
+    if (inspection.status === "error") throw inspection.error;
     const bootId = currentBootId();
     const lockInfo: PidLockInfo = {
       pid: lockOwnerPid,
@@ -439,6 +466,10 @@ export async function acquirePidLock(
       uid: process.getuid?.() ?? 0,
       listen,
       heartbeat: true,
+      machineId,
+      ...(inspection.status === "alive" && inspection.snapshot.startedAt
+        ? { processStartedAt: inspection.snapshot.startedAt }
+        : {}),
       ...(bootId ? { bootId } : {}),
       ...(process.env.PASEO_DESKTOP_MANAGED === "1" ? { desktopManaged: true } : {}),
     };
@@ -483,7 +514,12 @@ export async function refreshPidLock(
       if (!lock) {
         throw new PidLockError("Cannot refresh PID lock: invalid lock file");
       }
-      if (lock.pid !== lockOwnerPid || lock.hostname !== getHostName()) {
+      if (
+        lock.pid !== lockOwnerPid ||
+        lock.hostname !== getHostName() ||
+        (lock.machineId && lock.machineId !== (await readMachineId())) ||
+        (lock.processStartedAt && !(await isLocalPidLockOwnerRunning(lock)))
+      ) {
         throw new PidLockError(`Cannot refresh PID lock owned by PID ${lock.pid}`, lock);
       }
       const now = new Date();
@@ -572,7 +608,12 @@ export async function updatePidLock(
     if (!existingLock) {
       throw new PidLockError("Cannot update PID lock: invalid lock file");
     }
-    if (existingLock.pid !== lockOwnerPid || existingLock.hostname !== getHostName()) {
+    if (
+      existingLock.pid !== lockOwnerPid ||
+      existingLock.hostname !== getHostName() ||
+      (existingLock.machineId && existingLock.machineId !== (await readMachineId())) ||
+      (existingLock.processStartedAt && !(await isLocalPidLockOwnerRunning(existingLock)))
+    ) {
       return;
     }
 
@@ -601,6 +642,7 @@ export async function releasePidLock(
       if (
         lock?.hostname === getHostName() &&
         lock.pid === lockOwnerPid &&
+        (!lock.machineId || lock.machineId === (await readMachineId())) &&
         (options?.startedAt === undefined || lock.startedAt === options.startedAt)
       ) {
         await unlink(pidPath);
@@ -628,7 +670,7 @@ export async function isLocked(
     throw error;
   });
   if (lockStat === null) return { locked: false, info };
-  if (Date.now() - lockStat.mtimeMs > PID_LOCK_STALE_AFTER_MS || !isPidLockOwnerRunning(info)) {
+  if (!(await isLocalPidLockOwnerRunning(info))) {
     return { locked: false, info };
   }
   return { locked: true, info };

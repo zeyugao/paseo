@@ -1503,6 +1503,7 @@ export async function createPaseoDaemon(
     createExecutionAgents: (daemonId) =>
       new DaemonExecutions({
         daemonId,
+        serverId,
         agentManager,
         agentStorage,
         createAgent,

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.15.3-beta.1 - 2026-11-06
+
+On Duo, the workspace title and tabs now share the available top edge while clearing system controls and rounded corners. Narrow content uses compact controls below 550pt. Opening or closing the sidebar no longer triggers the transcript's system scroll-to-top gesture. Workspaces with existing agents no longer briefly show the New launcher during startup.
+
 ## 0.15.2 - 2026-11-05
 
 ### Added

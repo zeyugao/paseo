@@ -2092,8 +2092,12 @@ test("push token registration can be revoked by the connected client", async () 
   const session = createSessionForTest({
     messages,
     pushNotifications: asPushNotifications({
-      renew: (token: string) => renewed.push(token),
-      revoke: (token: string) => revoked.push(token),
+      renew: async (token: string) => {
+        renewed.push(token);
+      },
+      revoke: async (token: string) => {
+        revoked.push(token);
+      },
     }),
   });
 
@@ -2130,8 +2134,10 @@ test("push token revocation only acknowledges durable removal", async () => {
   const session = createSessionForTest({
     messages,
     pushNotifications: asPushNotifications({
-      renew: (token: string) => renewed.push(token),
-      revoke: () => {
+      renew: async (token: string) => {
+        renewed.push(token);
+      },
+      revoke: async () => {
         throw new Error("disk full");
       },
     }),
@@ -2165,6 +2171,97 @@ test("push token revocation only acknowledges durable removal", async () => {
       code: "handler_error",
     },
   });
+});
+
+test("push registration waits for persistence before renewing that token on heartbeats", async () => {
+  const entered = deferred<void>();
+  const persisted = deferred<void>();
+  const renewed: string[] = [];
+  const session = createSessionForTest({
+    pushNotifications: asPushNotifications({
+      renew: async (token: string) => {
+        renewed.push(token);
+        entered.resolve();
+        await persisted.promise;
+      },
+    }),
+  });
+  let registered = false;
+  const registration = session
+    .handleMessage({ type: "register_push_token", token: "device" })
+    .then(() => {
+      registered = true;
+      return undefined;
+    });
+  await entered.promise;
+  expect(registered).toBe(false);
+  persisted.resolve();
+  await registration;
+  await session.handleMessage({
+    type: "client_heartbeat",
+    deviceType: "mobile",
+    focusedAgentId: null,
+    lastActivityAt: "2026-08-10T00:00:00.000Z",
+    appVisible: false,
+  });
+  expect(renewed).toEqual(["device", "device"]);
+});
+
+test("failed async push registration does not retain the token for heartbeat renewal", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const renewed: string[] = [];
+  const session = createSessionForTest({
+    messages,
+    pushNotifications: asPushNotifications({
+      renew: async (token: string) => {
+        renewed.push(token);
+        throw new Error("push write failed");
+      },
+    }),
+  });
+  await session.handleMessage({ type: "register_push_token", token: "device" });
+  await session.handleMessage({
+    type: "client_heartbeat",
+    deviceType: "mobile",
+    focusedAgentId: null,
+    lastActivityAt: "2026-08-10T00:00:00.000Z",
+    appVisible: false,
+  });
+  expect(renewed).toEqual(["device"]);
+  expect(messages).toEqual([
+    expect.objectContaining({
+      type: "activity_log",
+      payload: expect.objectContaining({ content: "Error: push write failed" }),
+    }),
+  ]);
+});
+
+test("heartbeat push renewal failures use session error delivery", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  let renewals = 0;
+  const session = createSessionForTest({
+    messages,
+    pushNotifications: asPushNotifications({
+      renew: async () => {
+        if (++renewals > 1) throw new Error("push renewal failed");
+      },
+    }),
+  });
+  await session.handleMessage({ type: "register_push_token", token: "device" });
+  await session.handleMessage({
+    type: "client_heartbeat",
+    deviceType: "mobile",
+    focusedAgentId: null,
+    lastActivityAt: "2026-08-10T00:00:00.000Z",
+    appVisible: false,
+  });
+  expect(renewals).toBe(2);
+  expect(messages).toEqual([
+    expect.objectContaining({
+      type: "activity_log",
+      payload: expect.objectContaining({ content: "Error: push renewal failed" }),
+    }),
+  ]);
 });
 
 describe("daemon status + pairing RPC", () => {

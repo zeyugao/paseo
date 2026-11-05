@@ -85,6 +85,9 @@ one journal.
 - Local speech models download and extract directly into the shared home; prefer a
   per-machine `providers.local.modelsDir` when two hosts might enable voice at the
   same time.
+- The Hub relationship is per-home and single-connection. A blocked daemon retries
+  the `hub-connection.lock` lease with bounded backoff and takes over after release or
+  expiry. Stopping cancels takeover; losing the lease fences the former connection.
 - A client-supplied `agentId` in a create request can collide with a foreign record
   written by another host within the local 5-second rescan window. Today's clients
   generate IDs server-side; if a future client retries a create with the same ID

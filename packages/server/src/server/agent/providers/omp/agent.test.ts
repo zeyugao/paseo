@@ -1703,6 +1703,339 @@ describe("OMP agent client and session", () => {
       { type: "user_message", text: "hello OMP", messageId: "user-1" },
     ]);
   });
+
+  test("steers the active OMP turn and reconciles the echoed user message", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("first", "turn-client");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "user-1");
+
+    await expect(
+      omp.steerActiveTurn("change course", {
+        expectedTurnId: turnId,
+        clientMessageId: "steer-client",
+      }),
+    ).resolves.toEqual({ status: "accepted" });
+    expect(runtime.steerRequests).toEqual([{ message: "change course", imageCount: 0 }]);
+
+    // OMP echoes the steered message as a user message_end; it must reconcile against the
+    // steer's client message id, not the turn's original prompt.
+    runtime.acceptPrompt("change course", "steer-entry-1", true);
+    expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+      { type: "user_message", text: "first", messageId: "user-1", clientMessageId: "turn-client" },
+      {
+        type: "user_message",
+        text: "change course",
+        messageId: "steer-entry-1",
+        clientMessageId: "steer-client",
+      },
+    ]);
+  });
+  test.each([true, undefined])(
+    "keeps a steered turn alive across non-terminal idle cycles (final isTerminal=%s)",
+    async (isTerminal) => {
+      const omp = new OmpHarness();
+      await omp.start();
+      try {
+        const turnId = await omp.startActiveTurn("first", "turn-client");
+        const runtime = omp.runtime();
+        runtime.beginTurn();
+        runtime.acceptPrompt("first", "user-1");
+        runtime.streamAssistantText("before steer", "assistant-before");
+        await omp.steerActiveTurn("change course", {
+          expectedTurnId: turnId,
+          clientMessageId: "steer-client",
+        });
+        runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+        const messages = [{ role: "assistant" as const, content: [] }];
+        runtime.emit({ type: "agent_end", isTerminal: false, messages });
+        await waitForImmediate();
+        expect(omp.completedTurnCount()).toBe(0);
+
+        runtime.beginTurn();
+        runtime.acceptPrompt("change course", "steer-entry", true);
+        runtime.streamAssistantText("continued output", "assistant-after");
+        expect(omp.timeline()).toEqual([
+          {
+            type: "user_message",
+            text: "first",
+            messageId: "user-1",
+            clientMessageId: "turn-client",
+          },
+          { type: "assistant_message", text: "before steer", messageId: "assistant-before" },
+          {
+            type: "user_message",
+            text: "change course",
+            messageId: "steer-entry",
+            clientMessageId: "steer-client",
+          },
+          { type: "assistant_message", text: "continued output", messageId: "assistant-after" },
+        ]);
+        expect(omp.wasAborted()).toBe(false);
+        runtime.emit({
+          type: "agent_end",
+          messages,
+          ...(isTerminal === undefined ? {} : { isTerminal }),
+        });
+        await waitForImmediate();
+        expect(omp.completedTurnCount()).toBe(1);
+      } finally {
+        await omp.close();
+      }
+    },
+  );
+
+  test("correlates a synchronous steer echo with its client message", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("first", "turn-client");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "user-1");
+    const originalSteer = runtime.steer.bind(runtime);
+    runtime.steer = (message, images) => {
+      const ack = originalSteer(message, images);
+      runtime.acceptPrompt(message, "steer-entry-sync", true);
+      return ack;
+    };
+
+    await expect(
+      omp.steerActiveTurn("change course", {
+        expectedTurnId: turnId,
+        clientMessageId: "steer-client",
+      }),
+    ).resolves.toEqual({ status: "accepted" });
+
+    expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+      { type: "user_message", text: "first", messageId: "user-1", clientMessageId: "turn-client" },
+      {
+        type: "user_message",
+        text: "change course",
+        messageId: "steer-entry-sync",
+        clientMessageId: "steer-client",
+      },
+    ]);
+  });
+
+  test("does not let a replayed duplicate user entry consume a steer", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("same text", "turn-client");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("same text", "user-1");
+    await omp.steerActiveTurn("same text", {
+      expectedTurnId: turnId,
+      clientMessageId: "steer-client",
+    });
+
+    // OMP can replay the original entry after a steer. Native-id dedupe must happen before
+    // matching pending steer submissions.
+    runtime.acceptPrompt("same text", "user-1");
+    runtime.acceptPrompt("same text", "steer-entry-1", true);
+
+    expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+      {
+        type: "user_message",
+        text: "same text",
+        messageId: "user-1",
+        clientMessageId: "turn-client",
+      },
+      {
+        type: "user_message",
+        text: "same text",
+        messageId: "steer-entry-1",
+        clientMessageId: "steer-client",
+      },
+    ]);
+  });
+
+  test("waits for unread steer draining before starting a replacement turn", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("long work");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    await omp.steerActiveTurn("unread steer", {
+      expectedTurnId: turnId,
+      clientMessageId: "steer-client",
+    });
+    await omp.interrupt();
+
+    const replacement = omp.startActiveTurn("replacement");
+    await Promise.resolve();
+    expect(runtime.prompts).toEqual([{ message: "long work", imageCount: 0 }]);
+
+    runtime.emit({ type: "agent_start" });
+    runtime.acceptPrompt("unread steer", "steer-entry-1", true);
+    runtime.finishTurn();
+
+    await expect(replacement).resolves.toEqual(expect.any(String));
+    expect(runtime.prompts).toEqual([
+      { message: "long work", imageCount: 0 },
+      { message: "replacement", imageCount: 0 },
+    ]);
+  });
+
+  test("refuses to steer without the active turn or for a slash command", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    await expect(omp.steerActiveTurn("no turn", { expectedTurnId: "missing" })).resolves.toEqual({
+      status: "unavailable",
+    });
+
+    const turnId = await omp.startActiveTurn("first");
+    await expect(
+      omp.steerActiveTurn("wrong turn", { expectedTurnId: "other-turn" }),
+    ).resolves.toEqual({ status: "unavailable" });
+    await expect(omp.steerActiveTurn("/compact", { expectedTurnId: turnId })).resolves.toEqual({
+      status: "unavailable",
+    });
+    expect(omp.runtime().steerRequests).toEqual([]);
+  });
+
+  test("waits for a steer acknowledgement before releasing permissions", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    let resolveAck!: () => void;
+    const ack = new Promise<void>((resolve) => {
+      resolveAck = resolve;
+    });
+    try {
+      const turnId = await omp.startActiveTurn("first");
+      const runtime = omp.runtime();
+      runtime.beginTurn();
+      omp.requestToolApproval({ id: "approval-1", tool: "bash", detail: "git status" });
+      runtime.steer = () => ack;
+      let settled = false;
+      const steer = omp.steerActiveTurn("change course", {
+        expectedTurnId: turnId,
+        clientMessageId: "steer-client",
+        clearPendingPermissions: true,
+      });
+      void steer.then(() => {
+        settled = true;
+        return undefined;
+      });
+      await waitForImmediate();
+      expect(settled).toBe(false);
+      expect(omp.pendingPermissions()).toHaveLength(1);
+      // The echo may precede the acknowledgement.
+      runtime.acceptPrompt("change course", "steer-native", true);
+      resolveAck();
+      await expect(steer).resolves.toEqual({ status: "accepted" });
+      expect(omp.pendingPermissions()).toEqual([]);
+      expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+        {
+          type: "user_message",
+          text: "change course",
+          messageId: "steer-native",
+          clientMessageId: "steer-client",
+        },
+      ]);
+      expect(omp.wasAborted()).toBe(false);
+      expect(omp.completedTurnCount()).toBe(0);
+    } finally {
+      resolveAck();
+      await omp.close();
+    }
+  });
+
+  test("a rejected steer leaves permissions and the active turn intact", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    try {
+      const turnId = await omp.startActiveTurn("first");
+      const runtime = omp.runtime();
+      runtime.beginTurn();
+      omp.requestToolApproval({ id: "approval-1", tool: "bash", detail: "git status" });
+      runtime.steer = async () => {
+        throw new Error("steer rejected");
+      };
+      await expect(
+        omp.steerActiveTurn("change course", {
+          expectedTurnId: turnId,
+          clientMessageId: "steer-client",
+          clearPendingPermissions: true,
+        }),
+      ).resolves.toEqual({ status: "unavailable" });
+      expect(omp.pendingPermissions()).toHaveLength(1);
+      expect(omp.extensionUiResponses()).toEqual([]);
+      expect(omp.wasAborted()).toBe(false);
+      expect(omp.completedTurnCount()).toBe(0);
+      runtime.acceptPrompt("change course", "external-entry", true);
+      expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+        { type: "user_message", text: "change course", messageId: "external-entry" },
+      ]);
+    } finally {
+      await omp.close();
+    }
+  });
+
+  test("a clearing steer denies pending OMP permissions", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("run something slow");
+    omp.runtime().beginTurn();
+    omp.requestToolApproval({ id: "approval-1", tool: "bash", detail: "git status" });
+    expect(omp.pendingPermissions()).toHaveLength(1);
+
+    await expect(
+      omp.steerActiveTurn("review this instead", {
+        expectedTurnId: turnId,
+        clearPendingPermissions: true,
+      }),
+    ).resolves.toEqual({ status: "accepted" });
+
+    expect(omp.pendingPermissions()).toEqual([]);
+    expect(omp.extensionUiResponses()).toEqual([{ id: "approval-1", response: { value: "Deny" } }]);
+  });
+
+  test("interrupt suppresses the phantom run an unread steer starts after abort", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("long work");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    await omp.steerActiveTurn("unread steer", {
+      expectedTurnId: turnId,
+      clientMessageId: "steer-client",
+    });
+
+    await omp.interrupt();
+    expect(omp.canceledTurnCount()).toBe(1);
+    const abortsBeforePhantom = runtime.abortCount;
+
+    // OMP has no clear_queue RPC: the unread steer survives abort and starts a new run.
+    runtime.emit({ type: "agent_start" });
+    expect(runtime.abortCount).toBe(abortsBeforePhantom + 1);
+    runtime.acceptPrompt("unread steer", "steer-entry-1");
+    runtime.emit({ type: "agent_end", isTerminal: false, messages: [] });
+    // Consuming the echo does not release suppression before the provider settles.
+    runtime.emit({ type: "agent_start" });
+    expect(runtime.abortCount).toBe(abortsBeforePhantom + 2);
+    runtime.streamAssistantText("phantom output");
+    runtime.finishTurn();
+
+    expect(omp.timeline().filter((item) => item.text === "unread steer")).toEqual([]);
+    expect(omp.timeline().filter((item) => item.text === "phantom output")).toEqual([]);
+    expect(omp.completedTurnCount()).toBe(0);
+    expect(omp.eventTypes().filter((type) => type === "thread_started")).toHaveLength(0);
+
+    // The next user turn proceeds normally once every queued steer surfaced.
+    await expect(omp.runPrompt("next", "next done")).resolves.toMatchObject({
+      finalText: "next done",
+    });
+  });
 });
 
 test("omp runtime safety protects queued replies and runtime-owned activity", async () => {

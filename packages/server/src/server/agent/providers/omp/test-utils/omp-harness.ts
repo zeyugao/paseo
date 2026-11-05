@@ -588,6 +588,17 @@ export class OmpHarness {
     return turnId;
   }
 
+  async steerActiveTurn(
+    prompt: string,
+    options: {
+      expectedTurnId: string;
+      clientMessageId?: string;
+      clearPendingPermissions?: boolean;
+    },
+  ) {
+    return await this.requireSession().steerActiveTurn(prompt, options);
+  }
+
   async interrupt(): Promise<void> {
     await this.requireSession().interrupt();
   }

@@ -191,6 +191,8 @@ export class FakeOmpSession implements OmpRuntimeSession {
   private nextHeldPrompt: { promise: Promise<void>; reject: (error: Error) => void } | null = null;
   private activeHeldPrompt: { promise: Promise<void>; reject: (error: Error) => void } | null =
     null;
+  private nextHeldCompaction: { promise: Promise<void>; release: () => void } | null = null;
+  private activeHeldCompaction: { promise: Promise<void>; release: () => void } | null = null;
 
   constructor(
     launch: OmpRuntimeLaunch,
@@ -273,9 +275,41 @@ export class FakeOmpSession implements OmpRuntimeSession {
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
 
+  holdNextCompaction(): void {
+    if (this.nextHeldCompaction || this.activeHeldCompaction) {
+      throw new Error("FakeOmp already has a held compaction");
+    }
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.nextHeldCompaction = { promise, release };
+  }
+
+  async releaseHeldCompaction(): Promise<void> {
+    const heldCompaction = this.activeHeldCompaction ?? this.nextHeldCompaction;
+    if (!heldCompaction) {
+      throw new Error("FakeOmp has no held compaction");
+    }
+    heldCompaction.release();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
   async compact(customInstructions?: string): Promise<void> {
     // Like OMP, answer a manual compact with the response alone, no compaction events.
     this.compactRequests.push(customInstructions === undefined ? {} : { customInstructions });
+    const heldCompaction = this.nextHeldCompaction;
+    if (heldCompaction) {
+      this.nextHeldCompaction = null;
+      this.activeHeldCompaction = heldCompaction;
+      try {
+        await heldCompaction.promise;
+      } finally {
+        if (this.activeHeldCompaction === heldCompaction) {
+          this.activeHeldCompaction = null;
+        }
+      }
+    }
     if (this.compactError) {
       throw this.compactError;
     }

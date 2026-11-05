@@ -87,6 +87,7 @@ export default defineConfig({
           include: [
             "src/**/*.{test,spec}.{ts,tsx}",
             "modules/**/*.{test,spec}.{ts,tsx}",
+            "plugins/**/*.{test,spec}.{ts,tsx}",
             "native-release-version.test.ts",
             "app.config.test.ts",
             "vitest-environment.test.ts",

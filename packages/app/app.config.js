@@ -100,7 +100,7 @@ const nativeReleaseVersion = getNativeReleaseVersion(pkg.version);
 export default {
   expo: {
     name: variant.name,
-    slug: "voice-mobile",
+    slug: "overkite",
     version: nativeReleaseVersion.appVersion,
     orientation: "default",
     icon: "./assets/images/icon.png",
@@ -110,10 +110,13 @@ export default {
     ios: {
       supportsTablet: true,
       infoPlist: {
+        ...(variant === variants.production
+          ? { CFBundleDisplayName: "Overkite", CFBundleName: "Overkite" }
+          : {}),
         NSMicrophoneUsageDescription: "This app needs access to the microphone for voice commands.",
         ITSAppUsesNonExemptEncryption: false,
       },
-      bundleIdentifier: variant.packageId,
+      bundleIdentifier: variant === variants.production ? "me.elsanna.overkite" : variant.packageId,
       ...(variant.googleServiceInfoPlist
         ? { googleServicesFile: variant.googleServiceInfoPlist }
         : {}),
@@ -182,6 +185,7 @@ export default {
           },
         },
       ],
+      withPasteInput.withPasteInputSceneManifest,
       ...buildProfile.fdroidPlugins,
       ...(isProfileBuild || isWatchdogBuild ? [withAndroidProfileable] : []),
     ],
@@ -198,9 +202,9 @@ export default {
       diagnosticBuildTime: process.env.PASEO_DIAGNOSTIC_BUILD_TIME,
       router: {},
       eas: {
-        projectId: "0e7f65ce-0367-46c8-a238-2b65963d235a",
+        projectId: "a84e29d0-dad8-4136-8d22-22333db92371",
       },
     },
-    owner: "getpaseo",
+    owner: "elsagranger",
   },
 };

@@ -71,6 +71,22 @@ function readConcurrentServerIdWinner(serverIdPath: string): string {
   throw lastError;
 }
 
+/** Read the selected identity without creating or rewriting home state. */
+export function readServerId(
+  paseoHome: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const override = env.PASEO_SERVER_ID;
+  if (override?.trim()) return validateEnvironmentServerId(override);
+  try {
+    const persisted = readFileSync(getServerIdPath(paseoHome), "utf8").trim();
+    return persisted ? validateEnvironmentServerId(persisted) : null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 /**
  * Stable daemon identifier scoped to a given $PASEO_HOME.
  *

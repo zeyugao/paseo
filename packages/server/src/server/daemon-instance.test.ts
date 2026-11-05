@@ -1,12 +1,24 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir, uptime } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { daemonLogPath, readDaemonInstance, stopDaemonInstance } from "./daemon-instance.js";
-import { acquirePidLock, getPidLockInfo, isLocked, type PidLockInfo } from "./pid-lock.js";
+import {
+  daemonLogPath,
+  readDaemonInstance,
+  startDaemonInstance,
+  stopDaemonInstance,
+} from "./daemon-instance.js";
+import {
+  acquirePidLock,
+  getPidLockInfo,
+  isLocked,
+  PID_LOCK_STALE_AFTER_MS,
+  type PidLockInfo,
+} from "./pid-lock.js";
 import { getHostName } from "./host-name.js";
 import {
   DAEMON_INSTANCE_STALE_AFTER_MS,
@@ -16,6 +28,7 @@ import {
   readRegisteredDaemonInstance,
   registerDaemonInstance,
 } from "./daemon-instance-registry.js";
+import { readLocalCredentialForTarget, writeLocalCredential } from "./local-credential.js";
 
 // A process cannot have started before the machine booted, so a lock stamped
 // before this boot names a PID that some unrelated process now holds.
@@ -108,6 +121,161 @@ describe("daemon instance identity across a reboot", () => {
     expect(existsSync(signalMarker)).toBe(false);
     expect(exited).toBe(false);
     await expect(readFile(join(paseoHome, "paseo.pid"), "utf-8")).rejects.toThrow(/ENOENT/);
+  });
+
+  test("an aged local heartbeat remains discoverable and can be stopped", async () => {
+    bystander = spawn(process.execPath, ["-e", "process.stdin.resume()"], {
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    await once(bystander, "spawn");
+    const pid = bystander.pid!;
+    await writeLock(paseoHome, lockFor(pid, new Date()));
+    const stale = new Date(Date.now() - PID_LOCK_STALE_AFTER_MS - 1000);
+    await utimes(join(paseoHome, "paseo.pid"), stale, stale);
+    expect(await readDaemonInstance(paseoHome)).toMatchObject({ pid });
+    expect(await stopDaemonInstance(paseoHome)).toMatchObject({ action: "stopped", pid });
+  });
+});
+
+describe("selected daemon discovery on a shared home", () => {
+  let home: string;
+  let child: ChildProcess;
+  let registration: DaemonInstanceRegistration | undefined;
+  const serverId = "srv_local_discovery";
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), "paseo-local-discovery-"));
+    vi.stubEnv("PASEO_SERVER_ID", serverId);
+    child = spawn(
+      process.execPath,
+      ["-e", 'process.on("message", () => process.send("alive")); process.send("ready");'],
+      {
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      },
+    );
+    expect((await once(child, "message"))[0]).toBe("ready");
+  });
+
+  afterEach(async () => {
+    child.kill("SIGKILL");
+    await registration?.release();
+    registration = undefined;
+    vi.unstubAllEnvs();
+    await rm(home, { recursive: true, force: true });
+  });
+
+  async function expectChildAlive(): Promise<void> {
+    const response = once(child, "message");
+    child.send!("ping");
+    expect((await response)[0]).toBe("alive");
+  }
+
+  test("discovers and stops the local registered daemon without changing a foreign root pointer", async () => {
+    const pointer = {
+      ...lockFor(process.pid, new Date()),
+      hostname: "foreign-host",
+      serverId: "srv_foreign",
+    };
+    await writeLock(home, pointer);
+    registration = await registerDaemonInstance(home, serverId, {
+      ownerPid: child.pid,
+      listen: "127.0.0.1:6779",
+    });
+    const token = await writeLocalCredential(home, { serverId });
+    const instance = await readDaemonInstance(home);
+    expect(instance).toMatchObject({ pid: child.pid, serverId, listen: "127.0.0.1:6779" });
+    expect(await readLocalCredentialForTarget(home, "tcp://localhost:6779")).toBe(token);
+    expect(await readLocalCredentialForTarget(home, "localhost:6767")).toBeNull();
+    expect(
+      await startDaemonInstance({
+        home,
+        command: "must-not-spawn-an-existing-daemon",
+        args: [],
+        env: { ...process.env },
+        mode: "managed",
+      }),
+    ).toMatchObject({ spawned: false, instance: { pid: child.pid } });
+    const selectedEnv = { ...process.env, PASEO_SERVER_ID: serverId };
+    vi.stubEnv("PASEO_SERVER_ID", "srv_unselected");
+    expect(await stopDaemonInstance(home, { instance: instance!, env: selectedEnv })).toMatchObject(
+      {
+        action: "stopped",
+        pid: child.pid,
+      },
+    );
+    expect(await getPidLockInfo(home)).toEqual(pointer);
+  });
+
+  test("rejects a foreign registration even when its PID exists locally", async () => {
+    registration = await registerDaemonInstance(home, serverId, {
+      machineId: "foreign-machine",
+      ownerPid: child.pid,
+      listen: "127.0.0.1:6779",
+    });
+    await writeLocalCredential(home, { serverId });
+    expect(await readLocalCredentialForTarget(home, "localhost:6779")).toBeNull();
+    expect(await readDaemonInstance(home)).toBeNull();
+    expect(await stopDaemonInstance(home, { force: true })).toMatchObject({
+      action: "not_running",
+    });
+    await expectChildAlive();
+    expect(await readRegisteredDaemonInstance(home, serverId)).toMatchObject({
+      machineId: "foreign-machine",
+    });
+  });
+
+  test("does not signal a reused PID whose birth no longer matches the registration", async () => {
+    registration = await registerDaemonInstance(home, serverId, {
+      ownerPid: child.pid,
+      listen: "127.0.0.1:6779",
+    });
+    await writeLocalCredential(home, { serverId });
+    await writeFile(
+      getDaemonInstancePath(home, serverId),
+      JSON.stringify({
+        ...registration.info,
+        processStartedAt: "a different process birth",
+      }),
+    );
+    expect(await readDaemonInstance(home)).toBeNull();
+    expect(await readLocalCredentialForTarget(home, "localhost:6779")).toBeNull();
+    expect(await stopDaemonInstance(home, { force: true })).toMatchObject({
+      action: "not_running",
+    });
+    await expectChildAlive();
+  });
+
+  test("does not guess ownership of a legacy registration with unknown machine identity", async () => {
+    registration = await registerDaemonInstance(home, serverId, {
+      ownerPid: child.pid,
+      listen: "127.0.0.1:6779",
+    });
+    await writeLocalCredential(home, { serverId });
+    const { machineId: _machineId, ...legacy } = registration.info;
+    await writeFile(getDaemonInstancePath(home, serverId), JSON.stringify(legacy));
+    expect(await readDaemonInstance(home)).toBeNull();
+    expect(await readLocalCredentialForTarget(home, "localhost:6779")).toBeNull();
+    expect(await stopDaemonInstance(home, { force: true })).toMatchObject({
+      action: "not_running",
+    });
+    await expectChildAlive();
+  });
+
+  test("a stale local registered owner remains discoverable and cannot be replaced", async () => {
+    registration = await registerDaemonInstance(home, serverId, { ownerPid: child.pid });
+    const stale = new Date(Date.now() - DAEMON_INSTANCE_STALE_AFTER_MS - 1000);
+    await utimes(getDaemonInstancePath(home, serverId), stale, stale);
+    expect(await readDaemonInstance(home)).toMatchObject({ pid: child.pid });
+    await expect(registerDaemonInstance(home, serverId)).rejects.toThrow(
+      "Another Paseo daemon is already running",
+    );
+  });
+
+  test("status reads do not create server identity on an empty home", async () => {
+    vi.stubEnv("PASEO_SERVER_ID", "");
+    expect(await readDaemonInstance(home)).toBeNull();
+    expect(existsSync(join(home, "server-id"))).toBe(false);
+    expect(existsSync(join(home, "daemons"))).toBe(false);
   });
 });
 
@@ -241,7 +409,7 @@ describe("per-server daemon instance registry", () => {
     }
   });
 
-  test("replaces a stale same-host registry even when its PID is alive", async () => {
+  test("retains a stale same-machine registry when its owner is alive", async () => {
     const serverId = "srv_stale_local";
     const filePath = getDaemonInstancePath(paseoHome, serverId);
     await mkdir(dirname(filePath), { recursive: true });
@@ -259,16 +427,14 @@ describe("per-server daemon instance registry", () => {
     const staleTime = new Date(Date.now() - DAEMON_INSTANCE_STALE_AFTER_MS - 1_000);
     await utimes(filePath, staleTime, staleTime);
 
-    const replacement = await registerDaemonInstance(paseoHome, serverId, {
-      hostname: "host-a",
-      machineId: "machine-a",
-      ownerPid: 202,
-    });
-    try {
-      expect(replacement.info.pid).toBe(202);
-    } finally {
-      await replacement.release();
-    }
+    await expect(
+      registerDaemonInstance(paseoHome, serverId, {
+        hostname: "host-a",
+        machineId: "machine-a",
+        ownerPid: 202,
+      }),
+    ).rejects.toThrow("Another Paseo daemon is already running");
+    expect((await readRegisteredDaemonInstance(paseoHome, serverId))?.pid).toBe(process.pid);
   });
 
   test("reclaims a persistently corrupt stale registry", async () => {

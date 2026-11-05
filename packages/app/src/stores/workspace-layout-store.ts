@@ -1725,8 +1725,12 @@ export function createWorkspaceLayoutStore(
               (sheet) => !sheetAgentNoLongerFits(normalizedWorkspaceKey, sheet, snapshot),
             );
             const sheetAgentGone = fittingSheets.length !== sheets.length;
+            // An unchanged default layout would expose New before its directories arrive.
+            // Known entities can still initialize the workspace from a partial snapshot.
             if (
-              state.layoutByWorkspace[normalizedWorkspaceKey] &&
+              (state.layoutByWorkspace[normalizedWorkspaceKey] ||
+                !snapshot.agentsHydrated ||
+                !snapshot.terminalsHydrated) &&
               nextLayout === rawLayout &&
               pinnedAgentIdsByWorkspace === state.pinnedAgentIdsByWorkspace &&
               !sheetAgentGone

@@ -3600,22 +3600,37 @@ describe("workspace-layout-store actions", () => {
     expect(contentTabs(workspaceLayoutStore.getState().getWorkspaceTabs(workspaceKey))).toEqual([]);
   });
 
-  it("reconcileTabs lands on an existing agent instead of the initial New tab", () => {
-    const workspaceKey = createWorkspaceKey();
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+  ])(
+    "reconcileTabs waits for startup directories (%s, %s) before presenting New",
+    (agentsHydrated, terminalsHydrated) => {
+      const workspaceKey = createWorkspaceKey();
+      workspaceLayoutStore.getState().reconcileTabs(workspaceKey, {
+        agentsHydrated,
+        terminalsHydrated,
+        activeAgentIds: [],
+        autoOpenAgentIds: [],
+        standaloneTerminalIds: [],
+      });
+      expect(workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey]).toBeUndefined();
 
-    workspaceLayoutStore.getState().reconcileTabs(workspaceKey, {
-      agentsHydrated: true,
-      terminalsHydrated: true,
-      activeAgentIds: ["agent-1"],
-      autoOpenAgentIds: ["agent-1"],
-      standaloneTerminalIds: [],
-      hasActivePendingDraftCreate: false,
-    });
+      workspaceLayoutStore.getState().reconcileTabs(workspaceKey, {
+        agentsHydrated: true,
+        terminalsHydrated: true,
+        activeAgentIds: ["agent-1"],
+        autoOpenAgentIds: ["agent-1"],
+        standaloneTerminalIds: [],
+        hasActivePendingDraftCreate: false,
+      });
 
-    const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
-    expect(findPaneById(layout.root, "main")?.tabIds).toEqual(["agent_agent-1"]);
-    expect(findPaneById(layout.root, "main")?.focusedTabId).toBe("agent_agent-1");
-  });
+      const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+      expect(findPaneById(layout.root, "main")?.tabIds).toEqual(["agent_agent-1"]);
+      expect(findPaneById(layout.root, "main")?.focusedTabId).toBe("agent_agent-1");
+    },
+  );
 
   it("reconcileTabs initializes the New launcher once when the hydrated workspace is empty", () => {
     const workspaceKey = createWorkspaceKey();

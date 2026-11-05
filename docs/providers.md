@@ -109,6 +109,12 @@ Active-turn steering is an optional `AgentSession.steerActiveTurn` operation. Th
 
 A steering adapter also owes its interrupt: stopping a turn must discard the steers the provider has not read yet, or one of them resumes the turn the user just stopped. Codex clears pending input when it aborts a turn; Claude does not, so its adapter cancels the SDK messages it queued before calling `query.interrupt()`. It calls `query.interrupt()` only while a main-session turn is in flight (between `system/init` and that turn's `result`): with the main session idle, an interrupt reaches only background subagents and no result follows it, so the adapter withdraws its unstarted messages and stops there. The adapter also declares `perTaskStopAffordance`, because without it the CLI kills every background subagent on interrupt. Pi requires `clear_queue` before `abort`; older binaries without that RPC retain their native queue behavior until the pi compatibility floor reaches 0.84.4. Oh-my-pi exposes no queue-clearing RPC, so its adapter keeps the pending steer submissions across `abort`, blocks replacement prompts until the queued messages drain or a bounded timeout reports failure, and suppresses the phantom run each unread steer starts after it: re-abort on the phantom `agent_start`, swallow its events, consume the echoed user messages, and end suppression once every queued steer surfaced.
 
+OMP can echo a steer before its RPC acknowledgement. Register its identity before calling
+the runtime and remove that same submission on rejection or turn loss. After Stop, both
+`message_end` and terminal `agent_end.messages` can prove queued input was consumed. A late
+terminal or settled event must recover a drained session after the deadline; genuinely
+unread input still blocks a replacement prompt.
+
 `SteerActiveTurnOptions.clearPendingPermissions` makes permission release part of the provider contract. A provider that accepts such a steer queues it first, denies permissions blocking its delivery, and stops once the steer is read. Steers without the flag leave permissions open. A denied plan remains in the timeline because the pending card was the only other copy of its text.
 
 Rewind accepts the canonical wire `messageId` and resolves it to the provider identity before calling the adapter. A submitted prompt cannot be rewound until its provider echo supplies that identity.

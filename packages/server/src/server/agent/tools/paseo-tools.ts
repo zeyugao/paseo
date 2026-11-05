@@ -2907,7 +2907,7 @@ function createToolCatalog(
       const schedule = await requireScheduleTarget(id, "new-agent");
       return {
         content: [],
-        structuredContent: ensureValidJson(schedule),
+        structuredContent: ensureValidJson(StoredScheduleSchema.parse(schedule)),
       };
     },
   );
@@ -3057,7 +3057,7 @@ function createToolCatalog(
 
       return {
         content: [],
-        structuredContent: ensureValidJson(schedule),
+        structuredContent: ensureValidJson(StoredScheduleSchema.parse(schedule)),
       };
     },
   );
@@ -3104,7 +3104,7 @@ function createToolCatalog(
       const schedule = await runScheduleAction(() => scheduleService.runOnce(id));
       return {
         content: [],
-        structuredContent: ensureValidJson(schedule),
+        structuredContent: ensureValidJson(StoredScheduleSchema.parse(schedule)),
       };
     },
   );

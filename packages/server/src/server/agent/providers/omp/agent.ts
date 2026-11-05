@@ -572,11 +572,13 @@ function isOmpAgentSessionEvent(event: OmpRuntimeEvent): event is OmpAgentSessio
   switch (event.type) {
     case "agent_start":
     case "turn_start":
+    case "turn_end":
     case "message_start":
     case "message_end":
     case "message_update":
     case "tool_execution_start":
     case "tool_execution_update":
+    case "tool_stream_update":
     case "tool_execution_end":
     case "compaction_start":
     case "compaction_end":
@@ -1910,6 +1912,8 @@ export class OmpAgentSession implements AgentSession {
         return;
       }
       default:
+        // Frame-only events end here, including turn_end and tool_stream_update:
+        // their content already arrived through message_end and tool_execution_end.
         return;
     }
   }

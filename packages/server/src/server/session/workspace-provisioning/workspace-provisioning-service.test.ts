@@ -207,6 +207,63 @@ test("fresh non-git directory creates a directory workspace at the exact path", 
 
   expect(workspace.cwd).toBe(dir);
 });
+test("serializes concurrent directory creation across hosts", async () => {
+  const repo = path.join(tmpDir, "shared-repo");
+  const workspaceRegistryB = new FileBackedWorkspaceRegistry(
+    path.join(tmpDir, "projects", "workspaces.json"),
+    logger,
+  );
+  const projectRegistryB = new FileBackedProjectRegistry(
+    path.join(tmpDir, "projects", "projects.json"),
+    logger,
+  );
+  await workspaceRegistryB.initialize();
+  await projectRegistryB.initialize();
+
+  let checkoutReads = 0;
+  let releaseInitialReads!: () => void;
+  const initialReadsComplete = new Promise<void>((resolve) => {
+    releaseInitialReads = resolve;
+  });
+  const baseGitService = gitService();
+  const racingGitService = {
+    ...baseGitService,
+    getCheckout: async (cwd: string) => {
+      if (checkoutReads < 2) {
+        checkoutReads += 1;
+        if (checkoutReads === 2) releaseInitialReads();
+        await initialReadsComplete;
+      }
+      return baseGitService.getCheckout(cwd);
+    },
+  };
+  const createProvisioning = (
+    serverId: string,
+    registry: FileBackedWorkspaceRegistry,
+    projects: FileBackedProjectRegistry,
+  ) =>
+    createWorkspaceProvisioningService({
+      serverId,
+      workspaceRegistry: registry,
+      projectRegistry: projects,
+      workspaceGitService: racingGitService,
+      isDirectory,
+      logger,
+    });
+  const provisioningA = createProvisioning("srv-a", workspaceRegistry, projectRegistry);
+  const provisioningB = createProvisioning("srv-b", workspaceRegistryB, projectRegistryB);
+
+  const results = await Promise.allSettled([
+    provisioningA.createWorkspaceForDirectory(repo),
+    provisioningB.createWorkspaceForDirectory(repo),
+  ]);
+
+  expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(2);
+  expect(results.filter((result) => result.status === "rejected")).toHaveLength(0);
+  const records = await workspaceRegistry.listAll();
+  expect(records).toHaveLength(2);
+  expect(records.map((record) => record.hostId).sort()).toEqual(["srv-a", "srv-b"]);
+});
 
 test("workspace parentage survives reload and parent archive without changing placement", async () => {
   const cwd = path.join(tmpDir, "plain");
@@ -323,6 +380,60 @@ test("background workspace creation preserves hooks, inheritance and durable vis
   );
   await reloaded.initialize();
   expect((await reloaded.get(child.workspaceId))?.background).toBe(true);
+});
+
+test("allows multiple hosts to provision the same directory independently", async () => {
+  const repo = path.join(tmpDir, "shared-repo");
+  const hostedProvisioning = createWorkspaceProvisioningService({
+    serverId: "srv-a",
+    workspaceRegistry,
+    projectRegistry,
+    workspaceGitService: gitService(),
+    isDirectory,
+    logger,
+  });
+  const foreignProject = await projectRegistry.getOrCreateActiveByRoot({
+    rootPath: repo,
+    kind: "non_git",
+    displayName: "shared-repo",
+    timestamp: "2026-03-01T00:00:00.000Z",
+  });
+  const foreign = createPersistedWorkspaceRecord({
+    workspaceId: "foreign-workspace",
+    projectId: foreignProject.projectId,
+    cwd: repo,
+    kind: "directory",
+    displayName: "foreign-workspace",
+    hostId: "srv-other",
+    createdAt: "2026-03-01T00:00:00.000Z",
+    updatedAt: "2026-03-01T00:00:00.000Z",
+  });
+  await workspaceRegistry.upsert(foreign);
+
+  const local = await hostedProvisioning.findOrCreateWorkspaceForDirectory(repo);
+  expect(local.hostId).toBe("srv-a");
+  expect(local.workspaceId).not.toBe(foreign.workspaceId);
+  expect(await hostedProvisioning.findOrCreateWorkspaceForDirectory(repo)).toMatchObject({
+    workspaceId: local.workspaceId,
+    hostId: "srv-a",
+  });
+
+  const duplicateLocal = await hostedProvisioning.createWorkspaceForDirectory(repo);
+  expect(duplicateLocal.hostId).toBe("srv-a");
+  expect(duplicateLocal.workspaceId).not.toBe(local.workspaceId);
+
+  const worktree = await hostedProvisioning.createWorkspaceForWorktree({
+    sourceCwd: repo,
+    projectId: foreignProject.projectId,
+    repoRoot: repo,
+    cwd: path.join(tmpDir, "shared-worktree"),
+    worktreeRoot: path.join(tmpDir, "shared-worktree"),
+    branch: "feature/host-a",
+    baseBranch: "main",
+    title: null,
+  });
+  expect(worktree.hostId).toBe("srv-a");
+  expect(await workspaceRegistry.get(foreign.workspaceId)).toEqual(foreign);
 });
 
 test("re-opening an active workspace by exact path returns the same record without duplicating", async () => {

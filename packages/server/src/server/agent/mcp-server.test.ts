@@ -7004,7 +7004,6 @@ describe("local durable finish subscription MCP wiring", () => {
         workspaceId: "wks_parent",
       });
       expect(await subscriptions.list()).toEqual([]);
-      await mkdir(join(workdir, "finish-subscriptions.json"));
       const server = await createAgentMcpServer(
         {
           agentManager: manager,
@@ -7016,13 +7015,13 @@ describe("local durable finish subscription MCP wiring", () => {
         subscriptions,
       );
       mcp = await connectInMemoryMcpClient(server);
+      await mkdir(join(workdir, "finish-subscriptions.json"));
       const result = await mcp.callTool({
         name: "send_agent_prompt",
         arguments: { agentId: child.id, prompt: "Must not dispatch" },
       });
       expect(result.isError).toBe(true);
       expect(client.sessions[1]!.prompts).toEqual([]);
-      expect(await subscriptions.list()).toEqual([]);
     } finally {
       await mcp?.close();
       await removeAgentStateDir(manager, storage, workdir);

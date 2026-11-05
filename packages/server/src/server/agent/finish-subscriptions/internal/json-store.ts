@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { writeJsonFileAtomic } from "../../../atomic-file.js";
+import { withReclaimLock } from "../../../pid-lock.js";
 import type { FinishSubscription, FinishSubscriptionStore } from "../index.js";
 
 const recordsSchema = z.array(
@@ -16,17 +17,14 @@ const recordsSchema = z.array(
 
 export function createJsonFinishSubscriptionStore(paseoHome: string): FinishSubscriptionStore {
   const file = join(paseoHome, "finish-subscriptions.json");
-  let records: FinishSubscription[] | undefined;
   let pending = Promise.resolve();
   async function load(): Promise<FinishSubscription[]> {
-    if (records) return records;
     try {
-      records = recordsSchema.parse(JSON.parse(await readFile(file, "utf8")));
+      return recordsSchema.parse(JSON.parse(await readFile(file, "utf8")));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      records = [];
+      return [];
     }
-    return records;
   }
   function serialized<T>(action: () => Promise<T>): Promise<T> {
     const result = pending.then(action);
@@ -39,9 +37,10 @@ export function createJsonFinishSubscriptionStore(paseoHome: string): FinishSubs
   async function mutate(
     update: (current: FinishSubscription[]) => FinishSubscription[],
   ): Promise<void> {
-    const next = update(await load());
-    await writeJsonFileAtomic(file, next);
-    records = next;
+    await withReclaimLock(`${file}.lock`, async () => {
+      const next = update(await load());
+      await writeJsonFileAtomic(file, next);
+    });
   }
   return {
     list: () => serialized(async () => (await load()).map((record) => Object.assign({}, record))),

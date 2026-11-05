@@ -7,7 +7,7 @@ import { curateAgentActivity } from "./activity-curator.js";
 import { selectItemsByProjectedLimit } from "./timeline-projection.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent-storage.js";
 import { serializeAgentSnapshot } from "../messages.js";
-import { StoredScheduleSchema } from "@getpaseo/protocol/schedule/types";
+import { ScheduleSummarySchema, StoredScheduleSchema } from "@getpaseo/protocol/schedule/types";
 import type { AgentProvider } from "./agent-sdk-types.js";
 
 export const AgentProviderEnum = z.string();
@@ -269,6 +269,5 @@ export function parseDurationString(input: string): number {
 }
 
 export function toScheduleSummary(schedule: z.infer<typeof StoredScheduleSchema>) {
-  const { runs: _runs, ...summary } = schedule;
-  return summary;
+  return ScheduleSummarySchema.parse(schedule);
 }

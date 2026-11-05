@@ -102,6 +102,7 @@ import { mapOmpTodoReminderEvent, mapOmpTodoState, mapOmpTodoToolResult } from "
 import { mapOmpRuntimeEventToTimelineItem } from "./event-mapper.js";
 import { mapOmpAdvisorMessageToToolCall } from "./advisor-message.js";
 import { handleOmpHostToolRuntimeEvent, OmpHostToolRouter } from "./host-tools.js";
+import { mapOmpIrcMessageToToolCall } from "./irc-message.js";
 import { readOmpNativeMessageId } from "./native-message-id.js";
 import { OmpSubagentIndex } from "./subagent-index.js";
 import { OmpQuestionUi } from "./question-ui.js";
@@ -2184,7 +2185,8 @@ export class OmpAgentSession implements AgentSession {
             return;
           }
           const customItem =
-            mapOmpAdvisorMessageToToolCall(event.message, text);
+            mapOmpAdvisorMessageToToolCall(event.message, text) ??
+            mapOmpIrcMessageToToolCall(event.message, text);
           const items: AgentTimelineItem[] = customItem
             ? [customItem]
             : mapOmpSystemNoticeToToolCalls(event.message, text);

@@ -10,8 +10,10 @@ const execFileAsync = promisify(execFile);
 const FALLBACK_MACHINE_ID_PATH = join(homedir(), ".paseo-machine-id");
 const FALLBACK_READ_ATTEMPTS = 10;
 const FALLBACK_READ_DELAY_MS = 50;
+const MAC_MACHINE_ID_ARGS = ["-rd1", "-c", "IOPlatformExpertDevice"];
 
 let cachedMachineId: Promise<string> | undefined;
+let resolvedMachineId: string | undefined;
 
 function normalizeMachineId(value: string): string | null {
   const normalized = value.trim();
@@ -26,11 +28,15 @@ async function readLinuxMachineId(): Promise<string | null> {
   }
 }
 
+function parseMacMachineId(stdout: string): string | null {
+  const match = stdout.match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
+  return match ? normalizeMachineId(match[1]) : null;
+}
+
 async function readMacMachineId(): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("ioreg", ["-rd1", "-c", "IOPlatformExpertService"]);
-    const match = stdout.match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
-    return match ? normalizeMachineId(match[1]) : null;
+    const { stdout } = await execFileAsync("ioreg", MAC_MACHINE_ID_ARGS);
+    return parseMacMachineId(stdout);
   } catch {
     return null;
   }
@@ -75,17 +81,30 @@ async function createFallbackMachineId(): Promise<string> {
   }
 }
 
-async function loadMachineId(): Promise<string> {
+async function readSystemMachineId(): Promise<string | null> {
+  if (resolvedMachineId) return resolvedMachineId;
   if (process.platform === "linux") {
-    return (await readLinuxMachineId()) ?? createFallbackMachineId();
+    return (await readLinuxMachineId()) ?? readFallbackMachineId();
   }
   if (process.platform === "darwin") {
-    return (await readMacMachineId()) ?? createFallbackMachineId();
+    // Keep an identity already used by daemon leases across upgrades.
+    return (await readFallbackMachineId()) ?? readMacMachineId();
   }
-  return createFallbackMachineId();
+  return readFallbackMachineId();
+}
+
+export function readMachineId(): Promise<string | null> {
+  return cachedMachineId ?? readSystemMachineId();
+}
+
+function rememberMachineId(id: string): string {
+  resolvedMachineId = id;
+  return id;
 }
 
 export function getMachineId(): Promise<string> {
-  cachedMachineId ??= loadMachineId();
+  cachedMachineId ??= readSystemMachineId().then((id) =>
+    id ? rememberMachineId(id) : createFallbackMachineId().then(rememberMachineId),
+  );
   return cachedMachineId;
 }

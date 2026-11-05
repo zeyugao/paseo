@@ -10324,7 +10324,7 @@ test("archiveAgent cascade surfaces partial child archive failures", async () =>
   );
 });
 
-test("turn_failed emits a system error assistant timeline message and keeps error lifecycle", async () => {
+test("turn_failed emits a system error timeline item and keeps error lifecycle", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-failed-"));
   const storagePath = join(workdir, "agents");
   const storage = new AgentStorage(storagePath, logger);
@@ -10394,7 +10394,7 @@ test("turn_failed emits a system error assistant timeline message and keeps erro
     .getTimeline(agent.id)
     .filter(
       (item): item is Extract<AgentTimelineItem, { type: "assistant_message" }> =>
-        item.type === "assistant_message" && item.text.includes("[System Error]"),
+        item.type === "assistant_message" && item.text.startsWith("[System Error]"),
     );
   expect(systemErrors).toHaveLength(1);
   expect(systemErrors[0]?.text).toContain("invalid model id");
@@ -10464,14 +10464,15 @@ test("turn_failed surfaces provider code and diagnostic in system error message"
 
   await expect(manager.runAgent(agent.id, "hello")).rejects.toThrow("Provider execution failed");
 
-  expect(manager.getAgent(agent.id)?.lastError).toBe("Provider execution failed");
+  expect(manager.getAgent(agent.id)?.lastError).toBe(
+    "Provider execution failed\n\ncode: 126\n\nNo preset version installed for command claude",
+  );
 
-  const systemError = manager
-    .getTimeline(agent.id)
-    .find(
-      (item): item is Extract<AgentTimelineItem, { type: "assistant_message" }> =>
-        item.type === "assistant_message" && item.text.includes("[System Error]"),
-    );
+  const timeline = manager.getTimeline(agent.id);
+  const systemError = timeline.find(
+    (item): item is Extract<AgentTimelineItem, { type: "assistant_message" }> =>
+      item.type === "assistant_message" && item.text.startsWith("[System Error]"),
+  );
   expect(systemError?.text).toContain("Provider execution failed");
   expect(systemError?.text).toContain("code: 126");
   expect(systemError?.text).toContain("No preset version installed for command claude");

@@ -10,6 +10,7 @@ import {
 } from "../../workspace-registry-model.js";
 import {
   createPersistedWorkspaceRecord,
+  isWorkspaceVisibleToServer,
   type PersistedProjectRecord,
   type PersistedWorkspaceRecord,
   type ProjectRegistry,
@@ -17,7 +18,7 @@ import {
 } from "../../workspace-registry.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../../worktree-session.js";
-import { deriveProjectKey } from "../../project-key.js";
+import { deriveProjectKey, mergeLocalProjectKeyServerIds } from "../../project-key.js";
 import { areEquivalentPaths, createRealpathAwarePathMatcher } from "../../../utils/path.js";
 import type { UntrustedWorkspaceSource } from "../../workspace-automation-gate.js";
 
@@ -131,7 +132,7 @@ export function createWorkspaceProvisioningService(deps: {
   ): Promise<ImportWorkspaceResult<T>> {
     if (input.requestedWorkspaceId) {
       const workspace = await workspaceRegistry.get(input.requestedWorkspaceId);
-      if (!workspace || workspace.archivedAt) {
+      if (!workspace || workspace.archivedAt || !isWorkspaceVisibleToServer(workspace, serverId)) {
         throw new Error(`Workspace not found: ${input.requestedWorkspaceId}`);
       }
       const project = await projectRegistry.get(workspace.projectId);
@@ -147,11 +148,14 @@ export function createWorkspaceProvisioningService(deps: {
       };
     }
 
-    const [projectsBeforeImport, workspacesBeforeImport] = await Promise.all([
+    const [projectsBeforeImport, allWorkspacesBeforeImport] = await Promise.all([
       projectRegistry.list(),
       // Import rollback must distinguish restored records from newly allocated workspaces.
       workspaceRegistry.listAll(),
     ]);
+    const workspacesBeforeImport = allWorkspacesBeforeImport.filter((workspace) =>
+      isWorkspaceVisibleToServer(workspace, serverId),
+    );
     const workspace = await findOrCreateWorkspaceForDirectory(input.cwd);
     const createdWorkspace = workspacesBeforeImport.some(
       (candidate) => candidate.workspaceId === workspace.workspaceId,
@@ -257,15 +261,14 @@ export function createWorkspaceProvisioningService(deps: {
     const workspace = createPersistedWorkspaceRecord({
       workspaceId: context?.workspaceId ?? generateWorkspaceId(),
       projectId: project.projectId,
+      ...(serverId === undefined ? {} : { hostId: serverId }),
       ...initialWorkspacePlacement({ source: "checkout", cwd: normalizedCwd, checkout }),
       title: title?.trim() || null,
       createdAt: timestamp,
       updatedAt: timestamp,
       background: await resolveBackground(context),
     });
-    await workspaceRegistry.upsert(workspace, {
-      expectsInitialAgent: context?.expectsInitialAgent,
-    });
+    await workspaceRegistry.upsert(workspace, context);
     emitWorkspaceCreated(workspace);
     return workspace;
   }
@@ -286,6 +289,7 @@ export function createWorkspaceProvisioningService(deps: {
     const workspace = createPersistedWorkspaceRecord({
       workspaceId: input.workspaceId ?? generateWorkspaceId(),
       projectId: project.projectId,
+      ...(serverId === undefined ? {} : { hostId: serverId }),
       ...initialWorkspacePlacement({
         source: "created_worktree",
         cwd,
@@ -322,7 +326,9 @@ export function createWorkspaceProvisioningService(deps: {
       return refreshProjectKind(await requireActiveProject(input.projectId));
     }
 
-    const workspaces = await workspaceRegistry.listActive();
+    const workspaces = (await workspaceRegistry.listActive()).filter((workspace) =>
+      isWorkspaceVisibleToServer(workspace, serverId),
+    );
     const sourceWorkspace =
       workspaces.find(
         (workspace) => !workspace.archivedAt && areEquivalentPaths(workspace.cwd, input.sourceCwd),
@@ -356,9 +362,10 @@ export function createWorkspaceProvisioningService(deps: {
 
   async function findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord> {
     const normalizedCwd = resolve(cwd);
-    // Path-based discovery selects public work; explicit-ID recovery bypasses this selector.
+    // Path-based discovery is local to this host and selects public work.
     // Opening a directory explicitly recovers an archived workspace at that path.
     const workspaces = (await workspaceRegistry.listAll())
+      .filter((workspace) => isWorkspaceVisibleToServer(workspace, serverId))
       .filter(
         (workspace) => !workspace.background && areEquivalentPaths(workspace.cwd, normalizedCwd),
       )
@@ -410,6 +417,9 @@ export function createWorkspaceProvisioningService(deps: {
   async function ensureWorkspaceRecordUnarchived(
     workspace: PersistedWorkspaceRecord,
   ): Promise<PersistedWorkspaceRecord> {
+    if (!isWorkspaceVisibleToServer(workspace, serverId)) {
+      throw new Error(`Workspace not found: ${workspace.workspaceId}`);
+    }
     const project = await projectRegistry.get(workspace.projectId);
     if (!project) throw new Error(`Unknown project: ${workspace.projectId}`);
     const timestamp = new Date().toISOString();
@@ -439,13 +449,16 @@ export function createWorkspaceProvisioningService(deps: {
           ? checkout
           : await workspaceGitService.getCheckout(project.rootPath);
       const kind = projectCheckout.isGit ? "git" : "non_git";
-      const projectKey = deriveProjectKey({
-        rootPath: project.rootPath,
-        remoteUrl: projectCheckout.remoteUrl,
-        worktreeRoot: projectCheckout.worktreeRoot,
-        mainRepoRoot: projectCheckout.mainRepoRoot,
-        serverId,
-      });
+      const projectKey = mergeLocalProjectKeyServerIds(
+        project.projectKey,
+        deriveProjectKey({
+          rootPath: project.rootPath,
+          remoteUrl: projectCheckout.remoteUrl,
+          worktreeRoot: projectCheckout.worktreeRoot,
+          mainRepoRoot: projectCheckout.mainRepoRoot,
+          serverId,
+        }),
+      );
       if (project.archivedAt || project.kind !== kind || project.projectKey !== projectKey) {
         await projectRegistry.upsert({
           ...project,
@@ -489,13 +502,16 @@ export function createWorkspaceProvisioningService(deps: {
         ? workspaceCheckout
         : await workspaceGitService.getCheckout(project.rootPath);
     const kind: PersistedProjectRecord["kind"] = projectCheckout.isGit ? "git" : "non_git";
-    const projectKey = deriveProjectKey({
-      rootPath: project.rootPath,
-      remoteUrl: projectCheckout.remoteUrl,
-      worktreeRoot: projectCheckout.worktreeRoot,
-      mainRepoRoot: projectCheckout.mainRepoRoot,
-      serverId,
-    });
+    const projectKey = mergeLocalProjectKeyServerIds(
+      project.projectKey,
+      deriveProjectKey({
+        rootPath: project.rootPath,
+        remoteUrl: projectCheckout.remoteUrl,
+        worktreeRoot: projectCheckout.worktreeRoot,
+        mainRepoRoot: projectCheckout.mainRepoRoot,
+        serverId,
+      }),
+    );
     if (project.kind === kind && project.projectKey === projectKey) return project;
     const refreshed = {
       ...project,

@@ -882,6 +882,7 @@ describe("WorkspaceReconciliationService", () => {
       displayName: "Stable workspace name",
       title: "Pinned workspace name",
       branch: "stale-branch",
+      hostId: "srv-a",
       baseBranch: "main",
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -939,6 +940,7 @@ describe("WorkspaceReconciliationService", () => {
       branch: null,
       updatedAt: expect.any(String),
     });
+    expect(workspaces.get("w1")?.hostId).toBe("srv-a");
   });
 
   test("archives workspaces whose directories no longer exist", async () => {
@@ -1481,6 +1483,64 @@ describe("WorkspaceReconciliationService", () => {
     await service.runOnce();
 
     expect(projects.get("p1")?.projectKey).toBe(canonicalLocalProjectKey(dir));
+  });
+
+  test("unions the observing serverIds of one local project key across daemons", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "reconcile-local-key-observers-"));
+    tempDirs.push(dir);
+    const { projects, projectRegistry, workspaceRegistry } = createTestRegistries();
+    const localKeyFor = (serverId: string) =>
+      deriveProjectKey({
+        rootPath: dir,
+        remoteUrl: null,
+        worktreeRoot: null,
+        mainRepoRoot: null,
+        serverId,
+      });
+    const observedPath = localKeyFor("host-a").slice("host:host-a:".length);
+    const mergedKey = `host:host-a+host-b:${observedPath}`;
+
+    projects.set(
+      "p1",
+      createPersistedProjectRecord({
+        projectId: "p1",
+        projectKey: localKeyFor("host-a"),
+        rootPath: dir,
+        kind: "non_git",
+        displayName: "app",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+
+    const reconcileFor = (serverId: string) =>
+      new WorkspaceReconciliationService({
+        serverId,
+        projectRegistry,
+        workspaceRegistry,
+        logger: createTestLogger(),
+        workspaceGitService: createWorkspaceGitServiceStub({}),
+      }).reconcileGitMetadata();
+
+    // The daemon that already wrote the key finds itself listed and leaves it alone.
+    expect((await reconcileFor("host-a")).changesApplied).toEqual([]);
+
+    // The second daemon adds itself once; the key then names both observers.
+    const secondPass = await reconcileFor("host-b");
+    expect(secondPass.changesApplied).toEqual([
+      {
+        kind: "project_updated",
+        projectId: "p1",
+        directory: dir,
+        fields: { projectKey: mergedKey },
+      },
+    ]);
+    expect(projects.get("p1")?.projectKey).toBe(mergedKey);
+
+    // Either daemon reconciling again changes nothing: the key has converged.
+    expect((await reconcileFor("host-b")).changesApplied).toEqual([]);
+    expect((await reconcileFor("host-a")).changesApplied).toEqual([]);
+    expect(projects.get("p1")?.projectKey).toBe(mergedKey);
   });
 
   test("keeps custom and default names stable when the remote changes", async () => {

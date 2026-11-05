@@ -6,6 +6,7 @@ import type { StoredAgentRecord } from "./agent-storage.js";
 import {
   archiveAgentCommand,
   cancelAgentRunCommand,
+  closeAgentCommand,
   detachAgentCommand,
   setAgentModeCommand,
   updateAgentCommand,
@@ -42,6 +43,8 @@ class FakeLifecycleAgentManager implements LifecycleAgentManager {
   readonly notifiedAgentIds: string[] = [];
   readonly modeUpdates: Array<{ agentId: string; modeId: string }> = [];
   readonly detachedAgentIds: string[] = [];
+  readonly assertedAgentIds: string[] = [];
+  ownershipError: Error | null = null;
   inFlightAgentIds = new Set<string>();
   readonly settledDuringCancellationAgentIds = new Set<string>();
   readonly rejectedCancellationAgentIds = new Set<string>();
@@ -50,6 +53,10 @@ class FakeLifecycleAgentManager implements LifecycleAgentManager {
 
   getAgent(agentId: string): LifecycleAgentSnapshot | null {
     return this.liveAgents.get(agentId) ?? null;
+  }
+  async assertAgentMutable(agentId: string): Promise<void> {
+    this.assertedAgentIds.push(agentId);
+    if (this.ownershipError) throw this.ownershipError;
   }
 
   hasInFlightRun(agentId: string): boolean {
@@ -192,6 +199,31 @@ describe("agent lifecycle commands", () => {
       agent: manager.liveAgents.get("agent-1"),
       cancelled: false,
     });
+  });
+
+  test("checks ownership before the cancel no-op branch", async () => {
+    const storage = new FakeLifecycleAgentStorage();
+    const manager = new FakeLifecycleAgentManager(storage);
+    manager.liveAgents.set("agent-1", managedAgent("agent-1", "idle"));
+    manager.ownershipError = new Error("agent is owned by host host-a");
+
+    await expect(
+      cancelAgentRunCommand({ agentManager: manager, logger }, "agent-1"),
+    ).rejects.toThrow("agent is owned by host host-a");
+    expect(manager.assertedAgentIds).toEqual(["agent-1"]);
+    expect(manager.cancelledAgentIds).toEqual([]);
+  });
+
+  test("checks ownership before the external close command", async () => {
+    const storage = new FakeLifecycleAgentStorage();
+    const manager = new FakeLifecycleAgentManager(storage);
+    manager.liveAgents.set("agent-1", managedAgent("agent-1", "idle"));
+    manager.ownershipError = new Error("agent is owned by host host-a");
+
+    await expect(closeAgentCommand({ agentManager: manager }, "agent-1")).rejects.toThrow(
+      "agent is owned by host host-a",
+    );
+    expect(manager.closedAgentIds).toEqual([]);
   });
 
   test("archives a live agent after canceling and clearing attention", async () => {

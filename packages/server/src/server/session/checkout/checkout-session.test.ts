@@ -137,6 +137,7 @@ function makeCheckoutSession(options?: {
     handleWorkspaceGitBranchSnapshot: (cwd, branchName) => {
       hostCalls.handleWorkspaceGitBranchSnapshot.push({ cwd, branchName });
     },
+    assertMergeToBaseTargetOwned: async () => {},
     renameCurrentBranch: async (cwd, branch) => {
       hostCalls.renameCurrentBranch.push({ cwd, branch });
       return { previousBranch: null, currentBranch: branch };

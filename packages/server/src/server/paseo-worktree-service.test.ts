@@ -1108,7 +1108,9 @@ function createDeps(options?: {
     },
     archive: async (workspaceId, archivedAt) => {
       const workspace = workspaces.get(workspaceId);
-      if (workspace) workspaces.set(workspaceId, { ...workspace, archivedAt });
+      if (!workspace || workspace.archivedAt) return false;
+      workspaces.set(workspaceId, { ...workspace, archivedAt, updatedAt: archivedAt });
+      return true;
     },
     remove: async (workspaceId) => {
       workspaces.delete(workspaceId);

@@ -92,10 +92,12 @@ import {
 } from "../lifecycle-command.js";
 import type { ForgeService } from "../../../services/forge-service.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
-import type {
-  PersistedWorkspaceRecord,
-  ProjectRegistry,
-  WorkspaceRegistry,
+import {
+  assertCwdWorkspaceOwnedByThisServer,
+  isWorkspaceVisibleToServer,
+  type PersistedWorkspaceRecord,
+  type ProjectRegistry,
+  type WorkspaceRegistry,
 } from "../../workspace-registry.js";
 import { resolveWorktreeSourceCwd } from "../../workspace-source.js";
 import type { WorkspaceScriptsService } from "../../session/workspace-scripts/workspace-scripts-service.js";
@@ -124,6 +126,7 @@ export interface PaseoToolHostDependencies {
   hosts?: () => ToolHosts;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
+
   terminalManager?: TerminalManager | null;
   getDaemonTcpPort?: () => number | null;
   scheduleService?: ScheduleService | null;
@@ -136,9 +139,13 @@ export interface PaseoToolHostDependencies {
   >;
   findWorkspaceIdForCwd?: ArchiveDependencies["findWorkspaceIdForCwd"];
   listActiveWorkspaces?: ArchiveDependencies["listActiveWorkspaces"];
+  listAllActiveWorkspaces?: ArchiveDependencies["listAllActiveWorkspaces"];
   archiveWorkspaceRecord?: ArchiveDependencies["archiveWorkspaceRecord"];
   emitWorkspaceUpdatesForWorkspaceIds?: ArchiveDependencies["emitWorkspaceUpdatesForWorkspaceIds"];
-  workspaceRegistry?: Pick<WorkspaceRegistry, "get" | "listActive" | "upsert">;
+  workspaceRegistry?: Pick<
+    WorkspaceRegistry,
+    "get" | "listAll" | "listActive" | "update" | "upsert"
+  >;
   projectRegistry?: Pick<ProjectRegistry, "get" | "list">;
   createDirectoryWorkspace?: (
     cwd: string,
@@ -940,6 +947,24 @@ function createToolCatalog(
     throw new PaseoToolInputError("workspaceId is required outside an agent-scoped session");
   }
 
+  // Workspaces owned by another host sharing PASEO_HOME are read-only here: mutation
+  // tools addressed by workspaceId reject them. Legacy workspaces (no hostId) pass.
+  const assertWorkspaceOwnedByThisServer = (workspace: PersistedWorkspaceRecord): void => {
+    if (!isWorkspaceVisibleToServer(workspace, options.serverId)) {
+      throw new Error(`Workspace ${workspace.workspaceId} is owned by host ${workspace.hostId}`);
+    }
+  };
+
+  const assertWorkspaceIdOwnedByThisServer = async (workspaceId: string): Promise<void> => {
+    if (!options.workspaceRegistry) {
+      return;
+    }
+    const workspace = await options.workspaceRegistry.get(workspaceId);
+    if (workspace) {
+      assertWorkspaceOwnedByThisServer(workspace);
+    }
+  };
+
   const buildCallerAgentScheduleConfigExtras = (
     callerAgent: NonNullable<ReturnType<typeof resolveCallerAgent>>,
     resolvedProvider: string,
@@ -1482,6 +1507,13 @@ function createToolCatalog(
           ],
           "Worktree options require isolation worktree",
         );
+        if (options.workspaceRegistry) {
+          await assertCwdWorkspaceOwnedByThisServer(
+            cwd,
+            options.workspaceRegistry,
+            options.serverId,
+          );
+        }
         if (!options.createDirectoryWorkspace) {
           throw new Error("Workspace provisioning is not configured");
         }
@@ -1499,6 +1531,13 @@ function createToolCatalog(
             throw new Error("Project registry is not configured");
           }
           cwd = await resolveWorktreeSourceCwd({ projectId }, options.projectRegistry);
+        }
+        if (options.workspaceRegistry) {
+          await assertCwdWorkspaceOwnedByThisServer(
+            cwd,
+            options.workspaceRegistry,
+            options.serverId,
+          );
         }
         const worktreeTarget = resolveWorkspaceWorktreeTarget({
           mode,
@@ -1553,6 +1592,7 @@ function createToolCatalog(
         .filter(
           (workspace) => !workspace.archivedAt && (includeBackground || !workspace.background),
         )
+        .filter((workspace) => isWorkspaceVisibleToServer(workspace, options.serverId))
         .map(toWorkspaceAutomationSummary);
       return {
         content: [],
@@ -1581,6 +1621,7 @@ function createToolCatalog(
         { listActiveWorkspaces: options.listActiveWorkspaces },
         workspaceId,
       );
+      await assertWorkspaceIdOwnedByThisServer(workspace.workspaceId);
       const result = await archiveByScope(
         archiveWorktreeDependencies(options, {
           agentManager,
@@ -1839,6 +1880,9 @@ function createToolCatalog(
         throw new Error("Workspace creation is not configured");
       }
       const cwd = process.cwd();
+      if (options.workspaceRegistry) {
+        await assertCwdWorkspaceOwnedByThisServer(cwd, options.workspaceRegistry, options.serverId);
+      }
       return {
         cwd,
         workspaceId: await options.ensureWorkspaceForCreate(
@@ -1851,6 +1895,14 @@ function createToolCatalog(
     const caller = resolveCallerAgent();
     if (!caller?.workspaceId) {
       throw new PaseoToolInputError(`Caller agent ${callerAgentId} has no current workspace`);
+    }
+    await assertWorkspaceIdOwnedByThisServer(caller.workspaceId);
+    if (options.workspaceRegistry) {
+      await assertCwdWorkspaceOwnedByThisServer(
+        caller.cwd,
+        options.workspaceRegistry,
+        options.serverId,
+      );
     }
     return { cwd: undefined, workspaceId: caller.workspaceId };
   }
@@ -1911,8 +1963,12 @@ function createToolCatalog(
       if (!callerAgent?.workspaceId) {
         throw new PaseoToolInputError(`Caller agent ${callerAgentId} has no current workspace`);
       }
+      const cwd = resolveScopedCwd(workspace.cwd, { required: true });
+      if (options.workspaceRegistry) {
+        await assertCwdWorkspaceOwnedByThisServer(cwd, options.workspaceRegistry, options.serverId);
+      }
       return {
-        cwd: workspace.cwd,
+        cwd,
         workspaceId: callerAgent.workspaceId,
       };
     }
@@ -1930,6 +1986,9 @@ function createToolCatalog(
       const cwd = workspace.cwd
         ? resolveScopedCwd(workspace.cwd, { required: true })
         : existingWorkspace.cwd;
+      if (options.workspaceRegistry) {
+        await assertCwdWorkspaceOwnedByThisServer(cwd, options.workspaceRegistry, options.serverId);
+      }
       const lockedCwd = callerContext?.lockedCwd?.trim();
       if (lockedCwd && !isSameOrDescendantPath(expandUserPath(lockedCwd), cwd)) {
         throw new PaseoToolInputError(
@@ -1946,6 +2005,9 @@ function createToolCatalog(
       const cwd = resolveScopedCwd(workspace.source.path, { required: true });
       if (!options.ensureWorkspaceForCreate) {
         throw new Error("Workspace creation is not configured");
+      }
+      if (options.workspaceRegistry) {
+        await assertCwdWorkspaceOwnedByThisServer(cwd, options.workspaceRegistry, options.serverId);
       }
       return {
         cwd,
@@ -2362,19 +2424,20 @@ function createToolCatalog(
       }
 
       const workspaceId = resolveWorkspaceIdForRename(requestedWorkspaceId);
-      const existing = await options.workspaceRegistry.get(workspaceId);
-      if (!existing) {
-        throw new PaseoToolInputError(`Workspace ${workspaceId} not found`);
-      }
-      if (existing.archivedAt) {
-        throw new PaseoToolInputError(`Workspace ${workspaceId} is archived`);
-      }
-
-      await options.workspaceRegistry.upsert({
-        ...existing,
-        title,
-        updatedAt: new Date().toISOString(),
+      // Read-modify-write under the registry's cross-host lock: an upsert of a
+      // previously fetched snapshot would clobber labels/pin state another host
+      // wrote between the get and the write.
+      const updatedAt = new Date().toISOString();
+      const renamed = await options.workspaceRegistry.update(workspaceId, (current) => {
+        if (current.archivedAt) {
+          throw new Error(`Workspace ${workspaceId} is archived`);
+        }
+        assertWorkspaceOwnedByThisServer(current);
+        return { ...current, title, updatedAt };
       });
+      if (!renamed) {
+        throw new Error(`Workspace ${workspaceId} not found`);
+      }
       await options.emitWorkspaceUpdatesForWorkspaceIds([workspaceId]);
 
       return {
@@ -2405,6 +2468,7 @@ function createToolCatalog(
       if (!workspaceScripts) {
         throw new Error("Workspace script management is not configured");
       }
+      await assertWorkspaceIdOwnedByThisServer(workspaceId);
       return {
         content: [],
         structuredContent: ensureValidJson({ scripts: await workspaceScripts.list(workspaceId) }),
@@ -2430,6 +2494,7 @@ function createToolCatalog(
       if (!workspaceScripts) {
         throw new Error("Workspace script management is not configured");
       }
+      await assertWorkspaceIdOwnedByThisServer(workspaceId);
       return {
         content: [],
         structuredContent: ensureValidJson({
@@ -2456,6 +2521,7 @@ function createToolCatalog(
       if (!workspaceScripts) {
         throw new Error("Workspace script management is not configured");
       }
+      await assertWorkspaceIdOwnedByThisServer(workspaceId);
       return {
         content: [],
         structuredContent: ensureValidJson({
@@ -2533,6 +2599,13 @@ function createToolCatalog(
       }
 
       const resolvedCwd = resolveScopedCwd(cwd, { required: true });
+      if (options.workspaceRegistry) {
+        await assertCwdWorkspaceOwnedByThisServer(
+          resolvedCwd,
+          options.workspaceRegistry,
+          options.serverId,
+        );
+      }
       const workspaceId = await resolveTerminalWorkspaceId(resolvedCwd);
 
       const terminal = await terminalManager.createTerminal({
@@ -3336,6 +3409,9 @@ function archiveWorktreeDependencies(
   if (!options.listActiveWorkspaces) {
     throw new Error("Active workspace lister is required to archive worktrees");
   }
+  if (!options.listAllActiveWorkspaces) {
+    throw new Error("Unfiltered workspace lister is required to archive worktrees");
+  }
   if (!options.emitWorkspaceUpdatesForWorkspaceIds) {
     throw new Error("Workspace update emitter is required to archive worktrees");
   }
@@ -3345,6 +3421,9 @@ function archiveWorktreeDependencies(
   if (!options.clearWorkspaceArchiving) {
     throw new Error("Workspace archiving clearer is required to archive worktrees");
   }
+  if (!options.workspaceRegistry) {
+    throw new Error("Workspace registry is required to archive worktrees");
+  }
   return {
     paseoHome: options.paseoHome,
     paseoWorktreesBaseRoot: options.worktreesRoot,
@@ -3353,11 +3432,15 @@ function archiveWorktreeDependencies(
     agentManager: context.agentManager,
     agentStorage: context.agentStorage,
     findWorkspaceIdForCwd: options.findWorkspaceIdForCwd,
+    getWorkspace: options.workspaceRegistry.get.bind(options.workspaceRegistry),
     listActiveWorkspaces: options.listActiveWorkspaces,
+    listAllActiveWorkspaces: options.listAllActiveWorkspaces,
     archiveWorkspaceRecord: options.archiveWorkspaceRecord,
     emitWorkspaceUpdatesForWorkspaceIds: options.emitWorkspaceUpdatesForWorkspaceIds,
     markWorkspaceArchiving: options.markWorkspaceArchiving,
     clearWorkspaceArchiving: options.clearWorkspaceArchiving,
+    assertCwdWorkspaceOwnedByThisServer: (cwd: string) =>
+      assertCwdWorkspaceOwnedByThisServer(cwd, options.workspaceRegistry, options.serverId),
     killTerminalsForWorkspace: (workspaceId: string) =>
       killTerminalsForWorkspace(
         {

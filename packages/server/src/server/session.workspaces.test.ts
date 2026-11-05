@@ -129,6 +129,7 @@ interface SessionTestAccess {
   agentStorage: {
     listAll(...args: unknown[]): Promise<unknown[]>;
     get(agentId: string): Promise<unknown>;
+    getFresh(agentId: string): Promise<unknown>;
     upsert(record: unknown): Promise<void>;
   };
   agentManager: {
@@ -170,6 +171,7 @@ interface SessionTestAccess {
     [key: string]: unknown;
   }>;
   handleArchiveAgentRequest(agentId: string, requestId: string): Promise<unknown>;
+  handleDeleteAgentRequest(agentId: string, requestId: string): Promise<unknown>;
   handleMessage(message: unknown, source?: object): Promise<unknown>;
   handleCreatePaseoWorktreeRequest(params: unknown): Promise<unknown>;
   listAgentPayloads(...args: unknown[]): Promise<unknown[]>;
@@ -581,6 +583,7 @@ function createSessionForWorkspaceTests(
     github?: ForgeService;
     paseoHome?: string;
     worktreesRoot?: string;
+    serverId?: string;
     renameCurrentBranch?: (
       cwd: string,
       newName: string,
@@ -647,7 +650,7 @@ function createSessionForWorkspaceTests(
       );
     },
     upsert: async () => {},
-    archive: async () => {},
+    archive: async () => false,
     remove: async () => {},
   };
   const workspaceGitService = options.workspaceGitService ?? createNoopWorkspaceGitService();
@@ -662,6 +665,7 @@ function createSessionForWorkspaceTests(
       clientId: "test-client",
       permissions: OWNER_PERMISSIONS,
       appVersion: options.appVersion ?? null,
+      serverId: options.serverId,
       onMessage: options.onMessage ?? vi.fn(),
       onWorkspaceRecovered: options.onWorkspaceRecovered,
       logger: asSessionLogger(logger),
@@ -1794,7 +1798,7 @@ test("archive emits an authoritative agent_update upsert for subscribed clients"
           listAll: async () => [ws],
           get: async (id: string) => (id === "ws-1" ? ws : null),
           upsert: async () => {},
-          archive: async () => {},
+          archive: async () => false,
           remove: async () => {},
         };
       })(),
@@ -1882,7 +1886,7 @@ test("workspace clear attention clears stored-only agents and responds", async (
     id === workspace.workspaceId ? workspace : null;
   session.projectRegistry.list = async () => [project];
   session.projectRegistry.get = async (id: string) => (id === project.projectId ? project : null);
-  session.agentStorage.get = async (agentId: string) =>
+  session.agentStorage.getFresh = async (agentId: string) =>
     agentId === storedRecord.id ? storedRecord : null;
   session.agentStorage.upsert = async (record: unknown) => {
     storedRecord = record as StoredAgentRecord;
@@ -1920,6 +1924,95 @@ test("workspace clear attention clears stored-only agents and responds", async (
   if (agentUpdate.payload.kind === "upsert") {
     expect(agentUpdate.payload.agent.requiresAttention).toBe(false);
   }
+});
+
+test("delete rejects a freshly foreign agent before installing the delete fence", async () => {
+  const assertAgentMutable = vi
+    .fn()
+    .mockRejectedValue(new Error("agent is owned by host srv-other"));
+  const beginDelete = vi.fn();
+  const session = createSessionForWorkspaceTests({
+    serverId: "srv-local",
+    agentManager: {
+      assertAgentMutable,
+      getAgent: () => ({
+        id: "agent-stale-owner",
+        hostId: "srv-local",
+        workspaceId: "ws-repo-running",
+      }),
+    },
+    agentStorage: {
+      get: async () => ({ hostId: "srv-local", workspaceId: "ws-repo-running" }),
+      beginDelete,
+    },
+  });
+
+  await expect(
+    session.handleDeleteAgentRequest("agent-stale-owner", "req-delete-stale-owner"),
+  ).rejects.toThrow("agent is owned by host srv-other");
+  expect(assertAgentMutable).toHaveBeenCalledWith("agent-stale-owner");
+  expect(beginDelete).not.toHaveBeenCalled();
+});
+
+test("workspace clear attention uses the fresh owner before updating a stored agent", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const workspace = createPersistedWorkspaceRecord({
+    workspaceId: "ws-attention-fresh",
+    projectId: "proj-attention-fresh",
+    cwd: REPO_CWD,
+    kind: "directory",
+    displayName: "repo",
+    createdAt: "2026-03-30T15:00:00.000Z",
+    updatedAt: "2026-03-30T15:00:00.000Z",
+  });
+  const staleRecord = makeStoredAgent({
+    id: "stored-agent-stale-owner",
+    cwd: REPO_CWD,
+    workspaceId: workspace.workspaceId,
+    updatedAt: "2026-03-30T15:00:00.000Z",
+    requiresAttention: true,
+    attentionReason: "finished",
+  });
+  const freshRecord = { ...staleRecord, hostId: "srv-other" };
+  const getFresh = vi.fn().mockResolvedValue(freshRecord);
+  const upsert = vi.fn();
+  const session = createSessionForWorkspaceTests({
+    serverId: "srv-local",
+    onMessage: (message) => emitted.push(message),
+    agentStorage: {
+      get: async () => staleRecord,
+      getFresh,
+      upsert,
+    },
+  });
+  session.workspaceRegistry.get = async (id: string) =>
+    id === workspace.workspaceId ? workspace : null;
+  session.listAgentPayloads = async () => [
+    makeAgent({
+      id: staleRecord.id,
+      cwd: staleRecord.cwd,
+      workspaceId: workspace.workspaceId,
+      status: "closed",
+      updatedAt: staleRecord.updatedAt,
+      requiresAttention: true,
+      attentionReason: "finished",
+    }),
+  ];
+
+  await session.handleMessage({
+    type: "workspace.clear_attention.request",
+    workspaceId: workspace.workspaceId,
+    requestId: "req-attention-fresh-owner",
+  });
+
+  expect(getFresh).toHaveBeenCalledWith(staleRecord.id);
+  expect(upsert).not.toHaveBeenCalled();
+  expect(findByType(emitted, "workspace.clear_attention.response").payload).toMatchObject({
+    requestId: "req-attention-fresh-owner",
+    clearedAgentIds: [],
+    success: true,
+    error: null,
+  });
 });
 
 test("workspace clear attention responds with an error instead of timing out", async () => {
@@ -2252,7 +2345,7 @@ test("workspace clear attention can clear multiple workspaces in one request", a
   session.projectRegistry.list = async () => projects;
   session.projectRegistry.get = async (id: string) =>
     projects.find((project) => project.projectId === id) ?? null;
-  session.agentStorage.get = async (agentId: string) => storedRecords.get(agentId) ?? null;
+  session.agentStorage.getFresh = async (agentId: string) => storedRecords.get(agentId) ?? null;
   session.agentStorage.upsert = async (record: unknown) => {
     const storedRecord = record as StoredAgentRecord;
     storedRecords.set(storedRecord.id, storedRecord);
@@ -2421,7 +2514,7 @@ test("close_items_request archives agents and kills terminals in one batch", asy
           listAll: async () => [ws],
           get: async (id: string) => (id === "ws-close" ? ws : null),
           upsert: async () => {},
-          archive: async () => {},
+          archive: async () => false,
           remove: async () => {},
         };
       })(),
@@ -2613,7 +2706,7 @@ test("close_items_request archives stored agents that are not currently loaded",
           listAll: async () => [ws],
           get: async (id: string) => (id === "ws-stored" ? ws : null),
           upsert: async () => {},
-          archive: async () => {},
+          archive: async () => false,
           remove: async () => {},
         };
       })(),
@@ -2767,7 +2860,7 @@ test("close_items_request continues after an archive failure", async () => {
           listAll: async () => [ws],
           get: async (id: string) => (id === "ws-err" ? ws : null),
           upsert: async () => {},
-          archive: async () => {},
+          archive: async () => false,
           remove: async () => {},
         };
       })(),
@@ -4026,7 +4119,7 @@ test("workspace update stream keeps persisted workspace visible after agents sto
               })
             : null,
         upsert: async () => {},
-        archive: async () => {},
+        archive: async () => false,
         remove: async () => {},
       },
       scheduleService: asScheduleService(),
@@ -6161,6 +6254,53 @@ test("legacy refresh_agent_request restores a real deleted worktree", async () =
   rmSync(tempDir, { recursive: true, force: true });
 });
 
+test("legacy refresh rejects a foreign workspace before recovery inspection", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = createSessionForWorkspaceTests({
+    appVersion: "0.1.104",
+    serverId: "srv-local",
+    onMessage: (message) => {
+      if (isSessionOutboundMessage(message)) emitted.push(message);
+    },
+  });
+  const workspace = createPersistedWorkspaceRecord({
+    workspaceId: "ws-foreign-refresh",
+    projectId: "proj-foreign-refresh",
+    cwd: "/tmp/foreign-refresh",
+    kind: "worktree",
+    displayName: "foreign",
+    hostId: "srv-other",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const agentId = "agent-foreign-refresh";
+  const internals = asSessionInternals<{
+    agentStorage: { get: (id: string) => Promise<StoredAgentRecord | null> };
+    workspaceRegistry: { get: (id: string) => Promise<PersistedWorkspaceRecord | null> };
+    workspaceRecovery: { inspect: (workspaceId: string) => Promise<unknown> };
+  }>(session);
+  internals.agentStorage.get = async (id) =>
+    id === agentId
+      ? ({
+          ...makeStoredAgent({ id: agentId, cwd: workspace.cwd }),
+          workspaceId: workspace.workspaceId,
+        } as StoredAgentRecord)
+      : null;
+  internals.workspaceRegistry.get = async (id) => (id === workspace.workspaceId ? workspace : null);
+  internals.workspaceRecovery.inspect = vi.fn();
+
+  await session.handleMessage({
+    type: "refresh_agent_request",
+    agentId,
+    requestId: "req-foreign-refresh",
+  });
+
+  expect(internals.workspaceRecovery.inspect).not.toHaveBeenCalled();
+  expect(findByType(emitted, "rpc_error")?.payload).toMatchObject({
+    error: "Workspace ws-foreign-refresh is owned by host srv-other",
+  });
+});
+
 test.skip("open_project_request collapses a git subdirectory onto the repo root workspace", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const session = createSessionForWorkspaceTests();
@@ -7745,7 +7885,7 @@ test("workspace mutation handling does not let a delayed upsert recreate an arch
     get: async (workspaceId: string) => (workspaceId === workspace.workspaceId ? workspace : null),
     update: async () => null,
     upsert: async () => {},
-    archive: async () => {},
+    archive: async () => false,
     remove: async () => {},
     subscribeToMutations: (listener) => {
       mutationListener = listener;
@@ -7872,7 +8012,7 @@ test("workspace mutations outside a filtered subscription neither watch nor emit
     get: async (workspaceId: string) => (workspaceId === workspace.workspaceId ? workspace : null),
     update: async () => null,
     upsert: async () => {},
-    archive: async () => {},
+    archive: async () => false,
     remove: async () => {},
     subscribeToMutations: (listener) => {
       mutationListener = listener;
@@ -7991,7 +8131,7 @@ test("project removal mutation broadcasts the final delta to another subscribed 
       get: async (workspaceId) => (workspaceId === workspace.workspaceId ? workspace : null),
       update: async () => null,
       upsert: async () => {},
-      archive: async () => {},
+      archive: async () => false,
       remove: async () => {},
     },
   });
@@ -8068,7 +8208,7 @@ test("workspace mutation handling drops queued observer sync after session clean
     get: async (workspaceId: string) => workspaces.get(workspaceId) ?? null,
     update: async () => null,
     upsert: async () => {},
-    archive: async () => {},
+    archive: async () => false,
     remove: async () => {},
     subscribeToMutations: (listener) => {
       mutationListener = listener;
@@ -8801,7 +8941,7 @@ async function createSessionWithTerminalManager(options: {
     get: async (workspaceId: string) =>
       options.workspaces.find((workspace) => workspace.workspaceId === workspaceId) ?? null,
     upsert: async () => {},
-    archive: async () => {},
+    archive: async () => false,
     remove: async () => {},
   };
 
@@ -8820,6 +8960,667 @@ async function createSessionWithTerminalManager(options: {
 
   return { session, terminalManager };
 }
+
+function createForeignWorkspaceRecord(): PersistedWorkspaceRecord {
+  return createPersistedWorkspaceRecord({
+    workspaceId: "ws-foreign",
+    projectId: "proj-1",
+    cwd: REPO_CWD,
+    kind: "local_checkout",
+    displayName: "main",
+    hostId: "srv-other",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+}
+
+function stubWorkspaceRegistryForRecord(session: TestSession, workspace: PersistedWorkspaceRecord) {
+  const workspaces = new Map([[workspace.workspaceId, workspace]]);
+  session.workspaceRegistry.get = async (id: string) => workspaces.get(id) ?? null;
+  session.workspaceRegistry.listAll = async () => Array.from(workspaces.values());
+  session.workspaceRegistry.listActive = async () =>
+    Array.from(workspaces.values()).filter((record) => !record.archivedAt);
+  session.workspaceRegistry.update = async (id, updater) => {
+    const existing = workspaces.get(id);
+    if (!existing) return null;
+    const updated = updater(existing);
+    workspaces.set(id, updated);
+    return updated;
+  };
+  return workspaces;
+}
+
+test("agent tool workspace discovery excludes workspaces owned by another host", async () => {
+  const session = createSessionForWorkspaceTests({ serverId: "srv-local" });
+  const localWorkspace = createPersistedWorkspaceRecord({
+    workspaceId: "ws-local",
+    projectId: "proj-1",
+    cwd: "/tmp/local",
+    kind: "local_checkout",
+    displayName: "local",
+    hostId: "srv-local",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const foreignWorkspace = createForeignWorkspaceRecord();
+  const records = [localWorkspace, foreignWorkspace];
+  const internals = asSessionInternals<{
+    workspaceRegistry: {
+      listAll(): Promise<PersistedWorkspaceRecord[]>;
+      listActive(): Promise<PersistedWorkspaceRecord[]>;
+    };
+    createAgentLifecycleDispatch: {
+      dependencies: {
+        listActiveWorkspaces(): Promise<Array<{ workspaceId: string }>>;
+        assertCwdWorkspaceOwnedByThisServer(cwd: string): Promise<void>;
+      };
+    };
+  }>(session);
+  internals.workspaceRegistry.listAll = async () => records;
+  internals.workspaceRegistry.listActive = async () =>
+    records.filter((record) => !record.archivedAt);
+
+  await expect(
+    internals.createAgentLifecycleDispatch.dependencies.listActiveWorkspaces(),
+  ).resolves.toEqual([expect.objectContaining({ workspaceId: "ws-local" })]);
+  await expect(
+    internals.createAgentLifecycleDispatch.dependencies.assertCwdWorkspaceOwnedByThisServer(
+      foreignWorkspace.cwd,
+    ),
+  ).rejects.toThrow("owned by host srv-other");
+});
+
+test("cwd-addressed project writes and implicit agent creation reject a foreign workspace", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const createAgent = vi.fn();
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+      agentManager: { createAgent },
+    }),
+  );
+  const workspace = createForeignWorkspaceRecord();
+  stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "create_agent_request",
+    requestId: "req-create-implicit-foreign",
+    config: { provider: "codex", cwd: workspace.cwd },
+    attachments: [],
+  });
+  await session.handleMessage({
+    type: "write_project_config_request",
+    requestId: "req-config-foreign",
+    repoRoot: workspace.cwd,
+    config: { worktree: { setup: "echo blocked" } },
+  });
+  await session.handleMessage({
+    type: "project.create_directory.request",
+    requestId: "req-directory-foreign",
+    parentPath: workspace.cwd,
+    name: "blocked-directory",
+  });
+  await session.handleMessage({
+    type: "project.github.clone.request",
+    requestId: "req-clone-foreign",
+    cloneProtocol: "https",
+    repo: "getpaseo/paseo",
+    targetDirectory: workspace.cwd,
+  });
+
+  expect(createAgent).not.toHaveBeenCalled();
+  expect(findByType(emitted, "status")?.payload).toMatchObject({
+    status: "agent_create_failed",
+    requestId: "req-create-implicit-foreign",
+    error: expect.stringContaining("owned by host srv-other"),
+  });
+  expect(
+    emitted.find(
+      (message) =>
+        message.type === "rpc_error" && message.payload.requestId === "req-config-foreign",
+    )?.payload,
+  ).toMatchObject({ error: expect.stringContaining("owned by host srv-other") });
+  expect(findByType(emitted, "project.create_directory.response")?.payload).toMatchObject({
+    requestId: "req-directory-foreign",
+    project: null,
+    error: expect.stringContaining("owned by host srv-other"),
+  });
+  expect(findByType(emitted, "project.github.clone.response")?.payload).toMatchObject({
+    requestId: "req-clone-foreign",
+    project: null,
+    error: expect.stringContaining("owned by host srv-other"),
+  });
+});
+
+test("cwd checkout writes stay gated while worktree creation accepts a foreign source", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+    }),
+  );
+  const workspace = createForeignWorkspaceRecord();
+  stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "checkout_commit_request",
+    cwd: workspace.cwd,
+    message: "blocked",
+    addAll: true,
+    requestId: "req-checkout-foreign",
+  });
+
+  expect(findByType(emitted, "checkout_commit_response")).toBeUndefined();
+  expect(findByType(emitted, "rpc_error")?.payload).toMatchObject({
+    requestId: "req-checkout-foreign",
+    requestType: "checkout_commit_request",
+    error: expect.stringContaining("owned by host srv-other"),
+  });
+
+  await session.handleMessage({
+    type: "create_paseo_worktree_request",
+    cwd: workspace.cwd,
+    worktreeSlug: "blocked",
+    requestId: "req-worktree-foreign",
+  });
+
+  const worktreeResponse = findByType(emitted, "create_paseo_worktree_response")?.payload;
+  expect(worktreeResponse).toMatchObject({
+    requestId: "req-worktree-foreign",
+    workspace: null,
+  });
+  expect(worktreeResponse?.error).not.toContain("owned by host srv-other");
+});
+
+test("fs file mutations reject a cwd owned by another host", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+    }),
+  );
+  const workspace = createForeignWorkspaceRecord();
+  stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "fs.file.write.request",
+    cwd: workspace.cwd,
+    path: "blocked.txt",
+    content: "nope",
+    expectedModifiedAt: "2026-03-01T12:00:00.000Z",
+    requestId: "req-file-write-foreign",
+  });
+  await session.handleMessage({
+    type: "fs.entry.create.request",
+    cwd: `${workspace.cwd}/nested`,
+    parentPath: ".",
+    name: "blocked-dir",
+    kind: "directory",
+    requestId: "req-entry-create-foreign",
+  });
+
+  expect(findByType(emitted, "fs.file.write.response")).toBeUndefined();
+  expect(findByType(emitted, "fs.entry.create.response")).toBeUndefined();
+  expect(findByType(emitted, "rpc_error")?.payload).toMatchObject({
+    requestId: "req-file-write-foreign",
+    requestType: "fs.file.write.request",
+    error: expect.stringContaining("owned by host srv-other"),
+  });
+  const secondError = emitted.find(
+    (message) =>
+      message.type === "rpc_error" && message.payload.requestId === "req-entry-create-foreign",
+  );
+  expect(secondError?.payload).toMatchObject({
+    requestType: "fs.entry.create.request",
+    error: expect.stringContaining("owned by host srv-other"),
+  });
+});
+
+test("paseo_worktree_archive_request rejects a foreign worktree path", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const worktreesRoot = mkdtempSync(path.join(tmpdir(), "paseo-worktrees-foreign-"));
+  const foreignWorktreePath = path.join(worktreesRoot, "ab12cd", "wt-foreign");
+  mkdirSync(foreignWorktreePath, { recursive: true });
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+      worktreesRoot,
+    }),
+  );
+  const workspace = createPersistedWorkspaceRecord({
+    workspaceId: "ws-worktree-foreign",
+    projectId: "proj-1",
+    cwd: foreignWorktreePath,
+    kind: "worktree",
+    displayName: "foreign worktree",
+    hostId: "srv-other",
+    worktreeRoot: foreignWorktreePath,
+    isPaseoOwnedWorktree: true,
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const workspaces = stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "paseo_worktree_archive_request",
+    requestId: "req-archive-foreign-worktree",
+    worktreePath: foreignWorktreePath,
+    scope: "worktree",
+  });
+
+  const response = findByType(emitted, "paseo_worktree_archive_response");
+  expect(response?.payload).toMatchObject({
+    requestId: "req-archive-foreign-worktree",
+    success: false,
+  });
+  expect(response?.payload.error).toMatchObject({
+    message: expect.stringContaining("owned by host srv-other"),
+  });
+  expect(existsSync(foreignWorktreePath)).toBe(true);
+  expect(workspaces.get(workspace.workspaceId)?.archivedAt).toBeNull();
+  rmSync(worktreesRoot, { recursive: true, force: true });
+});
+
+test.each([
+  { name: "legacy workspace", registered: true },
+  { name: "unregistered directory", registered: false },
+])("cwd-based writes pass the ownership gate for $name", async ({ registered }) => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+    }),
+  );
+  const cwd = `/tmp/paseo-cwd-gate-${registered ? "legacy" : "unregistered"}`;
+  if (registered) {
+    stubWorkspaceRegistryForRecord(
+      session,
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-cwd-gate-legacy",
+        projectId: "proj-cwd-gate",
+        cwd,
+        kind: "local_checkout",
+        displayName: "legacy",
+        createdAt: "2026-03-01T12:00:00.000Z",
+        updatedAt: "2026-03-01T12:00:00.000Z",
+      }),
+    );
+  } else {
+    session.workspaceRegistry.listAll = session.workspaceRegistry.listActive = async () => [];
+    session.workspaceRegistry.get = async () => null;
+  }
+
+  await session.handleMessage({
+    type: "checkout_commit_request",
+    cwd,
+    message: "allowed past gate",
+    addAll: true,
+    requestId: `req-checkout-${registered ? "legacy" : "unregistered"}`,
+  });
+  await session.handleMessage({
+    type: "create_paseo_worktree_request",
+    cwd,
+    worktreeSlug: "allowed-past-gate",
+    requestId: `req-worktree-${registered ? "legacy" : "unregistered"}`,
+  });
+
+  expect(findByType(emitted, "checkout_commit_response")).toBeDefined();
+  expect(
+    emitted.find(
+      (message) =>
+        message.type === "rpc_error" &&
+        message.payload.requestId === `req-checkout-${registered ? "legacy" : "unregistered"}`,
+    ),
+  ).toBeUndefined();
+  const worktreeResponse = findByType(emitted, "create_paseo_worktree_response");
+  expect(worktreeResponse).toBeDefined();
+  expect(worktreeResponse?.payload.error).not.toContain("owned by host");
+});
+
+test("workspace.title.set.request rejects a workspace owned by another host", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+    }),
+  );
+  const workspace = createForeignWorkspaceRecord();
+  const workspaces = stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "workspace.title.set.request",
+    workspaceId: workspace.workspaceId,
+    title: "Nope",
+    requestId: "req-title-foreign",
+  });
+
+  const response = findByType(emitted, "workspace.title.set.response");
+  expect(response?.payload).toMatchObject({
+    requestId: "req-title-foreign",
+    workspaceId: workspace.workspaceId,
+    accepted: false,
+  });
+  expect(response?.payload.error).toContain("owned by host srv-other");
+  expect(workspaces.get(workspace.workspaceId)?.title).toBeNull();
+});
+
+test("workspace.pin.set.request rejects a workspace owned by another host", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+    }),
+  );
+  const workspace = createForeignWorkspaceRecord();
+  const workspaces = stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "workspace.pin.set.request",
+    workspaceId: workspace.workspaceId,
+    pinned: true,
+    requestId: "req-pin-foreign",
+  });
+
+  const response = findByType(emitted, "workspace.pin.set.response");
+  expect(response?.payload).toMatchObject({
+    requestId: "req-pin-foreign",
+    workspaceId: workspace.workspaceId,
+    accepted: false,
+  });
+  expect(response?.payload.error).toContain("owned by host srv-other");
+  expect(workspaces.get(workspace.workspaceId)?.pinnedAt).toBeNull();
+});
+
+test("archive_workspace_request rejects a workspace owned by another host", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+    }),
+  );
+  const workspace = createForeignWorkspaceRecord();
+  const workspaces = stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "archive_workspace_request",
+    workspaceId: workspace.workspaceId,
+    requestId: "req-archive-foreign",
+  });
+
+  const response = findByType(emitted, "archive_workspace_response");
+  expect(response?.payload).toMatchObject({
+    requestId: "req-archive-foreign",
+    workspaceId: workspace.workspaceId,
+    archivedAt: null,
+  });
+  expect(response?.payload.error).toContain("owned by host srv-other");
+  expect(workspaces.get(workspace.workspaceId)?.archivedAt).toBeNull();
+});
+
+test("archive_workspace_request allows a local target with a foreign path sibling", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+    }),
+  );
+  const foreign = createForeignWorkspaceRecord();
+  const local = createPersistedWorkspaceRecord({
+    workspaceId: "ws-local-overlap",
+    projectId: foreign.projectId,
+    cwd: foreign.cwd,
+    kind: "directory",
+    displayName: "local overlap",
+    hostId: "srv-local",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const records: Record<string, PersistedWorkspaceRecord> = {
+    [local.workspaceId]: local,
+    [foreign.workspaceId]: foreign,
+  };
+  const archive = vi.fn(async () => {});
+  session.workspaceRegistry.get = async (workspaceId: string) => records[workspaceId] ?? null;
+  session.workspaceRegistry.listAll = async () => Object.values(records);
+  session.workspaceRegistry.listActive = async () =>
+    Object.values(records).filter((record) => !record.archivedAt);
+  session.workspaceRegistry.archive = archive;
+
+  await session.handleMessage({
+    type: "archive_workspace_request",
+    workspaceId: local.workspaceId,
+    requestId: "req-archive-local-overlap",
+  });
+
+  expect(findByType(emitted, "archive_workspace_response")?.payload).toMatchObject({
+    requestId: "req-archive-local-overlap",
+    workspaceId: local.workspaceId,
+    error: null,
+  });
+  expect(findByType(emitted, "archive_workspace_response")?.payload.archivedAt).toEqual(
+    expect.any(String),
+  );
+  expect(archive).toHaveBeenCalledWith(local.workspaceId, expect.any(String), undefined);
+});
+
+test("workspace.label.assignment.set.request rejects a workspace owned by another host", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+    }),
+  );
+  const workspace = createForeignWorkspaceRecord();
+  stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "workspace.label.assignment.set.request",
+    requestId: "req-label-foreign",
+    workspaceId: workspace.workspaceId,
+    label: { name: "Blocked", color: "red" },
+    assigned: true,
+  });
+
+  const response = findByType(emitted, "rpc_error");
+  expect(response?.payload).toMatchObject({
+    requestId: "req-label-foreign",
+    requestType: "workspace.label.assignment.set.request",
+  });
+  expect(response?.payload.error).toContain("owned by host srv-other");
+});
+
+test("workspace.recovery.restore.request rejects a workspace owned by another host", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+    }),
+  );
+  const workspace = createForeignWorkspaceRecord();
+  stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "workspace.recovery.restore.request",
+    requestId: "req-recovery-foreign",
+    workspaceId: workspace.workspaceId,
+  });
+
+  const response = findByType(emitted, "workspace.recovery.restore.response");
+  expect(response?.payload).toMatchObject({
+    requestId: "req-recovery-foreign",
+    workspaceId: workspace.workspaceId,
+    accepted: false,
+  });
+  expect(response?.payload.error).toContain("owned by host srv-other");
+});
+
+test("create_agent_request rejects an explicit workspace owned by another host", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const createAgent = vi.fn();
+  const session = createSessionForWorkspaceTests({
+    serverId: "srv-local",
+    onMessage: (message) => emitted.push(message),
+    agentManager: { createAgent },
+  });
+  const workspace = createForeignWorkspaceRecord();
+  stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "create_agent_request",
+    requestId: "req-create-foreign-workspace",
+    workspaceId: workspace.workspaceId,
+    config: { provider: "codex", cwd: workspace.cwd },
+    attachments: [],
+  });
+
+  expect(createAgent).not.toHaveBeenCalled();
+  expect(findByType(emitted, "status")?.payload).toMatchObject({
+    status: "agent_create_failed",
+    requestId: "req-create-foreign-workspace",
+    error: expect.stringContaining("owned by host srv-other"),
+  });
+});
+
+test("create_agent_request rejects a foreign caller before inheriting its workspace", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const createAgent = vi.fn();
+  const workspace = createForeignWorkspaceRecord();
+  const caller = makeManagedAgent({
+    id: "foreign-caller",
+    cwd: workspace.cwd,
+    workspaceId: workspace.workspaceId,
+    lifecycle: "idle",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  }) as unknown as ManagedAgent;
+  const assertAgentMutable = vi
+    .fn()
+    .mockRejectedValue(new Error("agent is owned by host srv-other"));
+  const session = createSessionForWorkspaceTests({
+    serverId: "srv-local",
+    onMessage: (message) => emitted.push(message),
+    agentManager: {
+      createAgent,
+      getAgent: (agentId: string) => (agentId === caller.id ? caller : null),
+      assertAgentMutable,
+    },
+  });
+  stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "create_agent_request",
+    requestId: "req-create-foreign-caller",
+    callerAgentId: caller.id,
+    config: { provider: "codex", cwd: workspace.cwd },
+    attachments: [],
+  });
+
+  expect(assertAgentMutable).toHaveBeenCalledWith(caller.id);
+  expect(createAgent).not.toHaveBeenCalled();
+  expect(findByType(emitted, "status")?.payload).toMatchObject({
+    status: "agent_create_failed",
+    requestId: "req-create-foreign-caller",
+    error: expect.stringContaining("owned by host srv-other"),
+  });
+});
+
+test("legacy start_workspace_script_request rejects a workspace owned by another host", async () => {
+  const session = createSessionForWorkspaceTests({ serverId: "srv-local" });
+  const workspace = createForeignWorkspaceRecord();
+  stubWorkspaceRegistryForRecord(session, workspace);
+
+  await expect(
+    session.handleStartWorkspaceScriptRequest({
+      type: "start_workspace_script_request",
+      workspaceId: workspace.workspaceId,
+      scriptName: "api",
+      requestId: "req-script-foreign-workspace",
+    }),
+  ).rejects.toThrow("owned by host srv-other");
+});
+
+test("project.remove.request rejects a project containing a foreign workspace", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = createSessionForWorkspaceTests({
+    serverId: "srv-local",
+    onMessage: (message) => emitted.push(message),
+  });
+  const workspace = createForeignWorkspaceRecord();
+  stubWorkspaceRegistryForRecord(session, workspace);
+  const project = createPersistedProjectRecord({
+    projectId: workspace.projectId,
+    rootPath: REPO_CWD,
+    kind: "git",
+    displayName: "repo",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const remove = vi.fn();
+  session.projectRegistry.get = async (id: string) => (id === project.projectId ? project : null);
+  session.projectRegistry.list = async () => [project];
+  session.projectRegistry.remove = remove;
+
+  await session.handleMessage({
+    type: "project.remove.request",
+    projectId: project.projectId,
+    requestId: "req-remove-project-foreign-workspace",
+  });
+
+  expect(remove).not.toHaveBeenCalled();
+  expect(findByType(emitted, "project.remove.response")?.payload).toMatchObject({
+    requestId: "req-remove-project-foreign-workspace",
+    projectId: project.projectId,
+    accepted: false,
+    removedWorkspaceIds: [],
+    error: expect.stringContaining("owned by host srv-other"),
+  });
+});
+
+test("workspace.title.set.request still applies to a legacy workspace without a host", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      serverId: "srv-local",
+      onMessage: (message) => emitted.push(message),
+    }),
+  );
+  const workspace = createPersistedWorkspaceRecord({
+    workspaceId: "ws-legacy",
+    projectId: "proj-1",
+    cwd: REPO_CWD,
+    kind: "local_checkout",
+    displayName: "main",
+    createdAt: "2026-03-01T12:00:00.000Z",
+    updatedAt: "2026-03-01T12:00:00.000Z",
+  });
+  const workspaces = stubWorkspaceRegistryForRecord(session, workspace);
+
+  await session.handleMessage({
+    type: "workspace.title.set.request",
+    workspaceId: workspace.workspaceId,
+    title: "Legacy ok",
+    requestId: "req-title-legacy",
+  });
+
+  const response = findByType(emitted, "workspace.title.set.response");
+  expect(response?.payload).toMatchObject({
+    requestId: "req-title-legacy",
+    accepted: true,
+    title: "Legacy ok",
+    error: null,
+  });
+  expect(workspaces.get(workspace.workspaceId)?.title).toBe("Legacy ok");
+});
 
 async function flushTerminalContributionWork(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -9409,7 +10210,7 @@ test("workspace.create worktree source checks out a GitHub PR from githubPrNumbe
     upsert: async (record) => {
       workspaces.set(record.workspaceId, record);
     },
-    archive: async () => {},
+    archive: async () => false,
     remove: async () => {},
   };
   const session = createSessionForWorkspaceTests({
@@ -9777,7 +10578,7 @@ test("workspace.create.response persists the first prompt as the initial title",
       upsert: async (workspace) => {
         workspaces.set(workspace.workspaceId, workspace);
       },
-      archive: async () => {},
+      archive: async () => false,
       remove: async () => {},
     },
   });
@@ -9827,7 +10628,7 @@ test("workspace create emits through a matching workspace subscription", async (
           expectsInitialAgent: context?.expectsInitialAgent,
         });
       },
-      archive: async () => {},
+      archive: async () => false,
       remove: async () => {},
       subscribeToMutations: (listener) => {
         mutationListener = listener;
@@ -9876,7 +10677,7 @@ test("workspace create stays out of a non-matching workspace subscription", asyn
       upsert: async (workspace) => {
         workspaces.set(workspace.workspaceId, workspace);
       },
-      archive: async () => {},
+      archive: async () => false,
       remove: async () => {},
     },
   });
@@ -10156,7 +10957,7 @@ test("workspace PR status survives session cleanup and reconnect", async () => {
     get: async (id) => (id === workspace.workspaceId ? workspace : null),
     update: async (id, updater) => (id === workspace.workspaceId ? updater(workspace) : null),
     upsert: async () => {},
-    archive: async () => {},
+    archive: async () => false,
     remove: async () => {},
   };
 
@@ -10380,6 +11181,7 @@ test("path archive of an archived exact child leaves its active parent untouched
       remove: async () => {},
       archive: async (id) => {
         archivedWorkspaces.push(id);
+        return true;
       },
     },
   });

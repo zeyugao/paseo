@@ -10,6 +10,8 @@ import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
 
+const AGENT_RESCAN_INTERVAL_MS = 5_000;
+
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
     modeId: z.string().nullable().optional(),
@@ -47,6 +49,7 @@ const STORED_AGENT_SCHEMA = z.object({
   provider: z.string(),
   cwd: z.string(),
   workspaceId: z.string().optional(),
+  hostId: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   lastActivityAt: z.string().optional(),
@@ -114,6 +117,9 @@ export class AgentStorage {
   private baseDir: string;
   private loadPromise: Promise<void> | null = null;
   private logger: Logger;
+  private refreshPromise: Promise<void> | null = null;
+  private lastScanAt = 0;
+  private rescanListeners = new Set<() => void>();
 
   constructor(baseDir: string, logger: Logger) {
     this.baseDir = baseDir;
@@ -124,13 +130,22 @@ export class AgentStorage {
     await this.load();
   }
 
+  onRescan(listener: () => void): () => void {
+    this.rescanListeners.add(listener);
+    return () => {
+      this.rescanListeners.delete(listener);
+    };
+  }
+
   async listAll(): Promise<StoredAgentRecord[]> {
     await this.load();
+    await this.refreshIfStale();
     return Array.from(this.cache.values());
   }
 
   async listActive(options?: { includeArchived?: boolean }): Promise<StoredAgentRecord[]> {
     await this.load();
+    await this.refreshIfStale();
     return Array.from(
       options?.includeArchived ? this.cache.keys() : this.activeIds,
       (id) => this.cache.get(id)!,
@@ -142,6 +157,7 @@ export class AgentStorage {
     options?: { includeArchived?: boolean },
   ): Promise<StoredAgentRecord[]> {
     await this.load();
+    await this.refreshIfStale();
     const records: StoredAgentRecord[] = [];
     for (const workspaceId of new Set(workspaceIds)) {
       for (const id of this.idsByWorkspace.get(workspaceId) ?? []) {
@@ -157,6 +173,7 @@ export class AgentStorage {
     options?: { excludeAgentIds?: Iterable<string> },
   ): Promise<ReadonlyMap<string, string>> {
     await this.load();
+    await this.refreshIfStale();
     const times = new Map<string, string>();
     const excluded = new Set(options?.excludeAgentIds);
     const affected = new Set(Array.from(excluded, (id) => this.workspaceById.get(id)));
@@ -239,7 +256,48 @@ export class AgentStorage {
 
   async get(agentId: string): Promise<StoredAgentRecord | null> {
     await this.load();
+    const cached = this.cache.get(agentId);
+    if (cached) {
+      return cached;
+    }
+    await this.refreshIfStale();
     return this.cache.get(agentId) ?? null;
+  }
+
+  /**
+   * Cache-bypassing read for cross-host ownership decisions. Waits for this
+   * agent's queued writes so the disk read observes them, then reads the
+   * record file directly. A fresh hit also refreshes the cached entry.
+   */
+  async getFresh(
+    agentId: string,
+    options?: { ignoreDeleteFence?: boolean },
+  ): Promise<StoredAgentRecord | null> {
+    await this.load();
+    await this.waitForPendingWrite(agentId);
+    if (this.deleting.has(agentId) && options?.ignoreDeleteFence !== true) {
+      return null;
+    }
+    for (const filePath of this.pathsById.get(agentId) ?? []) {
+      let content: string;
+      try {
+        content = await fs.readFile(filePath, "utf8");
+      } catch {
+        continue;
+      }
+      try {
+        const record = parseStoredAgentRecord(JSON.parse(content));
+        if (record.id !== agentId) {
+          continue;
+        }
+        this.cache.set(agentId, record);
+        this.indexOwner(record);
+        return record;
+      } catch (error) {
+        this.logger.warn({ err: error, filePath }, "Skipping invalid agent record");
+      }
+    }
+    return null;
   }
 
   async listByProviderSession(
@@ -419,32 +477,105 @@ export class AgentStorage {
   }
 
   private async doLoad(): Promise<void> {
+    try {
+      const records = await this.scanDisk();
+      this.replaceCache(records);
+      this.lastScanAt = Date.now();
+      this.loaded = true;
+    } catch (error) {
+      this.logger.error({ err: error }, "Failed to load agents");
+      this.lastScanAt = Date.now();
+      this.loaded = true;
+    }
+  }
+
+  private async refreshIfStale(): Promise<void> {
+    if (Date.now() - this.lastScanAt <= AGENT_RESCAN_INTERVAL_MS) {
+      return;
+    }
+    if (!this.refreshPromise) {
+      this.refreshPromise = (async () => {
+        try {
+          const records = await this.scanDisk();
+          this.replaceCache(records);
+          for (const listener of this.rescanListeners) {
+            try {
+              listener();
+            } catch (error) {
+              this.logger.warn({ err: error }, "Agent rescan listener failed");
+            }
+          }
+        } catch (error) {
+          this.logger.warn({ err: error }, "Failed to rescan agents");
+        } finally {
+          this.lastScanAt = Date.now();
+        }
+      })().finally(() => {
+        this.refreshPromise = null;
+      });
+    }
+    await this.refreshPromise;
+  }
+
+  private replaceCache(records: Array<{ record: StoredAgentRecord; filePath: string }>): void {
+    // Agents with queued writes or a pending delete resolve through their
+    // mutation queue, not this scan; their in-memory state stays authoritative.
+    const preserved = new Map<
+      string,
+      { record?: StoredAgentRecord; primaryPath?: string; paths?: Set<string> }
+    >();
+    for (const agentId of this.cache.keys()) {
+      if (!this.pendingWrites.has(agentId) && !this.deleting.has(agentId)) {
+        continue;
+      }
+      preserved.set(agentId, {
+        record: this.cache.get(agentId),
+        primaryPath: this.pathById.get(agentId),
+        paths: this.pathsById.get(agentId),
+      });
+    }
     this.cache.clear();
     this.pathById.clear();
     this.pathsById.clear();
     this.daemonAgentIdsByExecution.clear();
     this.daemonExecutionKeysByAgentId.clear();
+    this.idsByWorkspace.clear();
+    this.workspaceById.clear();
+    this.activeIds.clear();
+    this.promptTimeByAgent.clear();
+    this.promptTimes.clear();
 
-    try {
-      await this.scanDisk();
-      this.loaded = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        this.loaded = true;
-        return;
+    for (const { record, filePath } of records) {
+      if (preserved.has(record.id)) {
+        continue;
       }
-      this.logger.error({ err: error }, "Failed to load agents");
-      this.loaded = true;
+      this.cache.set(record.id, record);
+      this.indexOwner(record);
+      this.pathById.set(record.id, filePath);
+      this.addIndexedPath(record.id, filePath);
+    }
+
+    for (const [agentId, state] of preserved) {
+      if (state.record) {
+        this.cache.set(agentId, state.record);
+        this.indexOwner(state.record);
+      }
+      if (state.primaryPath) {
+        this.pathById.set(agentId, state.primaryPath);
+      }
+      if (state.paths) {
+        this.pathsById.set(agentId, state.paths);
+      }
     }
   }
 
-  private async scanDisk(): Promise<void> {
+  private async scanDisk(): Promise<Array<{ record: StoredAgentRecord; filePath: string }>> {
     let entries: Dirent[] = [];
     try {
       entries = await fs.readdir(this.baseDir, { withFileTypes: true });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return;
+        return [];
       }
       throw error;
     }
@@ -478,14 +609,9 @@ export class AgentStorage {
       }),
     );
 
-    for (const item of loaded) {
-      if (!item) continue;
-      const { record, filePath } = item;
-      this.cache.set(record.id, record);
-      this.indexOwner(record);
-      this.pathById.set(record.id, filePath);
-      this.addIndexedPath(record.id, filePath);
-    }
+    return loaded.filter(
+      (item): item is { record: StoredAgentRecord; filePath: string } => item !== null,
+    );
   }
 
   private async readRecordFile(filePath: string): Promise<StoredAgentRecord | null> {

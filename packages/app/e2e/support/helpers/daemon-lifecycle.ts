@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { writeFile, readFile, readdir } from "node:fs/promises";
+import { mkdir, writeFile, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { expect, type Page } from "@playwright/test";
@@ -143,8 +143,10 @@ export async function plantUnclosableTerminalProgram(
       secret: "planted-secret",
       terminals: [{ id: "planted-terminal", pid, startedAt: await psField(pid, "lstart") }],
     };
+    const directory = path.join(daemon.paseoHome, "daemons", daemon.serverId, "terminal-worker");
+    await mkdir(directory, { recursive: true });
     await writeFile(
-      path.join(daemon.paseoHome, "terminal-worker", `${gone.pid}.json`),
+      path.join(directory, `${gone.pid}.json`),
       `${JSON.stringify(record, null, 2)}\n`,
       { mode: 0o600 },
     );
@@ -179,10 +181,10 @@ export async function daemonProcessCanWrite(pid: number): Promise<boolean> {
 }
 
 export async function readTerminalProcessIds(daemon: IsolatedHostDaemon): Promise<number[]> {
-  const directory = path.join(daemon.paseoHome, "terminal-worker");
+  const directory = path.join(daemon.paseoHome, "daemons", daemon.serverId, "terminal-worker");
   const records = await Promise.all(
     (await readdir(directory))
-      .filter((name) => name.endsWith(".json"))
+      .filter((name) => /^\d+\.json$/.test(name))
       .map(async (name) => {
         const record = JSON.parse(await readFile(path.join(directory, name), "utf8")) as {
           pid: number;

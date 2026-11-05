@@ -189,7 +189,8 @@ export function createFinishSubscriptions(deps: Dependencies): FinishSubscriptio
           serverId: record.serverId ?? deps.serverId,
           title,
           reason,
-          lastAssistantMessage: result.lastMessage,
+          lastAssistantMessage:
+            reason === "errored" && result.error?.trim() ? result.error : result.lastMessage,
           permissionRequest: request,
         }),
         source: {

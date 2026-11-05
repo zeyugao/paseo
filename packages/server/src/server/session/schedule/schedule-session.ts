@@ -1,6 +1,7 @@
 import type pino from "pino";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
 import type { ScheduleService } from "../../schedule/service.js";
+import { ScheduleSummarySchema, StoredScheduleSchema } from "@getpaseo/protocol/schedule/types";
 
 export interface ScheduleSessionHost {
   emit(msg: SessionOutboundMessage): void;
@@ -29,8 +30,7 @@ export class ScheduleSession {
     SessionOutboundMessage,
     { type: "schedule/list/response" }
   >["payload"]["schedules"][number] {
-    const { runs: _runs, ...summary } = schedule;
-    return summary;
+    return ScheduleSummarySchema.parse(schedule);
   }
 
   private emitScheduleRpcError(
@@ -121,7 +121,7 @@ export class ScheduleSession {
         type: "schedule/inspect/response",
         payload: {
           requestId: request.requestId,
-          schedule,
+          schedule: StoredScheduleSchema.parse(schedule),
           error: null,
         },
       });
@@ -211,7 +211,7 @@ export class ScheduleSession {
         type: "schedule/run-once/response",
         payload: {
           requestId: request.requestId,
-          schedule,
+          schedule: StoredScheduleSchema.parse(schedule),
           error: null,
         },
       });
@@ -237,7 +237,7 @@ export class ScheduleSession {
         type: "schedule/update/response",
         payload: {
           requestId: request.requestId,
-          schedule,
+          schedule: StoredScheduleSchema.parse(schedule),
           error: null,
         },
       });

@@ -14,9 +14,40 @@ import { createTestLogger } from "../test-utils/test-logger.js";
 import {
   connectIdleRuntimeCleanupConfig,
   createDaemonInstanceHeartbeatErrorHandler,
+  createScheduleLocalWorkspaceHandler,
   fanOutReconciledWorkspaceUpdates,
 } from "./bootstrap.js";
+import { createPersistedWorkspaceRecord } from "./workspace-registry.js";
 
+test("scheduled local workspace creation rejects a cwd owned by another host", async () => {
+  const foreignWorkspace = createPersistedWorkspaceRecord({
+    workspaceId: "ws-foreign",
+    projectId: "project-foreign",
+    cwd: "/repo/foreign",
+    kind: "directory",
+    displayName: "foreign",
+    hostId: "srv-other",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const createWorkspaceForDirectory = vi.fn();
+  const scheduleForDirectory = vi.fn();
+  const emitWorkspaceUpdates = vi.fn();
+  const createWorkspace = createScheduleLocalWorkspaceHandler({
+    workspaceRegistry: { listAll: async () => [foreignWorkspace] },
+    serverId: "srv-local",
+    workspaceProvisioning: { createWorkspaceForDirectory },
+    workspaceAutoName: { scheduleForDirectory },
+    emitWorkspaceUpdates,
+  });
+
+  await expect(
+    createWorkspace({ cwd: "/repo/foreign", firstAgentContext: { prompt: "Run locally" } }),
+  ).rejects.toThrow("Workspace ws-foreign is owned by host srv-other");
+  expect(createWorkspaceForDirectory).not.toHaveBeenCalled();
+  expect(scheduleForDirectory).not.toHaveBeenCalled();
+  expect(emitWorkspaceUpdates).not.toHaveBeenCalled();
+});
 
 test("reconciliation emits workspace updates when observer sync fails", async () => {
   const emittedWorkspaceIds: string[][] = [];

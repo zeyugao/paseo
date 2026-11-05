@@ -128,6 +128,53 @@ export async function fanOutReconciledWorkspaceUpdates(input: {
   );
 }
 
+const DAEMON_INSTANCE_HEARTBEAT_INTERVAL_MS = 30_000;
+const DAEMON_INSTANCE_HEARTBEAT_FAILURE_LIMIT = 3;
+
+export function createDaemonInstanceHeartbeatErrorHandler(input: {
+  serverId: string;
+  logger: Pick<Logger, "error" | "fatal">;
+  shutdown: (error: unknown) => void;
+  now?: () => number;
+}): (error: unknown) => void {
+  const recentFailures: number[] = [];
+  const now = input.now ?? Date.now;
+  let shutdownRequested = false;
+
+  return (error) => {
+    if (shutdownRequested) return;
+    if (error instanceof DaemonInstanceLeaseLostError) {
+      shutdownRequested = true;
+      input.logger.fatal(
+        { err: error, serverId: input.serverId },
+        "Daemon instance lease lost to another daemon; stopping",
+      );
+      input.shutdown(error);
+      return;
+    }
+
+    const failedAt = now();
+    const failureWindowMs =
+      DAEMON_INSTANCE_HEARTBEAT_INTERVAL_MS * DAEMON_INSTANCE_HEARTBEAT_FAILURE_LIMIT;
+    recentFailures.push(failedAt);
+    while (recentFailures[0] !== undefined && failedAt - recentFailures[0] >= failureWindowMs) {
+      recentFailures.shift();
+    }
+    input.logger.error(
+      { err: error, serverId: input.serverId },
+      "Daemon instance heartbeat failed",
+    );
+    if (recentFailures.length < DAEMON_INSTANCE_HEARTBEAT_FAILURE_LIMIT) return;
+
+    shutdownRequested = true;
+    input.logger.fatal(
+      { err: error, serverId: input.serverId, consecutiveFailures: recentFailures.length },
+      "Daemon instance heartbeat failed repeatedly; stopping",
+    );
+    input.shutdown(error);
+  };
+}
+
 import { VoiceAssistantWebSocketServer } from "./websocket-server.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { createWorkspaceLabelService } from "./workspace-labels/index.js";
@@ -186,6 +233,11 @@ import type { TerminalManager } from "../terminal/terminal-manager.js";
 import { startWorkerTerminalManager } from "../terminal/worker-terminal-manager.js";
 import { applyTerminalAgentHookSetting } from "../terminal/agent-hooks/terminal-agent-hook-setting.js";
 import { loadOrCreateDaemonKeyPair } from "./daemon-keypair.js";
+import {
+  DaemonInstanceLeaseLostError,
+  registerDaemonInstance,
+  type DaemonInstanceRegistration,
+} from "./daemon-instance-registry.js";
 import { createRelayRuntime, type RelayRuntime } from "./relay-runtime.js";
 import { admitSecuredRelaySocket } from "./websocket/secure-relay-ingress.js";
 import type { PushNotificationSender } from "./push/index.js";
@@ -481,6 +533,8 @@ export interface PaseoDaemonConfig {
   providerOverrides?: Record<string, ProviderOverride>;
   log?: PersistedConfig["log"];
   onLifecycleIntent?: (intent: DaemonLifecycleIntent) => void;
+  /** Called after a lost instance lease has shut the daemon down; the supervised worker uses it to exit the process. */
+  onLeaseLost?: (error: unknown) => void;
   pushNotificationSender?: PushNotificationSender;
   managedProcesses?: ManagedProcessRegistry;
   configReload?: {
@@ -525,6 +579,7 @@ function resolveBuiltinPluginLoader(dependencies: PaseoDaemonDependencies): Buil
 
 function createBootstrapManagedProcessRegistry(
   config: Pick<PaseoDaemonConfig, "paseoHome" | "managedProcesses">,
+  serverId: string,
   logger: Logger,
 ): ManagedProcessRegistry {
   if (config.managedProcesses) {
@@ -533,6 +588,7 @@ function createBootstrapManagedProcessRegistry(
 
   return createManagedProcessRegistry({
     paseoHome: config.paseoHome,
+    serverId,
     processTable: createSystemManagedProcessTable(),
     terminateProcess: terminateWithTreeKill,
     logger,
@@ -686,8 +742,8 @@ export async function createPaseoDaemon(
   });
 
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
-  const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
-  const managedProcesses = createBootstrapManagedProcessRegistry(config, logger);
+  const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, { serverId, logger });
+  const managedProcesses = createBootstrapManagedProcessRegistry(config, serverId, logger);
   // Reconcile the helper-process ledger in the background so it never blocks the
   // daemon from coming up; terminating a live leftover can take a few seconds.
   // Best-effort, so a failure is logged here rather than crashing startup.
@@ -950,6 +1006,7 @@ export async function createPaseoDaemon(
   const workspaceLabelService = createWorkspaceLabelService({
     paseoHome: config.paseoHome,
     workspaceRegistry,
+    serverId,
   });
   const github = createGitHubService();
   const workspaceGitService = new WorkspaceGitServiceImpl({

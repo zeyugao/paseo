@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
-import { deriveProjectGroupingDisplayName, deriveProjectKey } from "./project-key.js";
+import {
+  deriveProjectGroupingDisplayName,
+  deriveProjectKey,
+  mergeLocalProjectKeyServerIds,
+} from "./project-key.js";
 
 describe("deriveProjectKey", () => {
   const rootPath = path.resolve("repo");
@@ -102,6 +106,59 @@ describe("deriveProjectKey", () => {
 
     expect(deriveSubproject(path.resolve("host-a", "repo"))).toBe(
       deriveSubproject(path.resolve("host-b", "different", "repo")),
+    );
+  });
+});
+
+describe("mergeLocalProjectKeyServerIds", () => {
+  const localPath = "/home/dev/Code/app";
+
+  test("lists every observer in sorted order", () => {
+    expect(
+      mergeLocalProjectKeyServerIds(`host:srv_b:${localPath}`, `host:srv_a:${localPath}`),
+    ).toBe(`host:srv_a+srv_b:${localPath}`);
+  });
+
+  test("leaves a key that already names the observer unchanged", () => {
+    const key = `host:srv_a+srv_b:${localPath}`;
+
+    expect(mergeLocalProjectKeyServerIds(key, `host:srv_b:${localPath}`)).toBe(key);
+    expect(mergeLocalProjectKeyServerIds(key, key)).toBe(key);
+  });
+
+  test("converges on one value whichever observer writes", () => {
+    const observed = `host:srv_a+srv_b:${localPath}`;
+
+    expect(
+      mergeLocalProjectKeyServerIds(`host:srv_a:${localPath}`, `host:srv_b:${localPath}`),
+    ).toBe(observed);
+    expect(
+      mergeLocalProjectKeyServerIds(`host:srv_b:${localPath}`, `host:srv_a:${localPath}`),
+    ).toBe(observed);
+  });
+
+  test("drops observers recorded for a different path", () => {
+    expect(mergeLocalProjectKeyServerIds("host:srv_a:/old/app", `host:srv_b:${localPath}`)).toBe(
+      `host:srv_b:${localPath}`,
+    );
+  });
+
+  test("takes the incoming key when either side is not a host-local key", () => {
+    expect(
+      mergeLocalProjectKeyServerIds(`host:srv_a:${localPath}`, "remote:github.com/acme/app"),
+    ).toBe("remote:github.com/acme/app");
+    expect(
+      mergeLocalProjectKeyServerIds("remote:github.com/acme/app", `host:srv_a:${localPath}`),
+    ).toBe(`host:srv_a:${localPath}`);
+    expect(mergeLocalProjectKeyServerIds(`host:srv_a:${localPath}`, localPath)).toBe(localPath);
+    expect(mergeLocalProjectKeyServerIds(null, `host:srv_a:${localPath}`)).toBe(
+      `host:srv_a:${localPath}`,
+    );
+  });
+
+  test("keeps a Windows drive path parseable", () => {
+    expect(mergeLocalProjectKeyServerIds("host:srv_a:C:/Code/app", "host:srv_b:C:/Code/app")).toBe(
+      "host:srv_a+srv_b:C:/Code/app",
     );
   });
 });

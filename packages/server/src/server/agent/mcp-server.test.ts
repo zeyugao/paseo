@@ -54,12 +54,9 @@ import {
   type ProjectRegistry,
   type WorkspaceRegistry,
 } from "../workspace-registry.js";
-import type {
-  CreateScheduleInput,
-  StoredSchedule,
-  UpdateScheduleInput,
-} from "@getpaseo/protocol/schedule/types";
+import type { CreateScheduleInput, UpdateScheduleInput } from "@getpaseo/protocol/schedule/types";
 import type { ScheduleService } from "../schedule/service.js";
+import type { StoredSchedule } from "../schedule/store.js";
 import type { WorkspaceGitService } from "../workspace-git-service.js";
 import {
   createPaseoWorktree as createPaseoWorktreeService,
@@ -697,6 +694,7 @@ function createStoredSchedule(input: CreateScheduleInput): StoredSchedule {
   const now = "2026-04-11T00:00:00.000Z";
   return {
     id: "schedule-1",
+    hostId: "srv-private",
     name: input.name ?? null,
     prompt: input.prompt,
     cadence: input.cadence,
@@ -5274,7 +5272,7 @@ describe("create_heartbeat MCP tool", () => {
   it("creates a self-targeted cron heartbeat", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
     spies.agentManager.getAgent.mockReturnValue({
-      id: "parent-agent",
+      id: "11111111-1111-4111-8111-111111111111",
       provider: "codex",
       cwd: REPO_CWD,
       lifecycle: "idle",
@@ -5290,7 +5288,7 @@ describe("create_heartbeat MCP tool", () => {
       agentStorage,
       providerSnapshotManager: createOpenCodeManager().manager,
       scheduleService: { createOrReplace } as unknown as ScheduleService,
-      callerAgentId: "parent-agent",
+      callerAgentId: "11111111-1111-4111-8111-111111111111",
       logger,
     });
     const tool = registeredTool(server, "create_heartbeat");
@@ -5310,7 +5308,7 @@ describe("create_heartbeat MCP tool", () => {
           expression: "*/15 * * * *",
           timezone: "America/New_York",
         },
-        target: { type: "agent", agentId: "parent-agent" },
+        target: { type: "agent", agentId: "11111111-1111-4111-8111-111111111111" },
         name: "status heartbeat",
       }),
     );
@@ -5347,7 +5345,7 @@ describe("heartbeat ownership MCP tools", () => {
     const heartbeat = createStoredSchedule({
       prompt: "check status",
       cadence: { type: "cron", expression: "*/15 * * * *" },
-      target: { type: "agent", agentId: "parent-agent" },
+      target: { type: "agent", agentId: "11111111-1111-4111-8111-111111111111" },
     });
     const inspect = vi.fn(async () => heartbeat);
     const deleteSchedule = vi.fn(async () => undefined);
@@ -5359,7 +5357,7 @@ describe("heartbeat ownership MCP tools", () => {
         inspect,
         delete: deleteSchedule,
       } as unknown as ScheduleService,
-      callerAgentId: "parent-agent",
+      callerAgentId: "11111111-1111-4111-8111-111111111111",
       logger,
     });
 
@@ -5373,7 +5371,7 @@ describe("heartbeat ownership MCP tools", () => {
     const foreignHeartbeat = createStoredSchedule({
       prompt: "foreign",
       cadence: { type: "cron", expression: "0 * * * *" },
-      target: { type: "agent", agentId: "other-agent" },
+      target: { type: "agent", agentId: "22222222-2222-4222-8222-222222222222" },
     });
     const server = await createAgentMcpServer({
       agentManager,
@@ -5383,7 +5381,7 @@ describe("heartbeat ownership MCP tools", () => {
         inspect: vi.fn(async () => foreignHeartbeat),
         delete: vi.fn(),
       } as unknown as ScheduleService,
-      callerAgentId: "parent-agent",
+      callerAgentId: "11111111-1111-4111-8111-111111111111",
       logger,
     });
 
@@ -5391,6 +5389,35 @@ describe("heartbeat ownership MCP tools", () => {
       registeredTool(server, "delete_heartbeat").handler({ id: foreignHeartbeat.id }),
     ).rejects.toThrow("does not belong to caller");
   });
+});
+
+test("schedule MCP outputs strip server-private ownership metadata", async () => {
+  const { agentManager, agentStorage } = createTestDeps();
+  const schedule = createStoredSchedule({
+    prompt: "check status",
+    cadence: { type: "cron", expression: "0 * * * *" },
+    target: { type: "new-agent", config: { provider: "claude", cwd: "/tmp" } },
+  });
+  const server = await createAgentMcpServer({
+    agentManager,
+    agentStorage,
+    providerSnapshotManager: createOpenCodeManager().manager,
+    scheduleService: {
+      list: async () => [schedule],
+      inspect: async () => schedule,
+      update: async () => schedule,
+      runOnce: async () => schedule,
+    } as unknown as ScheduleService,
+    logger: createTestLogger(),
+  });
+  for (const name of ["inspect_schedule", "update_schedule", "run_schedule_once"]) {
+    const result = await registeredTool(server, name).handler({ id: schedule.id });
+    expect(result.structuredContent).toMatchObject({ id: schedule.id });
+    expect(result.structuredContent).not.toHaveProperty("hostId");
+  }
+  const result = await registeredTool(server, "list_schedules").handler({});
+  expect(result.structuredContent).toMatchObject({ schedules: [{ id: schedule.id }] });
+  expect(JSON.stringify(result.structuredContent)).not.toContain("hostId");
 });
 
 describe("update_schedule MCP tool", () => {

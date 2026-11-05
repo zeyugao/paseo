@@ -8,8 +8,8 @@ export type { PushPayload };
 const PUSH_TOKEN_LEASE_MS = 48 * 60 * 60 * 1000;
 
 export interface PushNotifications {
-  renew(token: string): void;
-  revoke(token: string): void;
+  renew(token: string): Promise<void>;
+  revoke(token: string): Promise<void>;
   send(payload: PushPayload): Promise<void>;
 }
 
@@ -30,13 +30,13 @@ export function createPushNotifications(options: {
 
   return {
     renew(token) {
-      store.renewToken(token);
+      return store.renewToken(token);
     },
     revoke(token) {
-      store.revokeToken(token);
+      return store.revokeToken(token);
     },
     async send(payload) {
-      const tokens = store.getActiveTokens();
+      const tokens = await store.getActiveTokens();
       options.logger.info({ tokenCount: tokens.length }, "Sending push notification");
       if (tokens.length === 0) return;
       await deliver(tokens, payload);

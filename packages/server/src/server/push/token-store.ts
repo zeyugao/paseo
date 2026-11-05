@@ -1,7 +1,8 @@
 import type pino from "pino";
-import { existsSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 
-import { ensurePrivateFile, writePrivateFileAtomicSync } from "../private-files.js";
+import { ensurePrivateFileAsync, writePrivateFileAtomicSync } from "../private-files.js";
+import { withReclaimLock } from "../pid-lock.js";
 
 /**
  * Store for Expo push tokens.
@@ -10,7 +11,6 @@ import { ensurePrivateFile, writePrivateFileAtomicSync } from "../private-files.
  */
 export class PushTokenStore {
   private readonly logger: pino.Logger;
-  private subscriptions = new Map<string, number>();
   private readonly filePath: string;
   private readonly now: () => number;
   private readonly leaseMs: number;
@@ -28,60 +28,75 @@ export class PushTokenStore {
     this.now = now;
     this.leaseMs = leaseMs;
     this.write = write;
-    this.loadFromDisk();
   }
 
-  renewToken(token: string): void {
+  async renewToken(token: string): Promise<void> {
     const normalized = token.trim();
     if (!normalized) return;
-    const now = this.now();
-    const currentExpiry = this.subscriptions.get(normalized);
-    if (currentExpiry !== undefined && currentExpiry - now > this.leaseMs / 2) return;
-    const next = new Map(this.subscriptions);
-    next.set(normalized, now + this.leaseMs);
-    this.persist(next);
-    this.subscriptions = next;
-    this.logger.debug({ total: this.subscriptions.size }, "Renewed token");
-  }
-
-  revokeToken(token: string): void {
-    const normalized = token.trim();
-    if (!normalized) return;
-    if (!this.subscriptions.has(normalized)) return;
-    const next = new Map(this.subscriptions);
-    next.delete(normalized);
-    this.persist(next);
-    this.subscriptions = next;
-    this.logger.debug({ total: this.subscriptions.size }, "Revoked token");
-  }
-
-  getActiveTokens(): string[] {
-    const now = this.now();
-    const active = new Map(this.subscriptions);
-    for (const [token, expiresAt] of this.subscriptions) {
-      if (expiresAt <= now) {
-        active.delete(token);
-      }
-    }
-    if (active.size !== this.subscriptions.size) {
-      try {
-        this.persist(active);
-        this.subscriptions = active;
-      } catch {
-        // Keep the previous state so a later send retries pruning. Expired tokens
-        // are still excluded from this delivery.
-      }
-    }
-    return Array.from(active.keys());
-  }
-
-  private loadFromDisk(): void {
-    try {
-      if (!existsSync(this.filePath)) {
+    await withReclaimLock(`${this.filePath}.lock`, async () => {
+      const { subscriptions, needsMigration } = await this.loadFromDisk();
+      const now = this.now();
+      const currentExpiry = subscriptions.get(normalized);
+      if (currentExpiry === undefined || currentExpiry - now <= this.leaseMs / 2) {
+        subscriptions.set(normalized, now + this.leaseMs);
+      } else if (!needsMigration) {
         return;
       }
-      ensurePrivateFile(this.filePath);
-      const raw = readFileSync(this.filePath, "utf-8");
+      this.persist(subscriptions);
+      this.logger.debug({ total: subscriptions.size }, "Renewed token");
+    });
+  }
+
+  async revokeToken(token: string): Promise<void> {
+    const normalized = token.trim();
+    if (!normalized) return;
+    await withReclaimLock(`${this.filePath}.lock`, async () => {
+      const { subscriptions, needsMigration } = await this.loadFromDisk();
+      if (!subscriptions.delete(normalized) && !needsMigration) return;
+      this.persist(subscriptions);
+      this.logger.debug({ total: subscriptions.size }, "Revoked token");
+    });
+  }
+
+  async getActiveTokens(): Promise<string[]> {
+    return withReclaimLock(`${this.filePath}.lock`, async () => {
+      const { subscriptions, needsMigration } = await this.loadFromDisk();
+      const now = this.now();
+      let needsPruning = false;
+      for (const [token, expiresAt] of subscriptions) {
+        if (expiresAt <= now) {
+          subscriptions.delete(token);
+          needsPruning = true;
+        }
+      }
+      if (needsPruning || needsMigration) {
+        try {
+          this.persist(subscriptions);
+        } catch {
+          // Expired tokens stay excluded from delivery; the next read reloads
+          // authoritative disk state and retries pruning under the same lock.
+        }
+      }
+      return Array.from(subscriptions.keys());
+    });
+  }
+
+  private async loadFromDisk(): Promise<{
+    subscriptions: Map<string, number>;
+    needsMigration: boolean;
+  }> {
+    let raw: string;
+    try {
+      raw = await readFile(this.filePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return { subscriptions: new Map(), needsMigration: false };
+      }
+      this.logger.warn({ err: error }, "Failed to load push tokens");
+      throw error;
+    }
+    await ensurePrivateFileAsync(this.filePath);
+    try {
       const parsed = JSON.parse(raw) as { subscriptions?: unknown; tokens?: unknown };
       const loaded = new Map<string, number>();
       const subscriptions = Array.isArray(parsed.subscriptions) ? parsed.subscriptions : [];
@@ -96,25 +111,21 @@ export class PushTokenStore {
           loaded.set(token, expiresAt);
         }
       }
-      this.subscriptions = loaded;
 
       const legacyTokens = Array.isArray(parsed.tokens)
         ? parsed.tokens.filter((token): token is string => typeof token === "string")
         : [];
-      if (legacyTokens.length > 0) {
-        const migrated = new Map(loaded);
-        const expiresAt = this.now() + this.leaseMs;
-        for (const token of legacyTokens) {
-          const normalized = token.trim();
-          if (normalized) migrated.set(normalized, expiresAt);
-        }
-        this.persist(migrated);
-        this.subscriptions = migrated;
+      const expiresAt = this.now() + this.leaseMs;
+      for (const token of legacyTokens) {
+        const normalized = token.trim();
+        if (normalized) loaded.set(normalized, expiresAt);
       }
-      this.logger.info({ total: this.subscriptions.size }, "Loaded push tokens");
+      this.logger.debug({ total: loaded.size }, "Loaded push tokens");
+      return { subscriptions: loaded, needsMigration: legacyTokens.length > 0 };
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
       this.logger.warn({ err }, "Failed to load push tokens");
+      return { subscriptions: new Map(), needsMigration: false };
     }
   }
 

@@ -184,8 +184,6 @@
                 "rmSync",
                 "writeFileSync"
               ],
-              // TODO: constructor load plus runtime renew/revoke/prune use synchronous persistence; introduce ordered async mutations and readiness.
-              "server/push/token-store.ts": ["existsSync", "readFileSync"],
               // Startup identity: load or create the server id before accepting connections.
               "server/server-id.ts": ["existsSync", "readFileSync", "writeFileSync"],
               // Listener lifecycle only: unlink the Unix socket before binding or after stopping the proxy.

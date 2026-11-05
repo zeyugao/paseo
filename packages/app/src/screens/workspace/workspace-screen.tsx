@@ -2,6 +2,8 @@ import {
   AdaptiveWorkspaceChrome,
   type WorkspaceCompactHeaderActions,
 } from "./adaptive-workspace-chrome";
+import { WorkspaceTopChrome } from "./workspace-top-chrome";
+import { WindowLayoutContentEdgesContext } from "@/window-layout/context";
 import { planTimelineTailFetch } from "@/timeline/timeline-sync-plan";
 import { useHostFeature } from "@/runtime/host-features";
 import {
@@ -28,6 +30,7 @@ import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import { getOpenAgentTabLabel } from "@getpaseo/protocol/agent-labels";
 import {
   memo,
+  useContext,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -3637,39 +3640,40 @@ function WorkspaceScreenContent({
   ) : (
     <View style={styles.centerColumn}>
       {rendersDesktopSplitContent ? null : (
-        <AdaptiveWorkspaceChrome compactHeader={compactWorkspaceHeader}>
-          {fullWorkspaceActions}
-          {renderWorkspaceScreenHeader()}
-
-          {shouldRenderDesktopPaneFallback ? (
-            <NewTabLauncherProvider value={newTabLauncher}>
-              <WorkspaceDesktopTabsRow
-                paneId={focusedPaneIdOrUndefined}
-                ownsKeyboardShortcuts={false}
-                isFocused={isRouteFocused}
-                tabs={desktopTabRowItems}
-                normalizedServerId={normalizedServerId}
-                normalizedWorkspaceId={normalizedWorkspaceId}
-                setHoveredCloseTabKey={setHoveredCloseTabKey}
-                onNavigateTab={navigateToTabId}
-                onCloseTab={handleCloseTabById}
-                onCopyResumeCommand={handleCopyResumeCommand}
-                onCopyAgentId={handleCopyAgentId}
-                onCopyTerminalId={handleCopyTerminalId}
-                onCopyFilePath={handleCopyFilePath}
-                onReloadAgent={handleReloadAgent}
-                onRenameTab={handleRenameTab}
-                onCloseTabsToLeft={handleCloseTabsToLeft}
-                onCloseTabsToRight={handleCloseTabsToRight}
-                onCloseOtherTabs={handleCloseOtherTabs}
-                onCreateNewTab={handleCreateNewTab}
-                onReorderTabs={handleReorderTabsInFocusedPane}
-                focusModeEnabled={desktopFocusModeEnabled}
-                onExitFocusMode={toggleFocusMode}
-              />
-            </NewTabLauncherProvider>
-          ) : null}
-        </AdaptiveWorkspaceChrome>
+        <WorkspaceTopChrome>
+          <AdaptiveWorkspaceChrome compactHeader={compactWorkspaceHeader}>
+            {fullWorkspaceActions}
+            {renderWorkspaceScreenHeader()}
+            {shouldRenderDesktopPaneFallback ? (
+              <NewTabLauncherProvider value={newTabLauncher}>
+                <WorkspaceDesktopTabsRow
+                  paneId={focusedPaneIdOrUndefined}
+                  ownsKeyboardShortcuts={false}
+                  isFocused={isRouteFocused}
+                  tabs={desktopTabRowItems}
+                  normalizedServerId={normalizedServerId}
+                  normalizedWorkspaceId={normalizedWorkspaceId}
+                  setHoveredCloseTabKey={setHoveredCloseTabKey}
+                  onNavigateTab={navigateToTabId}
+                  onCloseTab={handleCloseTabById}
+                  onCopyResumeCommand={handleCopyResumeCommand}
+                  onCopyAgentId={handleCopyAgentId}
+                  onCopyTerminalId={handleCopyTerminalId}
+                  onCopyFilePath={handleCopyFilePath}
+                  onReloadAgent={handleReloadAgent}
+                  onRenameTab={handleRenameTab}
+                  onCloseTabsToLeft={handleCloseTabsToLeft}
+                  onCloseTabsToRight={handleCloseTabsToRight}
+                  onCloseOtherTabs={handleCloseOtherTabs}
+                  onCreateNewTab={handleCreateNewTab}
+                  onReorderTabs={handleReorderTabsInFocusedPane}
+                  focusModeEnabled={desktopFocusModeEnabled}
+                  onExitFocusMode={toggleFocusMode}
+                />
+              </NewTabLauncherProvider>
+            ) : null}
+          </AdaptiveWorkspaceChrome>
+        </WorkspaceTopChrome>
       )}
       <View style={styles.centerContent}>
         <View style={styles.content}>{desktopContent}</View>
@@ -3756,6 +3760,21 @@ function WorkspaceScreenContent({
     workspaceViewportWidth,
     desktopFocusModeEnabled,
   ]);
+  const windowEdges = useContext(WindowLayoutContentEdgesContext);
+  const mainContentEdges = useMemo(
+    () => ({
+      left: windowEdges.left,
+      right:
+        windowEdges.right &&
+        !(sharedExplorer && isExplorerSidebarShowing && !isMobile && !desktopFocusModeEnabled),
+    }),
+    [windowEdges, sharedExplorer, isExplorerSidebarShowing, isMobile, desktopFocusModeEnabled],
+  );
+  const framedWorkspaceCenterColumn = (
+    <WindowLayoutContentEdgesContext.Provider value={mainContentEdges}>
+      {workspaceCenterColumn}
+    </WindowLayoutContentEdgesContext.Provider>
+  );
 
   const { revealDirectory } = useFileExplorerActions({
     serverId: normalizedServerId,
@@ -3828,7 +3847,7 @@ function WorkspaceScreenContent({
               onReorderTabsInPane={handleReorderTabsInPane}
               onSplitPane={handleSplitPane}
             >
-              {workspaceCenterColumn}
+              {framedWorkspaceCenterColumn}
               {sharedExplorer}
             </WorkspaceTabDragScope>
           </FloatingPanelPortalHostNameProvider>

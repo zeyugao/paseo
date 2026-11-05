@@ -180,7 +180,10 @@ import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { createWorkspaceLabelService } from "./workspace-labels/index.js";
 import { createGitHubService } from "../services/github-service.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
-import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import {
+  createWorkspaceProvisioningService,
+  type WorkspaceProvisioningService,
+} from "./session/workspace-provisioning/workspace-provisioning-service.js";
 import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import { formatAttachmentContentDisposition } from "./file-download/content-disposition.js";
@@ -207,10 +210,12 @@ import {
   FileBackedWorkspaceRegistry,
   assertCwdWorkspaceOwnedByThisServer,
   isWorkspaceVisibleToServer,
+  resolveCwdWorkspaceHost,
   type WorkspaceArchiveContext,
+  type WorkspaceRegistry,
 } from "./workspace-registry.js";
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
-import { ScheduleService } from "./schedule/service.js";
+import { ScheduleService, type ScheduleServiceOptions } from "./schedule/service.js";
 import { DaemonConfigStore, type MutableDaemonConfig } from "./daemon-config-store.js";
 import { createOrchestrationSkills } from "./orchestration-skills/index.js";
 import {
@@ -311,6 +316,33 @@ const MCP_DEBUG_BATCH_LIMIT = 10;
 const MCP_DEBUG_SECRET = "[redacted]";
 const DOWNLOAD_OPEN_FLAGS =
   process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
+
+export function createScheduleLocalWorkspaceHandler(dependencies: {
+  workspaceRegistry: Pick<WorkspaceRegistry, "listAll">;
+  serverId: string | undefined;
+  workspaceProvisioning: Pick<WorkspaceProvisioningService, "createWorkspaceForDirectory">;
+  workspaceAutoName: Pick<WorkspaceAutoName, "scheduleForDirectory">;
+  emitWorkspaceUpdates: (workspaceIds: Iterable<string>) => Promise<void>;
+}): ScheduleServiceOptions["createDirectoryWorkspace"] {
+  return async (input) => {
+    await assertCwdWorkspaceOwnedByThisServer(
+      input.cwd,
+      dependencies.workspaceRegistry,
+      dependencies.serverId,
+    );
+    const workspace = await dependencies.workspaceProvisioning.createWorkspaceForDirectory(
+      input.cwd,
+      resolveFirstAgentPromptTitle(input.firstAgentContext),
+    );
+    dependencies.workspaceAutoName.scheduleForDirectory({
+      workspaceId: workspace.workspaceId,
+      cwd: workspace.cwd,
+      firstAgentContext: input.firstAgentContext,
+    });
+    await dependencies.emitWorkspaceUpdates([workspace.workspaceId]);
+    return workspace;
+  };
+}
 
 function formatHostForHttpUrl(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -1481,22 +1513,13 @@ export async function createPaseoDaemon(
       }),
   });
 
-  const createScheduleLocalWorkspaceExternal = async (input: {
-    cwd: string;
-    firstAgentContext: FirstAgentContext;
-  }) => {
-    const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
-      input.cwd,
-      resolveFirstAgentPromptTitle(input.firstAgentContext),
-    );
-    workspaceAutoName.scheduleForDirectory({
-      workspaceId: workspace.workspaceId,
-      cwd: workspace.cwd,
-      firstAgentContext: input.firstAgentContext,
-    });
-    await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
-    return workspace;
-  };
+  const createScheduleLocalWorkspaceExternal = createScheduleLocalWorkspaceHandler({
+    workspaceRegistry,
+    serverId,
+    workspaceProvisioning,
+    workspaceAutoName,
+    emitWorkspaceUpdates: emitWorkspaceUpdatesExternal,
+  });
   const createSchedulePaseoWorktreeExternal = async (input: {
     cwd: string;
     firstAgentContext: FirstAgentContext;
@@ -1547,6 +1570,7 @@ export async function createPaseoDaemon(
     );
   };
   const scheduleService = new ScheduleService({
+    serverId,
     paseoHome: config.paseoHome,
     logger,
     agentManager,
@@ -1555,9 +1579,12 @@ export async function createPaseoDaemon(
     createDirectoryWorkspace: createScheduleLocalWorkspaceExternal,
     createPaseoWorktreeWorkspace: createSchedulePaseoWorktreeExternal,
     archiveWorkspace: archiveScheduleWorkspaceExternal,
+    assertCwdWorkspaceOwnedByThisServer: (cwd) =>
+      assertCwdWorkspaceOwnedByThisServer(cwd, workspaceRegistry, serverId),
+    resolveCwdWorkspaceHost: (cwd) => resolveCwdWorkspaceHost(cwd, workspaceRegistry),
   });
-  await scheduleService.start();
-
+  // Deferred to start() after the instance lease is held: a rejected
+  // competitor must never interrupt the live daemon's schedule recovery.
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {
       await scheduleService.completeForAgent(agentId);
@@ -1869,6 +1896,7 @@ export async function createPaseoDaemon(
       void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
         logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
       });
+      await scheduleService.start();
       mirrorsLegacyCredential = process.env.PASEO_PID_LOCK_OWNER !== "0";
       localCredential = await writeLocalCredential(config.paseoHome, {
         serverId,

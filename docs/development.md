@@ -106,6 +106,12 @@ npm run ios        # → expo run:ios (packages/app): builds and launches the ap
 
 `expo run:ios` starts its own Metro and gives you the normal Simulator.app window (full speed, native touch, no stream).
 
+See [iOS release identity](release.md#ios--overkite-internal-testflight) before choosing a production
+variant. After changing variants or reusing a generated project, run
+`APP_VARIANT=production npx expo prebuild --platform ios --clean --no-install` from `packages/app`
+in a disposable checkout, or safeguard native edits before cleaning. Preserve the native AppDelegate
+modifier order so the scene delegate is generated before its consumers.
+
 **Pointing the app at a daemon.** The client resolves its local daemon from `EXPO_PUBLIC_LOCAL_DAEMON` (`packages/app/src/runtime/host-runtime.ts`); when unset it falls back to `localhost:6767`, the production `~/.paseo` daemon. To target a worktree's dev daemon instead, set it on the build command:
 
 ```bash

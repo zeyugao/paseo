@@ -159,10 +159,12 @@ admission within their original timeout and cancellation scope.
 
 Finish notification intent has a separate daemon-owned lifetime. The finish-subscriptions module
 persists caller, child, host, and ownership policy through an injectable store; its JSON adapter uses
-`$PASEO_HOME/finish-subscriptions.json`. Registration must commit before creation or queued-prompt
-acknowledgment promises a notification. A pending replacement retains its predecessor until dispatch
-accepts; rejected dispatch removes only the candidate. Recovery coalesces registrations for the same
-caller, child, and host into one watch.
+`$PASEO_HOME/finish-subscriptions.json`. Reads reload disk and mutations hold a cross-process
+lock through re-read and atomic write, so sibling daemons' durable intent survives.
+Registration must commit before creation or queued-prompt acknowledgment promises a
+notification. A pending replacement retains its predecessor until dispatch accepts;
+rejected dispatch removes only the candidate. Recovery coalesces registrations for the
+same caller, child and host into one watch.
 
 Bootstrap restores these watches after repairing stale running records to `closed` and before opening
 ingress. Reading a closed child's result does not load its provider. A finish notification reports that

@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect, type Page } from "../support/fixtures";
 import { TerminalE2EHarness, type TerminalInstance } from "../support/helpers/terminal-dsl";
@@ -89,6 +89,22 @@ async function focusTerminalTab(page: Page, terminalId: string): Promise<void> {
   await terminalTab(page, terminalId).click();
 }
 
+async function focusTerminalFromSwitcher(
+  page: Page,
+  harness: TerminalE2EHarness,
+  terminalId: string,
+): Promise<void> {
+  const snapshot = await harness.client.listTerminals(harness.tempRepo.path, undefined, {
+    workspaceId: harness.workspaceId,
+  });
+  const terminal = snapshot.terminals.find((entry) => entry.id === terminalId);
+  if (!terminal) throw new Error("Activity terminal disappeared from the workspace");
+  await page
+    .getByText(terminal.title ?? terminal.name, { exact: true })
+    .filter({ visible: true })
+    .click();
+}
+
 class ControlledActivityTerminal {
   constructor(
     readonly terminal: TerminalInstance,
@@ -110,8 +126,7 @@ class ControlledActivityTerminal {
 async function createControlledActivityTerminal(
   harness: TerminalE2EHarness,
 ): Promise<ControlledActivityTerminal> {
-  const triggerDir = join(harness.tempRepo.path, ".activity-triggers");
-  await mkdir(triggerDir, { recursive: true });
+  const triggerDir = await mkdtemp(join(harness.tempRepo.path, ".activity-triggers-"));
   const terminal = await harness.createTerminal({
     name: "activity-source",
     command: process.execPath,
@@ -176,6 +191,39 @@ test.describe("Terminal activity indicators", () => {
         timeoutMs: 15_000,
       });
       await expectTerminalTabStatus(page, activityTerminal.terminal.id, "none");
+    });
+  });
+
+  test("compact switcher shows terminal attention while closed and clears after reading", async ({
+    page,
+  }, testInfo) => {
+    await withTerminalActivityFixture(harness, async ({ activityTerminal, focusTerminal }) => {
+      await harness.openTerminal(page, { terminalId: activityTerminal.terminal.id });
+      await harness.openTerminal(page, { terminalId: focusTerminal.id });
+      await page.setViewportSize({ width: 390, height: 844 });
+      const dot = page.getByTestId("workspace-tab-switcher-attention");
+      const trigger = page.getByTestId("workspace-tab-switcher-trigger");
+      await expect(trigger).toBeVisible();
+
+      await activityTerminal.report("running");
+      await expect(dot).toHaveCount(0);
+      await activityTerminal.report("idle");
+      await expect(dot).toBeVisible();
+      await activityTerminal.report("needs-input");
+      await expect(trigger).toHaveAccessibleName("Switch tabs (2 open), Needs input");
+      await page.screenshot({ path: testInfo.outputPath("compact-terminal-attention.png") });
+
+      await trigger.click();
+      await expect(page.getByTestId("workspace-tab-switcher-new-agent")).toBeVisible();
+      await expect(dot).toBeVisible();
+      await focusTerminalFromSwitcher(page, harness, activityTerminal.terminal.id);
+      await harness.waitForTerminalActivity({
+        terminalId: activityTerminal.terminal.id,
+        state: "idle",
+        attentionReason: null,
+        timeoutMs: 15_000,
+      });
+      await expect(dot).toHaveCount(0);
     });
   });
 });

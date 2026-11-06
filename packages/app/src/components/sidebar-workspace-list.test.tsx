@@ -33,6 +33,8 @@ import {
   type SidebarProjectEntry,
 } from "@/hooks/use-sidebar-workspaces-list";
 import { useSidebarWorkspacesList } from "@/hooks/use-sidebar-workspaces-list";
+import { useSidebarAttention } from "@/hooks/use-sidebar-attention";
+import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import {
   getHostRuntimeStore,
   type HostRuntimeController,
@@ -350,6 +352,69 @@ describe("sidebar workspace render isolation", () => {
         projectOrder: [],
       });
     });
+  });
+
+  it("keeps hidden-sidebar attention live outside the sidebar provider without clearing it", () => {
+    pathnameState.value = `/h/${SERVER_ID}/workspace/a-one`;
+    const probe = renderHook(({ open }) => useSidebarAttention(open), {
+      initialProps: { open: false },
+    });
+    const other = createWorkspaces()[2];
+    try {
+      expect(probe.result.current).toBeNull();
+      act(() => {
+        useSessionStore.getState().mergeWorkspaces(SERVER_ID, [
+          { ...createWorkspaces()[1], status: "needs_input" },
+          { ...other, status: "attention" },
+          { ...createWorkspaces()[0], status: "running" },
+        ]);
+      });
+      expect(probe.result.current).toBe("attention");
+      act(() => {
+        useSessionStore.getState().mergeWorkspaces(SERVER_ID, [{ ...other, status: "failed" }]);
+      });
+      expect(probe.result.current).toBe("failed");
+      probe.rerender({ open: true });
+      expect(probe.result.current).toBeNull();
+      probe.rerender({ open: false });
+      expect(probe.result.current).toBe("failed");
+      act(() => {
+        useSessionStore.getState().removeWorkspace(SERVER_ID, other.id);
+      });
+      expect(probe.result.current).toBeNull();
+    } finally {
+      probe.unmount();
+    }
+  });
+
+  it("only counts attention on sidebar-visible hosts", () => {
+    const otherServerId = `${SERVER_ID}-other`;
+    const originalFilters = useSidebarViewStore.getState().hostFilters;
+    act(() => {
+      setHostProfiles([makeHost(), { ...makeHost(), serverId: otherServerId }]);
+      useSessionStore.getState().initializeSession(otherServerId, null as unknown as DaemonClient);
+      seedRuntimeWorkspaces(
+        otherServerId,
+        new Map([["a-one", { ...createWorkspaces()[1], status: "needs_input" }]]),
+      );
+      useSessionStore.getState().setHasHydratedWorkspaces(otherServerId, true);
+      useSidebarViewStore.setState({ hostFilters: [SERVER_ID] });
+      pathnameState.value = `/h/${SERVER_ID}/workspace/a-one`;
+    });
+    const probe = renderHook(() => useSidebarAttention(false));
+    try {
+      expect(probe.result.current).toBeNull();
+      act(() => {
+        useSidebarViewStore.setState({ hostFilters: [otherServerId] });
+      });
+      expect(probe.result.current).toBe("needs_input");
+    } finally {
+      probe.unmount();
+      act(() => {
+        useSidebarViewStore.setState({ hostFilters: originalFilters });
+        useSessionStore.getState().clearSession(otherServerId);
+      });
+    }
   });
 
   it("re-renders only the changed workspace row for a status update", async () => {

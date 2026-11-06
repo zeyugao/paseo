@@ -8,6 +8,9 @@ import { selectIsAgentListOpen, usePanelStore } from "@/stores/panel-store";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { getShortcutOs } from "@/utils/shortcut-platform";
 import { useHasWindowChromeObstruction, useOwnsWindowChromeCorner } from "@/utils/desktop-window";
+import { useSidebarAttention } from "@/hooks/use-sidebar-attention";
+import { HeaderAttentionDot } from "./attention-dot";
+import { ATTENTION_LABEL_KEYS } from "@/utils/attention-indicator";
 import {
   extraMutedIconColorMapping,
   iconButtonChromeGlyphSize,
@@ -58,6 +61,7 @@ function SidebarMenuToggleButton({
   const { t } = useTranslation();
   const isOpen = usePanelStore((state) => selectIsAgentListOpen(state, { isCompact: isMobile }));
   const toggleAgentListForLayout = usePanelStore((state) => state.toggleAgentListForLayout);
+  const attentionBucket = useSidebarAttention(isOpen);
   const toggleShortcutKeys = useMemo(
     () => (getShortcutOs() === "mac" ? ["mod", "B"] : ["mod", "."]),
     [],
@@ -68,6 +72,7 @@ function SidebarMenuToggleButton({
   }, [toggleAgentListForLayout, isMobile]);
 
   const accessibilityState = useMemo(() => ({ expanded: isOpen }), [isOpen]);
+  const attentionLabel = attentionBucket ? t(ATTENTION_LABEL_KEYS[attentionBucket]) : undefined;
 
   return (
     <HeaderToggleButton
@@ -80,18 +85,23 @@ function SidebarMenuToggleButton({
       style={resolvedStyle}
       accessible
       accessibilityRole="button"
-      accessibilityLabel={isOpen ? t("shell.menu.close") : t("shell.menu.open")}
+      accessibilityLabel={[isOpen ? t("shell.menu.close") : t("shell.menu.open"), attentionLabel]
+        .filter(Boolean)
+        .join(", ")}
       accessibilityState={accessibilityState}
     >
-      {isMobile ? (
-        <MobileMenuIcon extraMuted={extraMutedIdleIcon} />
-      ) : (
-        <ThemedPanelLeft
-          size={iconButtonChromeGlyphSize("large")}
-          strokeWidth={1.5}
-          uniProps={extraMutedIdleIcon ? extraMutedIconColorMapping : mutedIconColorMapping}
-        />
-      )}
+      <View style={isMobile ? styles.mobileMenuIcon : styles.desktopAttentionGlyph}>
+        {isMobile ? (
+          <MobileMenuIcon extraMuted={extraMutedIdleIcon} />
+        ) : (
+          <ThemedPanelLeft
+            size={iconButtonChromeGlyphSize("large")}
+            strokeWidth={1.5}
+            uniProps={extraMutedIdleIcon ? extraMutedIconColorMapping : mutedIconColorMapping}
+          />
+        )}
+        <HeaderAttentionDot bucket={attentionBucket} testID="sidebar-toggle-attention" />
+      </View>
     </HeaderToggleButton>
   );
 }
@@ -149,6 +159,10 @@ const styles = StyleSheet.create((theme) => ({
   desktopMenuIconSpace: {
     width: theme.iconSize.md,
     height: theme.iconSize.md,
+  },
+  desktopAttentionGlyph: {
+    width: iconButtonChromeGlyphSize("large"),
+    height: iconButtonChromeGlyphSize("large"),
   },
   mobileMenuLine: {
     width: MOBILE_MENU_LINE_WIDTH,

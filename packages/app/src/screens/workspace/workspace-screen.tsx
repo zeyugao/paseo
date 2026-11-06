@@ -13,7 +13,11 @@ import {
   type InlinePathTarget,
 } from "@/assistant-file-links";
 import { useFileExplorerActions } from "@/hooks/use-file-explorer-actions";
-import { useWindowLayout, resolveWorkspaceActionPlacement } from "@/window-layout";
+import {
+  useWindowLayout,
+  resolveWorkspaceActionPlacement,
+  WindowLayoutActions,
+} from "@/window-layout";
 import { revealWorkspaceTab } from "@/workspace-tabs/navigation";
 import type { LayoutChangeEvent } from "react-native";
 import { ExplorerSidebarDock } from "@/screens/workspace/explorer-sidebar";
@@ -1039,6 +1043,9 @@ function WorkspaceScreenContent({
   const toast = useToast();
   const isMobile = useIsCompactFormFactor();
   const workspacePanelActive = usePanelStore((state) => state.mobilePanel.target === "agent");
+  const explorerPanelActive = usePanelStore(
+    (state) => state.mobilePanel.target === "file-explorer",
+  );
   const canRenderDesktopPaneSplits = supportsDesktopPaneSplits();
   const layoutMode = useWorkspaceLayoutStore((state) => state.layoutMode);
   const hasMacTrafficLights = useHasWindowChromeObstruction("top-left");
@@ -3269,8 +3276,8 @@ function WorkspaceScreenContent({
     () => shouldShowWorkspaceScreenHeader({ isFocusModeEnabled, isMobile }),
     [isFocusModeEnabled, isMobile],
   );
-  const renderExplorerSidebarHeaderAction = useCallback(
-    () => (
+  const renderExplorerSidebarHeaderAction = useCallback(() => {
+    const toggle = (
       <WorkspaceExplorerSidebarToggle
         owner={explorerToggleOwner}
         onPress={handleToggleExplorerSidebar}
@@ -3279,15 +3286,25 @@ function WorkspaceScreenContent({
         tooltipKeys={EXPLORER_TOGGLE_KEYS}
         accessibilityState={explorerSidebarToggleAccessibilityState}
       />
-    ),
-    [
-      explorerSidebarToggleAccessibilityState,
-      explorerSidebarToggleLabel,
-      explorerToggleOwner,
-      handleToggleExplorerSidebar,
-      t,
-    ],
-  );
+    );
+    return isMobile && workspaceActionsInBar ? (
+      <WindowLayoutActions active={isRouteFocused && explorerPanelActive}>
+        {toggle}
+      </WindowLayoutActions>
+    ) : (
+      toggle
+    );
+  }, [
+    explorerSidebarToggleAccessibilityState,
+    explorerSidebarToggleLabel,
+    explorerToggleOwner,
+    handleToggleExplorerSidebar,
+    t,
+    isMobile,
+    workspaceActionsInBar,
+    isRouteFocused,
+    explorerPanelActive,
+  ]);
   const createTerminalDisabled = useMemo(
     () => createTerminalMutation.isPending || pendingTerminalCreateInput !== null,
     [createTerminalMutation.isPending, pendingTerminalCreateInput],

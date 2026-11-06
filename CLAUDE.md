@@ -124,6 +124,16 @@ Merge normal PRs into `main`, including while a beta soaks or a release is being
 release builds in a short-lived release workspace from `origin/main` or a release tag; see
 [release base and source](docs/release.md#release-base-and-source).
 
+### Overkite TestFlight releases
+
+1. Create a release worktree from the latest published beta and cherry-pick the requested fixes with `-x` in commit order.
+2. Bump the beta version across workspaces and the lockfile, update the English and Chinese changelog entry, run checks, and commit the release metadata.
+3. Create a new annotated `vX.Y.Z-beta.N` tag and atomically push the release branch and tag. Never move a published tag.
+4. The tag run dispatches the actual build on the default branch; that build checks out the requested tag. Ensure the dispatch workflow is present on both the remote default branch and the release tag.
+5. Follow the dispatched build, not only the tag run. Confirm the matching version/build finishes Apple processing and is distributed to **Overkite Internal** before reporting success. Do not submit external or App Store review.
+
+To manually build an existing tag: `gh workflow run ios-release.yml --ref main -f tag=vX.Y.Z-beta.N`.
+
 ## Critical rules
 
 - **NEVER restart the main Paseo daemon on port 6767 without permission** — it manages all running agents. If you're an agent, restarting it kills your own process.

@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback } from "react";
-import { View } from "react-native";
+import { View, useWindowDimensions, type LayoutChangeEvent } from "react-native";
 import { GestureDetector } from "react-native-gesture-handler";
+import { useSharedValue } from "react-native-reanimated";
 import { useOpenFileExplorerGesture } from "@/mobile-panels/gestures";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useWorkspace } from "@/stores/session-store-hooks";
@@ -20,14 +21,24 @@ function CompactExplorerOpenGestureSurface({
   enabled,
   onOpenExplorer,
 }: CompactExplorerOpenGestureSurfaceProps) {
+  const viewportWidth = useSharedValue(useWindowDimensions().width);
+  const onLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      viewportWidth.value = event.nativeEvent.layout.width;
+    },
+    [viewportWidth],
+  );
   const explorerOpenGesture = useOpenFileExplorerGesture({
     enabled,
     onOpen: onOpenExplorer,
+    viewportWidth,
   });
 
   return (
     <GestureDetector gesture={explorerOpenGesture} touchAction={COMPACT_WEB_GESTURE_TOUCH_ACTION}>
-      <View style={styles.fill}>{children}</View>
+      <View style={styles.fill} onLayout={onLayout}>
+        {children}
+      </View>
     </GestureDetector>
   );
 }

@@ -17,6 +17,7 @@ interface MobilePanelOverlayProps {
   presentation?: "overlay" | "dock";
   dockVisible?: boolean;
   frameStyle?: ComponentProps<typeof Animated.View>["style"];
+  overlayWidth?: number;
   panelStyle?: ComponentProps<typeof Animated.View>["style"];
 }
 
@@ -28,6 +29,7 @@ export function MobilePanelOverlay({
   presentation = "overlay",
   dockVisible = false,
   frameStyle,
+  overlayWidth,
 }: MobilePanelOverlayProps) {
   const { leftPanelWidth, position, windowWidth } = useMobilePanelsRuntime();
   const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
@@ -36,7 +38,7 @@ export function MobilePanelOverlay({
   const isOpen = docked ? dockVisible : overlayOpen;
   const hostId = useId();
   const isLeft = panel === "agent-list";
-  const width = isLeft ? leftPanelWidth : windowWidth;
+  const width = overlayWidth ?? (isLeft ? leftPanelWidth : windowWidth);
 
   const sidebarAnimatedStyle = useAnimatedStyle(() => {
     if (docked) return { transform: [{ translateX: 0 }] };

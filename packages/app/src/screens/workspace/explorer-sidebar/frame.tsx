@@ -26,7 +26,10 @@ function ExplorerFrameBase({
   const settledOpen = useIsMobilePanelActive("file-explorer");
   const active = isWorkspaceActive && (overlay ? settledOpen : isOpen);
   const resizeEnabled = isWorkspaceActive && !overlay && isOpen;
-  const { gesture, gestureRef } = useCloseFileExplorerGesture(isWorkspaceActive && overlay);
+  const { gesture, gestureRef } = useCloseFileExplorerGesture(
+    isWorkspaceActive && overlay && containerWidth > 0,
+    containerWidth,
+  );
   const storedWidth = useWorkspaceLayoutStore(
     (state) => state.explorerSidebarWidthByWorkspace[persistenceKey],
   );
@@ -51,6 +54,7 @@ function ExplorerFrameBase({
           presentation={presentation}
           dockVisible={isOpen}
           frameStyle={geometry.frameStyle}
+          overlayWidth={containerWidth}
           panelStyle={[{ backgroundColor: surfaceColor }, geometry.panelStyle]}
         >
           <View style={styles.content}>

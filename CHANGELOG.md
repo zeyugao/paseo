@@ -1,10 +1,12 @@
 # Changelog
 
-## 0.15.3-beta.2 - 2026-11-06
+## 0.15.3-beta.3 - 2026-11-06
 
 On Duo, the workspace title, tabs and sidebar navigation now use the available top edge while clearing system controls and rounded corners. Narrow content uses compact controls below 550pt. Opening or closing the sidebar no longer triggers the transcript's system scroll-to-top gesture. Workspaces with existing agents no longer briefly show the New launcher during startup.
 
 The compact tab switcher and collapsed sidebar now show attention dots for work waiting for input or review, and unread errors.
+
+On folded Duo, Explorer now fits the usable viewport without clipping its left edge. Its close button moves into the side bar when one is available, leaving more room for tabs.
 
 ## 0.15.2 - 2026-11-05
 

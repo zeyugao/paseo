@@ -3081,8 +3081,6 @@ export class Session {
         return this.handleAgentBackgroundWorkListRequest(msg);
       case "agent.background_work.stop.request":
         return this.handleAgentBackgroundWorkStopRequest(msg);
-      case "agent.provider_subagents.timeline.get.request":
-        return this.handleProviderSubagentTimelineRequest(msg, source);
       case "session.events.set_subscription.request": {
         const owner = this.delivery.begin("events", undefined, async (id) => {
           this.eventSubscriptions.delete(id);

@@ -696,7 +696,6 @@ function agentIdentityEnv({
   };
 }
 
-
 function validateAgentId(agentId: string, source: string): string {
   const result = AgentIdSchema.safeParse(agentId);
   if (!result.success) {

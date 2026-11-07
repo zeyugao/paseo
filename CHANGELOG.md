@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.15.3-beta.4 - 2026-11-07
+
+On Duo, workspace titles and tabs, sidebar navigation, New workspace, History and Schedules use the available top edge while clearing system controls and rounded corners. Explorer fits the folded display, with its close button in the side bar when available. Narrow content uses compact controls below 550pt, and compact tabs and collapsed navigation show attention dots.
+
+Opening or closing the sidebar no longer triggers the transcript's system scroll-to-top gesture. Workspaces with existing agents retain their tabs during startup instead of briefly showing the New launcher.
+
+This beta also adds background-work controls, workspace archive undo and a worktree base-branch picker. It includes upstream fixes for chat scrolling, model selection and Windows terminal startup.
+
+### Added
+
+- Show and stop background work from Claude, Codex and OpenCode v2 ([#6220](https://github.com/getpaseo/paseo/pull/6220) by [@fxlelouarn](https://github.com/fxlelouarn))
+- Undo a workspace archive from its sidebar toast or Cmd/Ctrl+Z outside text inputs and terminals ([#8904](https://github.com/getpaseo/paseo/pull/8904))
+- Change a Paseo-owned worktree's base branch from Changes without switching its checkout ([#8642](https://github.com/getpaseo/paseo/pull/8642) by [@Myasuka](https://github.com/Myasuka))
+
+### Improved
+
+- Refresh visible sidebar usage summaries every five minutes ([#7806](https://github.com/getpaseo/paseo/pull/7806) by [@ragokan](https://github.com/ragokan))
+- Reduce chat-row updates caused by unrelated agent changes ([#8916](https://github.com/getpaseo/paseo/pull/8916))
+- Restore Mermaid source/diagram switching and limit tall inline previews on web and desktop ([#8932](https://github.com/getpaseo/paseo/pull/8932) by [@luoph](https://github.com/luoph))
+- Include HTTP response statuses in desktop browser logs ([#8956](https://github.com/getpaseo/paseo/pull/8956) by [@amustapha](https://github.com/amustapha))
+- Keep sidebar footer actions reachable through More actions at narrow widths ([#8885](https://github.com/getpaseo/paseo/pull/8885))
+
+### Fixed
+
+- Keep the selected workspace tab when returning and acknowledge attention on deliberate focus ([#8935](https://github.com/getpaseo/paseo/pull/8935))
+- Keep the provider's actual model when an ACP model selection is unavailable ([#8957](https://github.com/getpaseo/paseo/pull/8957))
+- Preserve the native model when importing OMP ACP sessions ([#8948](https://github.com/getpaseo/paseo/pull/8948))
+- Keep ACP session modes selectable after provider configuration updates ([#8912](https://github.com/getpaseo/paseo/pull/8912) by [@a-sh](https://github.com/a-sh))
+- Give agents their owning workspace identity when creating, importing and resuming sessions ([#8939](https://github.com/getpaseo/paseo/pull/8939) by [@DTTerastar](https://github.com/DTTerastar))
+- Show slash-command loading and retryable errors instead of defaulting a bare slash to Exit ([#8905](https://github.com/getpaseo/paseo/pull/8905))
+- Show branch-picker loading and fetch errors instead of premature empty results ([#8938](https://github.com/getpaseo/paseo/pull/8938))
+- Keep the chat still when the final reply and completed turn footer arrive ([#8944](https://github.com/getpaseo/paseo/pull/8944))
+- Preserve plugin-rendered final replies when collapsing turns ([#8811](https://github.com/getpaseo/paseo/pull/8811) by [@geoqiao](https://github.com/geoqiao))
+- Update surviving unloaded children immediately when archiving their parent detaches them ([#8903](https://github.com/getpaseo/paseo/pull/8903) by [@luoph](https://github.com/luoph))
+- Keep Android chat rows from overlapping after their tab updates while hidden ([#8911](https://github.com/getpaseo/paseo/pull/8911))
+- Keep the first prompt visible while a new Android agent starts ([#8898](https://github.com/getpaseo/paseo/pull/8898))
+- Keep uploaded terminal file paths as separate shell arguments ([#8946](https://github.com/getpaseo/paseo/pull/8946) by [@sebastianarena](https://github.com/sebastianarena))
+- Open and recover Windows terminals without launching PowerShell for worker identity checks ([#8818](https://github.com/getpaseo/paseo/pull/8818))
+
+### Notes
+
+- Terminal workers created by this version cannot be adopted by daemons through 0.15.1
+
 ## 0.15.3 - 2026-11-06
 
 ### Fixed

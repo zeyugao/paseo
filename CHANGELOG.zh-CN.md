@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.15.3-beta.4 - 2026-11-07
+
+Duo 上的工作区标题和标签页、侧栏导航、New workspace、History 和 Schedules 现在统一利用可用的顶部区域，同时避让系统控件和圆角。Explorer 适配折叠后的可用显示区域，并在有侧边系统栏时将关闭按钮放入其中。内容宽度低于 550pt 时使用紧凑控件，紧凑标签页和折叠导航会显示待处理提示圆点。
+
+打开或关闭侧栏不再触发聊天记录的系统滚动到顶部手势。已有 Agent 的工作区在启动时保留标签页，不再短暂显示 New 启动页。
+
+本次 beta 还新增后台任务控制、工作区归档撤销和 worktree 基准分支选择，并包含上游聊天滚动、模型选择与 Windows 终端启动修复。
+
+### 新增
+
+- 查看并停止 Claude、Codex 和 OpenCode v2 的后台任务 ([#6220](https://github.com/getpaseo/paseo/pull/6220)，贡献者：[@fxlelouarn](https://github.com/fxlelouarn))
+- 通过侧栏提示撤销工作区归档，或在文本输入框和终端之外使用 Cmd/Ctrl+Z 撤销 ([#8904](https://github.com/getpaseo/paseo/pull/8904))
+- 在 Changes 中修改 Paseo 管理的 worktree 的基准分支，无需切换检出分支 ([#8642](https://github.com/getpaseo/paseo/pull/8642)，贡献者：[@Myasuka](https://github.com/Myasuka))
+
+### 改进
+
+- 每五分钟刷新可见的侧栏用量摘要 ([#7806](https://github.com/getpaseo/paseo/pull/7806)，贡献者：[@ragokan](https://github.com/ragokan))
+- 减少无关 Agent 变化引起的聊天消息行更新 ([#8916](https://github.com/getpaseo/paseo/pull/8916))
+- 恢复网页和桌面端 Mermaid 源码与图表的切换，并限制过高的内嵌预览 ([#8932](https://github.com/getpaseo/paseo/pull/8932)，贡献者：[@luoph](https://github.com/luoph))
+- 在桌面浏览器日志中显示 HTTP 响应状态码 ([#8956](https://github.com/getpaseo/paseo/pull/8956)，贡献者：[@amustapha](https://github.com/amustapha))
+- 侧栏较窄时将放不下的底部操作收入 More actions，避免按钮被裁切 ([#8885](https://github.com/getpaseo/paseo/pull/8885))
+
+### 修复
+
+- 返回工作区时保留选中的标签页，并在主动聚焦时确认待处理提示 ([#8935](https://github.com/getpaseo/paseo/pull/8935))
+- ACP 模型选项不可用时保留提供商实际使用的模型 ([#8957](https://github.com/getpaseo/paseo/pull/8957))
+- 导入 OMP ACP 会话时保留原生模型 ([#8948](https://github.com/getpaseo/paseo/pull/8948))
+- 提供商配置更新后仍可选择 ACP 会话模式 ([#8912](https://github.com/getpaseo/paseo/pull/8912)，贡献者：[@a-sh](https://github.com/a-sh))
+- 创建、导入和恢复会话时向 Agent 提供其所属工作区的标识 ([#8939](https://github.com/getpaseo/paseo/pull/8939)，贡献者：[@DTTerastar](https://github.com/DTTerastar))
+- 在斜杠菜单中显示加载状态和可重试的错误，不再将单独的斜杠默认选中 Exit ([#8905](https://github.com/getpaseo/paseo/pull/8905))
+- 在分支选择器中显示加载状态和获取错误，不再提前显示空结果 ([#8938](https://github.com/getpaseo/paseo/pull/8938))
+- 最终回复和已完成轮次的页脚到达时保持聊天位置稳定 ([#8944](https://github.com/getpaseo/paseo/pull/8944))
+- 折叠聊天轮次时保留由插件渲染的最终回复 ([#8811](https://github.com/getpaseo/paseo/pull/8811)，贡献者：[@geoqiao](https://github.com/geoqiao))
+- 归档父 Agent 导致未加载但保留的子 Agent 脱离父级时，立即更新客户端状态 ([#8903](https://github.com/getpaseo/paseo/pull/8903)，贡献者：[@luoph](https://github.com/luoph))
+- 修复 Android 标签页在隐藏期间更新后聊天消息行重叠的问题 ([#8911](https://github.com/getpaseo/paseo/pull/8911))
+- Android 新 Agent 启动过程中保持首条提示可见 ([#8898](https://github.com/getpaseo/paseo/pull/8898))
+- 将上传到终端的文件路径保留为独立的 shell 参数 ([#8946](https://github.com/getpaseo/paseo/pull/8946)，贡献者：[@sebastianarena](https://github.com/sebastianarena))
+- Windows 打开和恢复终端时不再启动 PowerShell 查询 worker 进程标识 ([#8818](https://github.com/getpaseo/paseo/pull/8818))
+
+### 说明
+
+- 本版本创建的终端 worker 无法由 0.15.1 及更早的 daemon 接管
+
 ## 0.15.3 - 2026-11-06
 
 ### 修复

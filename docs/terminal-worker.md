@@ -38,10 +38,13 @@ The worker writes `$PASEO_HOME/daemons/{serverId}/terminal-worker/<pid>.json` (o
 
 Adoption, worker counts, pruning, daemon stop, supervisor exit and CLI cleanup all stay
 inside the selected instance namespace. Root-level legacy records are eligible only when
-the original home identity, current boot and local process/environment prove ownership.
-Machine-bound receipts retain proven legacy attribution for later cleanup. Ambiguous or
-foreign legacy workers are left untouched, including unclaimed legacy workers on Windows
-where their process environment cannot be inspected.
+the original home identity, current boot and local process environment identify the selected
+daemon, and socket authentication confirms that same live pid. Birth times bracket the
+environment read to reject pid reuse; legacy worker identity fields are ignored.
+Machine-bound receipts bind the proven record id, pid, boot, creation time and socket path
+for later cleanup even after the worker dies. Ambiguous or foreign legacy workers are left
+untouched, including unclaimed legacy workers on Windows where their process environment
+cannot be inspected.
 
 ## Protocol versions
 

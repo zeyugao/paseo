@@ -11,7 +11,7 @@ import {
   readTerminalWorkerServerId,
   type TerminalWorkerProcessInspector,
 } from "./terminal-worker-processes.js";
-import { classifyTerminalWorkerProcess } from "./terminal-worker-ownership.js";
+import { connectTerminalWorker } from "./terminal-worker-client.js";
 
 // Owner-only metadata used to find and authenticate workers in the locked home.
 
@@ -280,8 +280,10 @@ async function isLocallyOwnedLegacyWorker(
   record: TerminalWorkerRecord,
   context: LegacyWorkerOwnershipContext,
 ): Promise<boolean> {
+  // Birth times only guard the environment read against pid reuse. Legacy record identity
+  // fields are not evidence: the authenticated socket must name this same live process.
   const firstInspection = await context.inspector.inspect(record.pid);
-  if (classifyTerminalWorkerProcess(record, firstInspection).status !== "owned") return false;
+  if (firstInspection.status !== "alive" || !firstInspection.snapshot.startedAt) return false;
   let override: string | null;
   try {
     override = await readTerminalWorkerServerId(record.pid);
@@ -289,8 +291,25 @@ async function isLocallyOwnedLegacyWorker(
     return false; // No inspectable environment means ownership remains ambiguous.
   }
   if (override !== null && override !== context.serverId) return false;
-  const lastInspection = await context.inspector.inspect(record.pid);
-  return classifyTerminalWorkerProcess(record, lastInspection).status === "owned";
+  try {
+    const connection = await connectTerminalWorker({
+      socketPath: record.socketPath,
+      secret: record.secret,
+      timeoutMs: 1000,
+    });
+    try {
+      if (connection.workerPid !== record.pid) return false;
+      const lastInspection = await context.inspector.inspect(record.pid);
+      return (
+        lastInspection.status === "alive" &&
+        lastInspection.snapshot.startedAt === firstInspection.snapshot.startedAt
+      );
+    } finally {
+      connection.disconnect();
+    }
+  } catch {
+    return false; // An unreachable or unauthenticated socket cannot prove local ownership.
+  }
 }
 
 async function preserveLegacyWorkerOwnership(
@@ -302,7 +321,9 @@ async function preserveLegacyWorkerOwnership(
     machineId: context.machineId,
     recordId: record.recordId,
     pid: record.pid,
-    startedAt: record.identity.startedAt,
+    bootId: record.bootId,
+    createdAt: record.createdAt,
+    socketPath: record.socketPath,
   })}\n`;
   const recorded = await readRecordFile(ownershipPath).catch(() => null);
   if (recorded === proof) return ownershipPath;

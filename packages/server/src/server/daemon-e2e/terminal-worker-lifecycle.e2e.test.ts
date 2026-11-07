@@ -594,7 +594,7 @@ describe("terminals when the daemon stops", { timeout: 240_000 }, () => {
       recordId: "stale-record",
       pid: reused.pid!,
       socketPath: resolveTerminalWorkerSocketPath({
-        paseoHome: harness.home,
+        paseoHome: terminalWorkerHome(harness.home, SERVER_ID),
         workerPid: reused.pid!,
         recordId: "stale-record",
       }),
@@ -621,7 +621,7 @@ describe("terminals when the daemon stops", { timeout: 240_000 }, () => {
       recordId: "stale-record",
       pid: reused.pid!,
       socketPath: resolveTerminalWorkerSocketPath({
-        paseoHome: harness.home,
+        paseoHome: terminalWorkerHome(harness.home, SERVER_ID),
         workerPid: reused.pid!,
         recordId: "stale-record",
       }),

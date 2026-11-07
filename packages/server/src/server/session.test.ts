@@ -6405,6 +6405,187 @@ test("a failing direct source observes fire-and-forget file replies without unha
   }
 });
 
+describe("provider subagent timeline delivery", () => {
+  const request = (requestId: string): SessionInboundMessage => ({
+    type: "agent.provider_subagents.timeline.get.request",
+    requestId,
+    parentAgentId: "parent-agent",
+    subagentId: "child-agent",
+  });
+  const row = {
+    item: { type: "assistant_message" as const, text: "Subagent result" },
+    timestamp: "2026-10-06T10:00:00.000Z",
+    seqStart: 1,
+    seqEnd: 2,
+    sourceSeqRanges: [{ startSeq: 1, endSeq: 2 }],
+  };
+  const timeline = {
+    epoch: "child-epoch",
+    startSeq: 1,
+    endSeq: 2,
+    reset: false,
+    staleCursor: false,
+    gap: false,
+    window: { minSeq: 1, maxSeq: 2, nextSeq: 3 },
+    hasOlder: true,
+    hasNewer: false,
+    rows: [row],
+  };
+  const manager = () => ({
+    waitForAgentClose: vi.fn().mockResolvedValue(undefined),
+    getAgent: vi.fn(() => ({ id: "parent-agent" })),
+    getProviderSubagent: vi.fn((): { provider: string } | undefined => ({ provider: "claude" })),
+    fetchProviderSubagentTimeline: vi.fn(() => timeline),
+  });
+
+  test("delivers projected responses to their source and waits for send acknowledgement before loading another page", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const sent: Array<{ source: object; message: SessionOutboundMessage }> = [];
+    const firstSent = deferred<void>();
+    const acknowledgement = deferred<void>();
+    const agentManager = manager();
+    const firstSource = {};
+    const otherSource = {};
+    const session = createSessionForTest({
+      messages,
+      agentManager,
+      sendToSource: (source, message) => {
+        sent.push({ source, message });
+        if (sent.length === 1) {
+          firstSent.resolve();
+          return acknowledgement.promise;
+        }
+      },
+    });
+    for (const source of [firstSource, otherSource]) {
+      session.updateClientCapabilities({ [CLIENT_CAPS.projectedSubagentTimeline]: true }, source);
+    }
+    const first = session.handleMessage(request("first-page"), firstSource);
+    await firstSent.promise;
+    const queued = session.handleMessage(request("queued-page"), firstSource);
+    try {
+      await session.handleMessage(request("other-page"), otherSource);
+      expect(agentManager.fetchProviderSubagentTimeline).toHaveBeenCalledTimes(2);
+      expect(sent).toEqual([
+        {
+          source: firstSource,
+          message: expect.objectContaining({
+            type: "agent.provider_subagents.timeline.get.response",
+            payload: expect.objectContaining({
+              requestId: "first-page",
+              parentAgentId: "parent-agent",
+              subagentId: "child-agent",
+              provider: "claude",
+              direction: "tail",
+              projection: "projected",
+              startCursor: { epoch: "child-epoch", seq: 1 },
+              endCursor: { epoch: "child-epoch", seq: 2 },
+              hasOlder: true,
+              rows: [{ ...row, seq: 2 }],
+              error: null,
+            }),
+          }),
+        },
+        { source: otherSource, message: expect.any(Object) },
+      ]);
+      expect(messages).toEqual([]);
+    } finally {
+      acknowledgement.resolve();
+      await Promise.all([first, queued]);
+      await session.cleanup();
+    }
+    expect(agentManager.fetchProviderSubagentTimeline).toHaveBeenCalledTimes(3);
+    expect(sent[2]).toMatchObject({
+      source: firstSource,
+      message: { payload: { requestId: "queued-page" } },
+    });
+  });
+
+  test("cancels loading and queued subagent pages when their source disconnects", async () => {
+    const loading = deferred<void>();
+    const storageRead = deferred<undefined>();
+    const get = vi.fn(() => {
+      loading.resolve();
+      return storageRead.promise;
+    });
+    const agentManager = manager();
+    const sendToSource = vi.fn();
+    const session = createSessionForTest({ agentManager, agentStorage: { get }, sendToSource });
+    const source = {};
+    const first = session.handleMessage(request("loading-page"), source);
+    await loading.promise;
+    const queued = session.handleMessage(request("canceled-page"), source);
+    await session.delivery.detach(source);
+    storageRead.resolve(undefined);
+    await Promise.all([first, queued]);
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(agentManager.fetchProviderSubagentTimeline).not.toHaveBeenCalled();
+    expect(sendToSource).not.toHaveBeenCalled();
+    await session.cleanup();
+  });
+
+  test.each([
+    { failure: "archived parent", error: "Agent is archived: parent-agent" },
+    { failure: "missing subagent", error: "Provider subagent not found" },
+    { failure: "provider failure", error: "Provider history unavailable" },
+  ])("delivers the typed error response for a $failure", async ({ failure, error }) => {
+    const agentManager = manager();
+    if (failure === "missing subagent") {
+      agentManager.getProviderSubagent.mockReturnValueOnce(undefined);
+    }
+    if (failure === "provider failure") {
+      agentManager.fetchProviderSubagentTimeline.mockImplementationOnce(() => {
+        throw new Error("Provider history unavailable");
+      });
+    }
+    const messages: SessionOutboundMessage[] = [];
+    const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];
+    const session = createSessionForTest({
+      messages,
+      targetedMessages,
+      agentManager,
+      agentStorage: {
+        get: vi
+          .fn()
+          .mockResolvedValue(
+            failure === "archived parent" ? { archivedAt: "2026-10-06T10:00:00.000Z" } : undefined,
+          ),
+      },
+    });
+    const source = {};
+    await session.handleMessage(request("failed-page"), source);
+    expect(messages).toEqual([]);
+    expect(targetedMessages).toEqual([
+      {
+        source,
+        message: {
+          type: "agent.provider_subagents.timeline.get.response",
+          payload: {
+            requestId: "failed-page",
+            parentAgentId: "parent-agent",
+            subagentId: "child-agent",
+            provider: null,
+            direction: "tail",
+            epoch: "",
+            reset: false,
+            staleCursor: false,
+            gap: false,
+            window: { minSeq: 0, maxSeq: 0, nextSeq: 0 },
+            hasOlder: false,
+            hasNewer: false,
+            rows: [],
+            error,
+          },
+        },
+      },
+    ]);
+    if (failure !== "provider failure") {
+      expect(agentManager.fetchProviderSubagentTimeline).not.toHaveBeenCalled();
+    }
+    await session.cleanup();
+  });
+});
+
 test("answers an agent background work list request", async () => {
   const messages: SessionOutboundMessage[] = [];
   const session = createSessionForTest({

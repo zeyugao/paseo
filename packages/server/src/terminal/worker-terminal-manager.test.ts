@@ -428,6 +428,7 @@ it.skipIf(isPlatform("win32")).each([
         else process.env.PASEO_SERVER_ID = previousServerId;
       }
     })();
+    expect(launched.record.identity).toBeUndefined();
     const legacy = createWorkerTerminalManager({
       worker: await connectTerminalWorker({
         socketPath: launched.record.socketPath,
@@ -452,6 +453,27 @@ it.skipIf(isPlatform("win32")).each([
       expect(foreign.getTerminal(terminal.id)).toBeUndefined();
       await foreign.closeTerminals();
       expect(existsSync(launched.recordPath)).toBe(true);
+      if (adopts) {
+        const record = await readTerminalWorkerRecord(launched.recordPath);
+        const stateHome = terminalWorkerHome(paseoHome, "srv_legacy");
+        // Even a live pid with the right environment is ambiguous without its socket secret.
+        writeTerminalWorkerRecord(paseoHome, { ...record, secret: "not-the-worker-secret" });
+        try {
+          expect(await listTerminalWorkerRecords(stateHome)).toEqual([]);
+          expect(await reapTerminalWorkers({ paseoHome: stateHome, gracefulMs: 0 })).toMatchObject({
+            signaled: [],
+          });
+          expect(existsSync(launched.recordPath)).toBe(true);
+          expect(isProcessAlive(record.pid)).toBe(true);
+          expect(
+            existsSync(
+              join(terminalWorkerDirectory(stateHome), `legacy-owner-${record.recordId}.json`),
+            ),
+          ).toBe(false);
+        } finally {
+          writeTerminalWorkerRecord(paseoHome, record);
+        }
+      }
       manager = await startRealWorkerManager({ paseoHome, serverId: "srv_legacy" });
       expect(manager.getTerminal(terminal.id) !== undefined).toBe(adopts);
       if (adopts) {
@@ -3042,7 +3064,7 @@ it("closes terminals and their worker through authenticated shutdown", async () 
 
   // The worker closed its terminals before it answered; it stops listening as it exits.
   expect(isProcessAlive(programPid)).toBe(false);
-  expect(await listTerminalWorkerRecords(paseoHome)).toEqual([]);
+  expect(await listTerminalWorkerRecords(terminalWorkerHome(paseoHome, "srv_test"))).toEqual([]);
   await waitForCondition(() => !isProcessAlive(record!.pid), 5000);
 }, 30000);
 
@@ -3059,11 +3081,14 @@ it("force closes a worker from cleanup without a grace period", async () => {
   const programPid = record!.terminals[0]!.pid;
   await previous.detach();
 
-  const result = await reapTerminalWorkers({ paseoHome, gracefulMs: 0 });
+  const result = await reapTerminalWorkers({
+    paseoHome: terminalWorkerHome(paseoHome, "srv_test"),
+    gracefulMs: 0,
+  });
 
   expect(result.signaled).toContain(record!.pid);
   expect(isProcessAlive(programPid)).toBe(false);
-  expect(await listTerminalWorkerRecords(paseoHome)).toEqual([]);
+  expect(await listTerminalWorkerRecords(terminalWorkerHome(paseoHome, "srv_test"))).toEqual([]);
   await waitForCondition(() => !isProcessAlive(record!.pid), 5000);
 }, 30000);
 
@@ -3078,7 +3103,7 @@ it("launches past stale records without signaling an unrelated live pid", async 
   });
   try {
     for (const pid of [exited.pid!, reused.pid!]) {
-      writeTerminalWorkerRecord(paseoHome, {
+      writeTerminalWorkerRecord(terminalWorkerHome(paseoHome, "srv_test"), {
         recordId: `dead-worker-${pid}`,
         pid,
         bootId: currentBootId(),

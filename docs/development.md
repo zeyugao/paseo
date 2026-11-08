@@ -94,28 +94,163 @@ Worktree setup best-effort seeds the generated iOS project and newest native bui
 
 Starting the service must not create, focus, reveal, or leave behind macOS Simulator.app windows — a guard hides Simulator.app every 250ms, so the native window vanishes if you focus it. The user-visible surface is the interactive `/.sim` preview: a `serve-sim` stream (60 FPS MJPEG + a WebSocket control channel) that Metro mounts at `basePath: "/.sim"` (`packages/app/metro.config.cjs`) and that forwards taps and gestures, so first-launch prompts like "Open in PaseoDebug?" are answered there, not in the native window. Open the `${PASEO_URL}/.sim` link the service prints — not `serve-sim`'s raw stream port (`:3100`), which is view-only. Because the stream sits behind the daemon proxy it is convenient for remote viewing but laggy up close; for fast local dev at the Mac, use the native simulator path below.
 
-**Troubleshooting.** If `xcrun simctl` fails with `unable to find utility "simctl"`, the active developer directory is still the Command Line Tools even though Xcode is installed. Point it at Xcode: `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`, then confirm with `xcrun --find simctl`.
+**Troubleshooting.** If `xcrun simctl` fails with `unable to find utility "simctl"`, select the installed full Xcode for that terminal with `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` (adjust the path to your installation), then confirm with `xcodebuild -version` and `xcrun --find simctl`. Do not change the global Xcode selection to repair one development session.
 
 ### Running the iOS app on a local simulator
 
-For fast, native, interactive iOS dev at the Mac — as opposed to the remote `/.sim` preview above — skip the service and build the dev client directly:
+Use the native Device Hub window for local development, including iPhone Duo. Do not start the `ios-simulator` preview service for this workflow: its window-hiding guard is intended for the remote `/.sim` preview above.
+
+The sequence below was exercised on iPhone Duo / iOS 27.2 with Xcode 27.2 (`27B52`), Expo SDK 57, React Native 0.86.3, and `agent-device` 0.21.31. Discover the current simulator and toolchain rather than reusing a saved UDID or an old Xcode RC path.
+
+#### 1. Bind the environment and simulator
+
+Start in the repository root. Run this environment setup in **each terminal** used below:
 
 ```bash
-npm run ios        # → expo run:ios (packages/app): builds and launches the app in the real Simulator.app
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+export PASEO_HOME="$PWD/.dev/paseo-home"
+unset CI
 ```
 
-`expo run:ios` starts its own Metro and gives you the normal Simulator.app window (full speed, native touch, no stream).
-
-**Pointing the app at a daemon.** The client resolves its local daemon from `EXPO_PUBLIC_LOCAL_DAEMON` (`packages/app/src/runtime/host-runtime.ts`); when unset it falls back to `localhost:6767`, the production `~/.paseo` daemon. To target a worktree's dev daemon instead, set it on the build command:
+Adjust `DEVELOPER_DIR` to the installed full Xcode. `xcode-select -p` shows the global selection; an inherited `DEVELOPER_DIR` can override it with a stale path. Check the effective toolchain:
 
 ```bash
-EXPO_PUBLIC_LOCAL_DAEMON=localhost:${PASEO_SERVICE_DAEMON_PORT} npm run ios   # worktree daemon running as a Paseo service
-EXPO_PUBLIC_LOCAL_DAEMON=localhost:6768 npm run ios                          # standalone `npm run dev:server`
+xcode-select -p
+xcodebuild -version
+xcrun simctl list devices booted
+command -v agent-device
+agent-device --version
+lsof -nP -iTCP:8081 -iTCP:6768 -sTCP:LISTEN
 ```
 
-The iOS simulator shares the Mac's loopback, so `localhost:<port>` reaches the host daemon directly.
+Open Device Hub from Xcode and select the Duo **simulator**, not a paired physical iPhone. If Duo is not booted, find it with `xcrun simctl list devices available` and boot that device in Device Hub. Match the runtime and UDID; device names alone are not unique. In the build/automation terminal, set:
 
-**Gotcha — `EXPO_PUBLIC_*` is inlined into the JS bundle at Metro bundle time, not read at runtime.** Set it in the same shell that starts Metro. If the app still connects to the old daemon, Metro served a cached bundle; re-bundle clean with `cd packages/app && EXPO_PUBLIC_LOCAL_DAEMON=… npx expo start -c` and reload the app.
+```bash
+export UDID='<Duo simulator UDID from simctl>'
+```
+
+If `8081` or `6768` already has a listener, identify its checkout and environment before reusing it. Do not kill a shared Metro or daemon to free the port. These ports are for the root checkout; managed worktrees use their assigned service ports instead (see [Daemon endpoints](#daemon-endpoints)).
+
+#### 2. Start the isolated daemon and Metro
+
+In terminal A, after the environment setup:
+
+```bash
+npm run dev:server
+```
+
+Wait for `Server listening on http://127.0.0.1:6768`. The startup banner must show this checkout's `.dev/paseo-home`, not `~/.paseo`. The initial dependency build can outlast a service supervisor's readiness deadline; inspect the existing process before starting another one. `PASEO_SKIP_DEV_SERVER_BUILD=1` is only for dependencies already built successfully from the current checkout.
+
+In terminal B, after the same environment setup:
+
+```bash
+npm run dev:app
+```
+
+This launcher sets `APP_VARIANT=development`, the branch label, and `EXPO_PUBLIC_LOCAL_DAEMON=localhost:6768`. Verify Metro is serving:
+
+```bash
+curl -fsS http://localhost:8081/status
+```
+
+Expected response: `packager-status:running`. Keep both terminals running, or use persistent supervised processes. A short-lived shell/background job is not a replacement for a long-lived development service.
+
+#### 3. Build and launch on Duo
+
+In terminal C, after the environment setup and `UDID` selection:
+
+```bash
+npm run dev:ios --workspace=@getpaseo/app -- --device "$UDID" --no-bundler
+```
+
+This builds the development client and installs it without clearing its data. Wait for **Build Succeeded**, installation on the selected Duo, and the app's actual screen. The native build may install CocoaPods dependencies before compiling.
+
+**Do not combine `--no-bundler` with `--port`.** Expo rejects that combination, potentially after completing pod installation. Metro's port belongs to terminal B. Omitting `--no-bundler` also lets Expo manage a bundler; do not accidentally start a second one.
+
+The development app ID is `sh.paseo.debug`. If the installed client remains on its launcher instead of loading the project, open the development URL on the selected simulator:
+
+```bash
+xcrun simctl openurl "$UDID" \
+  'exp+overkite://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8081'
+```
+
+The simulator shares the Mac's loopback. Use the matching Metro port if it is not `8081`; do not copy a previous machine's LAN IP.
+
+JavaScript changes use Fast Refresh. Native modules, dependency patches affecting native code, entitlements, and plist changes require a new binary. Keep the development variant for this workflow. Production identity and clean prebuild requirements belong in [iOS release identity](release.md#ios--overkite-internal-testflight); do not run `prebuild --clean` over native edits as a troubleshooting step.
+
+#### 4. Open DevTools and prove the connection
+
+Read Metro's current targets:
+
+```bash
+curl -fsS http://localhost:8081/json/list
+```
+
+Choose the entry whose `appId` is `sh.paseo.debug` and `deviceName` is `iPhone Duo`. Copy its **current** `id`, then launch the supported DevTools frontend:
+
+```bash
+export TARGET_ID='<id from the matching /json/list entry>'
+curl -fsS -X POST "http://localhost:8081/open-debugger?target=$TARGET_ID"
+```
+
+The resulting React Native DevTools window should name the Duo app. In **Console**, evaluate:
+
+```javascript
+JSON.stringify({ hermes: typeof HermesInternal !== "undefined", dev: __DEV__ });
+```
+
+Expected result: `'{"hermes":true,"dev":true}'`. A listed target or successful WebSocket handshake alone does not prove runtime evaluation works. This console evaluation, the app screen, and a successful reload were all verified in the Duo bring-up.
+
+Metro's `j` shortcut depends on an interactive terminal; it did not launch DevTools in the supervised terminal used for this bring-up. Use the POST endpoint above when the shortcut does nothing. `GET /_expo/debugger?appId=sh.paseo.debug` returns target metadata; that response is not proof that a frontend opened.
+
+Prefer the supported frontend to an ad hoc CDP client. Metro rejects debugger WebSockets without an allowed `Origin` (HTTP 401); do not disable that check. The `agent-device cdp` helper failed to select this runtime, and direct CDP requests timed out during bring-up, while the official frontend successfully evaluated JavaScript.
+
+#### 5. Inspect and reload with agent-device
+
+Inspect existing automation sessions before opening another:
+
+```bash
+agent-device session list
+```
+
+Choose a session name you own. If the selected Duo is already held by a session, coordinate with its owner instead of force-closing it. A reused session in this bring-up needed an explicit current `DEVELOPER_DIR` because its previous toolchain referenced a removed Xcode RC installation.
+
+```bash
+export SESSION='<your Duo automation session name>'
+agent-device open sh.paseo.debug --session "$SESSION" \
+  --platform ios --udid "$UDID" --foreground --metro-port 8081
+agent-device snapshot -i --session "$SESSION"
+mkdir -p .dev
+agent-device screenshot .dev/duo-ios-ready.png --session "$SESSION"
+```
+
+`open` without `--relaunch` reuses the running app. Inspect the screenshot, not only the command's exit status. The Expo floating gear may be an image rather than an actionable accessibility node: use coordinates from a fresh **device screenshot** to open it. Confirm **Fast refresh** is enabled. Close the menu with **Close**, not **Reload**.
+
+To exercise a reload deliberately:
+
+```bash
+agent-device metro reload --session "$SESSION" \
+  --metro-host 127.0.0.1 --metro-port 8081
+agent-device snapshot -i --session "$SESSION"
+```
+
+Verify the app settles, Metro serves the bundle, and DevTools still evaluates the expression above. After restarting your own Metro, reload the app to reconnect its development transport; an old `Disconnected from Metro` console entry alone does not describe the new connection.
+
+#### Bring-up pitfalls
+
+| Symptom                                                             | Action                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Daemon startup says another daemon owns the instance                | Check the banner's home. An inherited `PASEO_HOME=~/.paseo` bypasses the checkout default even when the new process listens on `6768`. Use the explicit checkout home above. Never restart the production daemon on `6767` to repair this.                                                                                                                                                                                            |
+| Metro says `CI mode, reloads are disabled`                          | Unset `CI` **before** starting Metro. A working bundle download does not prove watch mode is enabled. Replace only your own incorrectly configured Metro.                                                                                                                                                                                                                                                                             |
+| App uses the wrong local daemon                                     | `EXPO_PUBLIC_*` is inlined when Metro bundles JavaScript. Setting it only on a native build or app launch cannot reconfigure an already-running Metro. Start your own Metro with the intended endpoint; if its bundle remains stale, restart that instance with `EXPO_PUBLIC_LOCAL_DAEMON=localhost:6768 npm run start:expo --workspace=@getpaseo/app -- --port 8081 --clear` and reload. `dev:app` does not forward extra CLI flags. |
+| Existing hosts still appear after changing the endpoint             | Installed app data survives a build/install. Saved hosts and remembered workspaces are separate from the bundled local-daemon setting. Check **Hosts** and the actual endpoint; do not clear app data to force a clean-looking screen.                                                                                                                                                                                                |
+| `Workspace unavailable` after launch or reload                      | This occurred with a remembered workspace during bring-up. **Back** reached the home screen. It is not proof of a failed native build or Metro connection; the stale selection may return on reload.                                                                                                                                                                                                                                  |
+| Notification keychain or `aps-environment` errors                   | The previously installed client emitted these errors before the new native build. Recheck on the current binary; notification entitlement setup is separate from proving JS development/debugging works. Push delivery was not validated by this bring-up.                                                                                                                                                                            |
+| Warning toast intercepts a tap on an underlying button              | Read the error first. During bring-up, `dismiss-overlay` left a toast and semantic taps hit the overlay instead of **Hosts**. Inspect a fresh screenshot and close the visible toast; do not repeat the underlying tap blindly or suppress the warning in code.                                                                                                                                                                       |
+| Require-cycle warnings or a build-phase dependency warning          | Both were observed with a successful build and working Console evaluation. Record them separately; neither a warning nor its dismissal establishes whether the app works.                                                                                                                                                                                                                                                             |
+| Screenshot is black or taps land incorrectly after folding/rotation | Duo has inner and outer displays. Recheck the active panel and viewport. Device screenshot points and Device Hub window coordinates are different; folding, rotation, zoom, and resizing invalidate old coordinates and refs.                                                                                                                                                                                                         |
+
+Stop only processes, recordings, and automation sessions you started. Leave borrowed sessions, shared services, and the user's simulator state intact. A supervised process needs its host's persistent-service mode if it must survive the launching task; this does not make it a login-started service.
 
 ### Desktop renderer profiling
 

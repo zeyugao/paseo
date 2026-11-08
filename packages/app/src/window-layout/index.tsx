@@ -1,6 +1,10 @@
 import type { ReactNode } from "react";
 
-export { useWindowLayout } from "./context";
+export {
+  useWindowLayout,
+  useWindowLayoutHasTopChrome,
+  useWindowLayoutStatusBarHidden,
+} from "./context";
 export { WindowLayoutActions, WindowLayoutActionsHost } from "./actions";
 export { WindowLayoutSurface, WindowLayoutDivisionGap } from "./surface";
 export {
@@ -12,4 +16,8 @@ export type { DesktopDivisionLayout, WindowLayout, WindowLayoutRect } from "./mo
 
 export function WindowLayoutProvider({ children }: { children: ReactNode }) {
   return children;
+}
+
+export function WindowLayoutStatusBar(_props: { hidden: boolean }) {
+  return null;
 }

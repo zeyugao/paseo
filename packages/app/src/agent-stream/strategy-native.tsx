@@ -28,7 +28,11 @@ import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import type { StreamItem } from "@/types/stream";
 import type { Theme } from "@/styles/theme";
 import { useStableEvent } from "@/hooks/use-stable-event";
-import { useWindowLayout } from "@/window-layout";
+import {
+  useWindowLayout,
+  useWindowLayoutHasTopChrome,
+  useWindowLayoutStatusBarHidden,
+} from "@/window-layout";
 import { shouldAnimateNativeScrollToBottom } from "./native-scroll-animation";
 import { useRevisedHistoryRows } from "./history-row-revision";
 import { useBottomAnchorController } from "./bottom-anchor-controller";
@@ -138,8 +142,10 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
   } = props;
   const { renderHistoryMountedRow, renderLiveHeadRow, renderLiveAuxiliary } = renderers;
   const windowLayout = useWindowLayout();
-  // With controls at the top edge, their taps also reach UIKit's status-bar scroll gesture.
-  const hasTopEdgeControls = windowLayout?.topChrome != null || windowLayout?.verticalBar != null;
+  const statusBarHidden = useWindowLayoutStatusBarHidden();
+  const hasTopChrome = useWindowLayoutHasTopChrome();
+  // Hiding the status bar removes its inset, not UIKit's top-edge tap gesture.
+  const hasTopEdgeControls = statusBarHidden || hasTopChrome || windowLayout?.verticalBar != null;
   const listRef = useRef<LegendListRef>(null);
   // LegendList places the rows once, behind a hidden reveal, when the list mounts.
   const [isListPlaced, setIsListPlaced] = useState(false);

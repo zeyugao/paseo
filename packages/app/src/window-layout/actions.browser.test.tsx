@@ -24,6 +24,8 @@ const headerAction = <Text testID="header-action">Action</Text>;
 it("reclaims the page header top band and restores safe-area clearance when it disappears", async () => {
   const topBand: WindowLayout = {
     ...geometry,
+    verticalBarEdge: "none",
+    verticalBar: null,
     topChrome: { x: 6, y: 0, width: window.innerWidth - 150, height: 44 },
   };
   async function renderHeader(layout: WindowLayout | null) {
@@ -46,6 +48,15 @@ it("reclaims the page header top band and restores safe-area clearance when it d
   await renderHeader(topBand);
   expect(header().getBoundingClientRect().height).toBe(normalHeight - headerInsets.top);
   const action = container.querySelector('[data-testid="header-action"]') as HTMLElement;
+  expect(action.getBoundingClientRect().right).toBeLessThanOrEqual(
+    container.getBoundingClientRect().left + window.innerWidth - 144,
+  );
+  await renderHeader({
+    ...topBand,
+    bounds: { ...topBand.bounds, width: window.innerWidth - 100 },
+    topChrome: { x: 6, y: 0, width: window.innerWidth - 250, height: 44 },
+  });
+  expect(header().getBoundingClientRect().height).toBe(normalHeight - headerInsets.top);
   expect(action.getBoundingClientRect().right).toBeLessThanOrEqual(
     container.getBoundingClientRect().left + window.innerWidth - 144,
   );

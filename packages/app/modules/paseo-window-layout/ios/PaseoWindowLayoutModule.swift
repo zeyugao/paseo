@@ -1,6 +1,41 @@
 import ExpoModulesCore
 import UIKit
 
+public final class PaseoWindowLayoutReactDelegateHandler: ExpoReactDelegateHandler {
+  public override func createRootViewController() -> UIViewController? {
+    WindowLayoutRootViewController()
+  }
+}
+
+// Status-bar visibility belongs to this scene, including Expo's dev-client
+// container above the navigator. The probe updates this root without a global window lookup.
+private final class WindowLayoutRootViewController: UIViewController {
+  var statusBarHidden = false {
+    didSet {
+      guard statusBarHidden != oldValue else { return }
+      UIView.animate(
+        withDuration: statusBarHidden && !UIAccessibility.isReduceMotionEnabled ? 0.28 : 0,
+        delay: 0,
+        options: [.beginFromCurrentState, .curveEaseInOut]
+      ) {
+        // Transparent development overlays have separate roots but share this scene's policy.
+        if let window = self.viewIfLoaded?.window, let scene = window.windowScene {
+          for overlay in scene.windows where overlay !== window && !overlay.isHidden {
+            overlay.rootViewController?.setNeedsStatusBarAppearanceUpdate()
+          }
+        }
+        self.setNeedsStatusBarAppearanceUpdate()
+      }
+    }
+  }
+  override var prefersStatusBarHidden: Bool { statusBarHidden }
+  override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
+    statusBarHidden && !UIAccessibility.isReduceMotionEnabled ? .slide : .none
+  }
+  override var childForStatusBarHidden: UIViewController? { nil }
+  override var childForStatusBarStyle: UIViewController? { children.last }
+}
+
 public final class PaseoWindowLayoutModule: Module {
   public func definition() -> ModuleDefinition {
     Name("PaseoWindowLayout")
@@ -9,8 +44,21 @@ public final class PaseoWindowLayoutModule: Module {
       Prop("topChromeRowHeight", 0.0) { (view: WindowLayoutView, height: Double) in
         view.topChromeRowHeight = CGFloat(height)
       }
+      Prop("statusBarHidden", false) { (view: WindowLayoutView, hidden: Bool) in
+        view.statusBarHidden = hidden
+      }
     }
   }
+}
+
+private struct TopChromeReservation {
+  let scene: ObjectIdentifier
+  let screen: ObjectIdentifier
+  let nativeBounds: CGRect
+  let direction: UIUserInterfaceLayoutDirection
+  let rowHeight: CGFloat
+  let left: CGFloat
+  let right: CGFloat
 }
 
 final class WindowLayoutView: ExpoView {
@@ -18,10 +66,14 @@ final class WindowLayoutView: ExpoView {
   var topChromeRowHeight: CGFloat = 0 {
     didSet { setNeedsLayout(); scheduleUpdate() }
   }
+  var statusBarHidden = false {
+    didSet { updateStatusBarPreference() }
+  }
   private let topChromeBand = TopChromeBandView()
   private var occlusions: [CGRect] = []
   private var updateScheduled = false
   private var previousPayload: [String: Any]?
+  private var topChromeReservation: TopChromeReservation?
   private var divisions: [CGRect] = []
   private var barGuide: UILayoutGuide?
   private var barEdge = "none"
@@ -46,10 +98,16 @@ final class WindowLayoutView: ExpoView {
 
   override func didMoveToWindow() {
     super.didMoveToWindow()
+    updateStatusBarPreference()
     previousPayload = nil
     bottomBarGuide = nil
     setNeedsUpdateConstraints()
     scheduleUpdate()
+  }
+
+  private func updateStatusBarPreference() {
+    guard let root = window?.rootViewController as? WindowLayoutRootViewController else { return }
+    root.statusBarHidden = statusBarHidden
   }
 
   override func safeAreaInsetsDidChange() {
@@ -135,7 +193,30 @@ final class WindowLayoutView: ExpoView {
   }
 
   private func topChromeFrame() -> CGRect? {
-    guard topChromeRowHeight > 0, safeAreaInsets.top >= topChromeRowHeight else { return nil }
+    guard topChromeRowHeight > 0, barEdge == "none",
+          let scene = window?.windowScene else {
+      topChromeReservation = nil
+      return nil
+    }
+    let screen = scene.screen
+    let direction = effectiveUserInterfaceLayoutDirection
+    if let reservation = topChromeReservation,
+       reservation.scene != ObjectIdentifier(scene) ||
+       reservation.screen != ObjectIdentifier(screen) ||
+       reservation.nativeBounds != screen.nativeBounds ||
+       reservation.direction != direction ||
+       reservation.rowHeight != topChromeRowHeight {
+      topChromeReservation = nil
+    }
+    let statusBar = scene.statusBarManager
+    let statusFrame = statusBar?.statusBarFrame ?? .zero
+    let fullWidthBarHeight = statusFrame.width >= bounds.width ? statusFrame.height : 0
+    let availableTopHeight = safeAreaInsets.top - fullWidthBarHeight
+    if statusBar?.isStatusBarHidden == false && safeAreaInsets.top > 0 &&
+       availableTopHeight < topChromeRowHeight {
+      topChromeReservation = nil
+      return nil
+    }
     let band = CGRect(
       x: bounds.minX, y: bounds.minY,
       width: bounds.width, height: topChromeRowHeight
@@ -143,22 +224,43 @@ final class WindowLayoutView: ExpoView {
     topChromeBand.frame = band
     topChromeBand.setNeedsLayout()
     let overlapping = occlusions.filter { $0.maxY > band.minY && $0.minY < band.maxY }
-    // Reuse a top band only when the system leaves a contiguous edge-aligned span.
-    // A central sensor housing or a full-width status bar keeps normal safe areas.
-    guard !overlapping.isEmpty,
-          overlapping.allSatisfy({
-            ($0.minX <= bounds.minX && $0.maxX < bounds.maxX) ||
-            ($0.maxX >= bounds.maxX && $0.minX > bounds.minX)
-          }) else { return nil }
-    topChromeBand.layoutIfNeeded()
-    var left = bounds.minX + topChromeBand.horizontalInsets.left
-    var right = bounds.maxX - topChromeBand.horizontalInsets.right
-    for frame in overlapping {
-      if frame.minX <= bounds.minX { left = max(left, frame.maxX) }
-      if frame.maxX >= bounds.maxX { right = min(right, frame.minX) }
+    if !overlapping.isEmpty {
+      let atLeft = overlapping.allSatisfy {
+        $0.minX <= bounds.minX && $0.maxX < bounds.maxX
+      }
+      let atRight = overlapping.allSatisfy {
+        $0.maxX >= bounds.maxX && $0.minX > bounds.minX
+      }
+      // A full-width bar, a central housing, or controls on both edges cannot share this row.
+      guard atLeft || atRight else {
+        topChromeReservation = nil
+        return nil
+      }
+      if statusBar?.isStatusBarHidden == false && availableTopHeight >= topChromeRowHeight {
+        var left: CGFloat = 0
+        var right: CGFloat = 0
+        for frame in overlapping {
+          if atLeft { left = max(left, frame.maxX - bounds.minX) }
+          if atRight { right = max(right, bounds.maxX - frame.minX) }
+        }
+        topChromeReservation = TopChromeReservation(
+          scene: ObjectIdentifier(scene), screen: ObjectIdentifier(screen),
+          nativeBounds: screen.nativeBounds, direction: direction,
+          rowHeight: topChromeRowHeight, left: left, right: right
+        )
+      }
     }
-    guard right > left else { return nil }
-    return CGRect(x: left, y: band.minY, width: right - left, height: topChromeRowHeight)
+    guard let reservation = topChromeReservation else { return nil }
+    // Only the system control's edge extent survives hiding. Re-measure corner clearance
+    // and rebuild the row in the current bounds, never re-use an old absolute frame.
+    topChromeBand.layoutIfNeeded()
+    let left = max(topChromeBand.horizontalInsets.left, reservation.left)
+    let right = max(topChromeBand.horizontalInsets.right, reservation.right)
+    guard bounds.width > left + right else { return nil }
+    return CGRect(
+      x: bounds.minX + left, y: band.minY,
+      width: bounds.width - left - right, height: topChromeRowHeight
+    )
   }
 
   private func rect(_ frame: CGRect) -> [String: CGFloat] {

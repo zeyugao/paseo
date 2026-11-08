@@ -15,6 +15,7 @@ export interface WindowLayout {
    */
   bottomClearance?: number | null;
   divisions: WindowLayoutRect[];
+  /** Usable first row beside one corner occlusion; retained while the status bar is hidden. */
   topChrome?: WindowLayoutRect | null;
 }
 
@@ -24,7 +25,7 @@ export function resolveWorkspaceTopChromeInsets(
   edges: { left: boolean; right: boolean },
 ) {
   const bar = layout?.topChrome;
-  if (!layout || !bar || bar.y + bar.height > insets.top) return null;
+  if (!layout || !bar) return null;
   return {
     paddingTop: bar.y,
     paddingLeft: edges.left ? Math.max(0, bar.x - insets.left) : 0,

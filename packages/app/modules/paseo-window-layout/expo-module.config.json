@@ -1,4 +1,7 @@
 {
   "platforms": ["ios"],
-  "ios": { "modules": ["PaseoWindowLayoutModule"] }
+  "ios": {
+    "modules": ["PaseoWindowLayoutModule"],
+    "reactDelegateHandlers": ["PaseoWindowLayoutReactDelegateHandler"]
+  }
 }

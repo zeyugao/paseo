@@ -114,6 +114,21 @@ workspace tabs, launcher, and panel host. Below 600 points the shell is the swip
 overlay; at 600 points and above it reserves width beside the workspace. Native docking keeps its
 touch resize handle. Full workspace splits remain a separate web-only capability.
 
+On iOS, reuse the scene's top row only when UIKit leaves a full row beside a single corner
+occlusion, outside any full-width status bar, with no native vertical bar. This is a geometry
+capability, not a device check. An eligible open dock hides the system status bar; closing it or
+leaving the active workspace restores it. Compact overlays and ordinary safe-area layouts keep
+their existing behavior. Retained inactive workspaces must not control the scene preference.
+Animate hiding over 280 ms unless Reduce Motion is enabled. Restore visibility immediately to
+match the dock's one-render close.
+
+UIKit removes a hidden status bar's occlusion even from inactive-region queries. Keep its measured
+edge extent for the same scene and screen mode; remeasure corner clearance and rebuild the row
+for the current window bounds. The eligible dock keeps its top geometry while closed, so reclaiming
+its width and reserving system-control space happen in the same render. Capability and edge
+clearance must not disappear while JS dimensions are waiting for a native geometry event;
+absolute-position consumers still require a dimension-matched snapshot.
+
 The dock reserves at least 240 points and the workspace 360. App navigation yields when it cannot
 share the remaining width with both. This keeps a portrait tablet from rendering three unusably
 narrow columns; widening restores navigation without changing its saved open state.

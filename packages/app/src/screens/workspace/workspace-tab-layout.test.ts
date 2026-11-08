@@ -62,12 +62,19 @@ describe("workspace top chrome placement", () => {
     );
   });
 
-  it("keeps normal safe areas without a usable top band or after it stops fitting", () => {
+  it("keeps normal safe areas when the native top row is unavailable", () => {
     expect(resolveWorkspaceTopChromeInsets(null, insets, edges)).toBeNull();
     expect(
       resolveWorkspaceTopChromeInsets({ ...layout, topChrome: null }, insets, edges),
     ).toBeNull();
-    expect(resolveWorkspaceTopChromeInsets(layout, { ...insets, top: 0 }, edges)).toBeNull();
+  });
+
+  it("reserves system controls before the status-bar inset returns", () => {
+    expect(resolveWorkspaceTopChromeInsets(layout, { ...insets, top: 0 }, edges)).toEqual({
+      paddingTop: 0,
+      paddingLeft: 6,
+      paddingRight: 144,
+    });
   });
 });
 

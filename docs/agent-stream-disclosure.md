@@ -146,6 +146,10 @@ or when momentum stops. A release past the end counts: iOS bounces back to the e
 land during the bounce must keep scrolling in. A release anywhere short of the end stays detached
 with the scroll-to-bottom pill, so the rows the user let go of never move.
 
+Disable iOS status-bar tap-to-top while app controls occupy the top edge, including while the
+status bar is hidden. UIKit still recognizes that gesture with a hidden status bar; deriving the
+policy only from the measured top inset lets a sidebar's close button scroll the chat to the top.
+
 ### Draw distance
 
 `drawDistance` is 2000 px on each side of the viewport. A fling over rows that were never measured

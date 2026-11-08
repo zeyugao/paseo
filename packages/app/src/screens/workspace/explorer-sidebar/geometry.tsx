@@ -27,6 +27,7 @@ export function useExplorerGeometry({
   width,
   containerWidth,
   overlay,
+  extendToTop,
   resizeEnabled,
   onResize,
 }: ExplorerGeometryInput): ExplorerGeometry {
@@ -125,7 +126,8 @@ export function useExplorerGeometry({
   return {
     frameStyle: animatedWidthStyle,
     panelStyle: {
-      paddingTop: insets.top + (overlay ? HEADER_TOP_PADDING_MOBILE : 0),
+      // The dock's target geometry must not wait for the status-bar safe-area callback.
+      paddingTop: extendToTop ? 0 : insets.top + (overlay ? HEADER_TOP_PADDING_MOBILE : 0),
       paddingLeft: overlay ? insets.left : 0,
       paddingRight: overlay ? insets.right : 0,
     },

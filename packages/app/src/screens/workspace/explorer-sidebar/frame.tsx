@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { View } from "react-native";
+import { Platform, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import {
   FileExplorerCloseGestureContext,
@@ -12,6 +12,7 @@ import { resolveExplorerSidebarWidth } from "@/components/explorer-sidebar-layou
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import { useExplorerGeometry } from "./geometry";
 import type { ExplorerFrameProps } from "./frame-props";
+import { useWindowLayoutHasTopChrome, WindowLayoutStatusBar } from "@/window-layout";
 
 function ExplorerFrameBase({
   children,
@@ -26,6 +27,9 @@ function ExplorerFrameBase({
   const settledOpen = useIsMobilePanelActive("file-explorer");
   const active = isWorkspaceActive && (overlay ? settledOpen : isOpen);
   const resizeEnabled = isWorkspaceActive && !overlay && isOpen;
+  const hasTopChrome = useWindowLayoutHasTopChrome();
+  const extendToTop = !overlay && hasTopChrome;
+  const hidesSystemStatusBar = isOpen && extendToTop;
   const { gesture, gestureRef } = useCloseFileExplorerGesture(
     isWorkspaceActive && overlay && containerWidth > 0,
     containerWidth,
@@ -42,11 +46,15 @@ function ExplorerFrameBase({
     width: resolveExplorerSidebarWidth({ requestedWidth: storedWidth, containerWidth }),
     containerWidth,
     overlay,
+    extendToTop,
     resizeEnabled,
     onResize,
   });
   return (
     <RetainedPanelActivity active={active}>
+      {isWorkspaceActive && Platform.OS === "ios" ? (
+        <WindowLayoutStatusBar hidden={hidesSystemStatusBar} />
+      ) : null}
       <FileExplorerCloseGestureContext value={gestureRef}>
         <MobilePanelOverlay
           panel="file-explorer"

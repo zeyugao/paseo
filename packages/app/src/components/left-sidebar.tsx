@@ -32,7 +32,7 @@ import {
   resolveDesktopSidebarWidth,
 } from "@/components/desktop-sidebar-layout";
 import { useWindowLayout, resolveDesktopDivisionLayout } from "@/window-layout";
-import { resolveWorkspaceTopChromeInsets } from "@/window-layout/model";
+import { useWindowLayoutTopChromeInsets } from "@/window-layout/context";
 import {
   SIDEBAR_RESIZE_ACTIVATION_OFFSET,
   SIDEBAR_RESIZE_FAIL_OFFSET,
@@ -158,7 +158,7 @@ export const LeftSidebar = memo(function LeftSidebar({
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
-  const topChromeInsets = resolveWorkspaceTopChromeInsets(useWindowLayout(), insets, {
+  const topChromeInsets = useWindowLayoutTopChromeInsets(insets, {
     left: true,
     right: false,
   });

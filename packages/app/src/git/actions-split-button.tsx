@@ -18,11 +18,16 @@ import type { ShortcutKey } from "@/utils/format-shortcut";
 import { actionsWithoutPrimary, type GitAction, type GitActions } from "@/git/policy";
 import { useGitActionRunner } from "@/git/use-actions";
 import { HEADER_CONTROL_HEIGHT } from "@/components/ui/control-geometry";
+import {
+  iconButtonChromeGlyphSize,
+  useIconButtonChromeStyle,
+} from "@/components/ui/icon-button-chrome";
 
 interface GitActionsSplitButtonProps {
   gitActions: GitActions;
   hideLabels?: boolean;
   menuOnly?: boolean;
+  menuTrigger?: "framed" | "icon";
 }
 
 interface GitActionMenuItemProps {
@@ -75,10 +80,41 @@ function GitActionMenuItem({
   );
 }
 
+function GitActionsMenuTrigger({ variant }: { variant: "framed" | "icon" }) {
+  const { theme } = useUnistyles();
+  const { t } = useTranslation();
+  const iconStyle = useIconButtonChromeStyle({ size: "large" });
+  const framedStyle = useCallback(
+    ({ hovered, pressed, open }: { hovered: boolean; pressed: boolean; open: boolean }) => [
+      styles.menuOnlyTrigger,
+      (hovered || pressed || open) &&
+        inlineUnistylesStyle({ backgroundColor: theme.colors.surface2 }),
+    ],
+    [theme.colors.surface2],
+  );
+  const iconOnly = variant === "icon";
+  return (
+    <DropdownMenuTrigger
+      testID="changes-actions-menu-trigger"
+      style={iconOnly ? iconStyle : framedStyle}
+      accessibilityRole="button"
+      accessibilityLabel={t("workspace.git.actions.moreActions")}
+    >
+      <GitBranch
+        size={iconOnly ? iconButtonChromeGlyphSize("large") : 16}
+        strokeWidth={iconOnly ? 1.5 : undefined}
+        color={theme.colors.foregroundMuted}
+      />
+      {iconOnly ? null : <ChevronDown size={12} color={theme.colors.foregroundExtraMuted} />}
+    </DropdownMenuTrigger>
+  );
+}
+
 export function GitActionsSplitButton({
   gitActions,
   hideLabels,
   menuOnly = false,
+  menuTrigger = "framed",
 }: GitActionsSplitButtonProps) {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
@@ -120,15 +156,6 @@ export function GitActionsSplitButton({
     [theme.colors.surface2],
   );
 
-  const menuOnlyTriggerStyle = useCallback(
-    ({ hovered, pressed, open }: { hovered: boolean; pressed: boolean; open: boolean }) => [
-      styles.menuOnlyTrigger,
-      (hovered || pressed || open) &&
-        inlineUnistylesStyle({ backgroundColor: theme.colors.surface2 }),
-    ],
-    [theme.colors.surface2],
-  );
-
   const menuOnlyActions = [
     ...(gitActions.primary ? [gitActions.primary] : []),
     ...actionsWithoutPrimary(gitActions),
@@ -141,15 +168,7 @@ export function GitActionsSplitButton({
 
     return (
       <DropdownMenu>
-        <DropdownMenuTrigger
-          testID="changes-actions-menu-trigger"
-          style={menuOnlyTriggerStyle}
-          accessibilityRole="button"
-          accessibilityLabel={t("workspace.header.actions.workspaceActions")}
-        >
-          <GitBranch size={16} color={theme.colors.foregroundMuted} />
-          <ChevronDown size={12} color={theme.colors.foregroundExtraMuted} />
-        </DropdownMenuTrigger>
+        <GitActionsMenuTrigger variant={menuTrigger} />
         <DropdownMenuContent align="end" testID="changes-primary-cta-menu">
           {menuOnlyActions.map((action, index) => (
             <GitActionMenuItem

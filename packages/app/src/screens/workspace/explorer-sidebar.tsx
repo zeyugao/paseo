@@ -16,13 +16,6 @@ import type { WorkspaceTabDescriptor } from "@/screens/workspace/workspace-tabs-
 import type { SplitPane } from "@/stores/workspace-layout-store";
 import type { WorkspaceTab } from "@/workspace-tabs/model";
 import { WindowChromeRegion, WindowChromeSafeArea } from "@/utils/desktop-window";
-import { bySizing } from "@/components/ui/control-geometry";
-import { useIsCompactFormFactor } from "@/constants/layout";
-import { shouldUseCompactWorkspaceHeader } from "./workspace-tab-layout";
-import {
-  useWorkspaceHeaderWidth,
-  type WorkspaceHeaderGeometry,
-} from "./use-workspace-header-width";
 
 interface ExplorerSidebarDockProps extends Pick<
   WorkspaceDesktopTabsRowProps,
@@ -45,8 +38,6 @@ interface ExplorerSidebarDockProps extends Pick<
   normalizedServerId: string;
   normalizedWorkspaceId: string;
   isWorkspaceFocused: boolean;
-  inlineHeaderActive: boolean;
-  headerGeometry: WorkspaceHeaderGeometry;
   closingTabIds: Set<string>;
   onSelectTab: (paneId: string, tabId: string) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
@@ -65,8 +56,6 @@ export function ExplorerSidebarDock({
   normalizedServerId,
   normalizedWorkspaceId,
   isWorkspaceFocused,
-  inlineHeaderActive,
-  headerGeometry,
   closingTabIds,
   onSelectTab,
   onCloseTab,
@@ -87,10 +76,6 @@ export function ExplorerSidebarDock({
   buildPaneContentModel,
   headerAction,
 }: ExplorerSidebarDockProps) {
-  const compact = useIsCompactFormFactor();
-  const headerWidth = useWorkspaceHeaderWidth(headerGeometry);
-  const singleRowHeaderActive =
-    compact || inlineHeaderActive || shouldUseCompactWorkspaceHeader(headerWidth);
   const { activeDragTabId, tabDropPreview, externalDndContext } = useWorkspaceTabDrag();
   const paneState = useMemo(() => deriveWorkspacePaneState({ pane, tabs: uiTabs }), [pane, uiTabs]);
   const tabs = useMemo(() => paneState.tabs.map((tab) => tab.descriptor), [paneState.tabs]);
@@ -136,10 +121,7 @@ export function ExplorerSidebarDock({
     <RetainedPanel active>
       <WindowChromeRegion corners="top-right">
         <View style={styles.dock} testID="workspace-explorer-sidebar">
-          <WindowChromeSafeArea
-            placement="inline"
-            style={[styles.tabRail, singleRowHeaderActive && styles.tabRailSingleRow]}
-          >
+          <WindowChromeSafeArea placement="inline" style={styles.tabRail}>
             <TitlebarDragRegion />
             <View style={styles.tabRow}>
               <WorkspaceDesktopTabsRow
@@ -208,9 +190,6 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     flexShrink: 0,
     backgroundColor: theme.colors.surfaceSidebar,
-  },
-  tabRailSingleRow: {
-    paddingTop: bySizing({ touch: theme.spacing[2], pointer: 0 }),
   },
   tabRow: {
     flex: 1,

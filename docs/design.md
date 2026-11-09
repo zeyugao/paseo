@@ -28,7 +28,7 @@ Before adding a new component, read `components/ui/`. The primitive usually exis
 
 ## 3. Hierarchy
 
-Hierarchy is conveyed through weight and color, not size. Most interface text is `fontSize.base`; compact metadata and hints use `fontSize.sm`. The distinction between a row's primary line and its secondary line is `foreground` versus `foregroundMuted`.
+Hierarchy is conveyed through weight and color, not size. Most interface text is `fontSize.base`; compact metadata and hints use `fontSize.sm`. Reserve `fontSize.xs` for secondary captions inside fixed-height title chrome. The distinction between a row's primary line and its secondary line is `foreground` versus `foregroundMuted`.
 
 The authored interface ramp uses a 14px base. New native installs default to 15px; web and desktop default to 14px. The Appearance **Interface size** setting is the rendered `fontSize.base` value and scales the rest of the UI ramp proportionally. Primary readable content has its own `fontSize.content`, which defaults to 16px on native and 15px on web and desktop. It owns message bodies, composer input, Markdown, and PR prose. Controls, navigation, metadata, tool chrome, code, diffs, editors, and terminals stay on their interface or code tokens. **Code size** remains independent.
 

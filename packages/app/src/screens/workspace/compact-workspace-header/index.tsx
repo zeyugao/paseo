@@ -37,7 +37,6 @@ import {
   type WorkspaceInlineTabPresentation,
 } from "@/screens/workspace/workspace-tab-layout";
 import { WorkspaceActions } from "@/git/workspace-actions";
-import { bySizing } from "@/components/ui/control-geometry";
 import {
   useWorkspaceHeaderWidth,
   type WorkspaceHeaderGeometry,
@@ -92,7 +91,6 @@ function InlineHeaderLeading({
   return (
     <>
       <SidebarMenuToggle
-        style={styles.inlineNavigationToggle}
         testID={measuring ? "workspace-header-sidebar-measurement" : undefined}
         nativeID={measuring ? "workspace-header-sidebar-measurement" : undefined}
       />
@@ -104,6 +102,7 @@ function InlineHeaderLeading({
             titleTestID={measuring ? undefined : "workspace-header-title"}
             subtitle={projectRow}
             fadeOverflow
+            workspaceRow
           />
         </View>
         {children}
@@ -195,32 +194,30 @@ function InlineWorkspaceHeaderBase({
   const visibleSwitcher = picker ? tabSwitcher : undefined;
   const switcherStyle = picker ? styles.switcherAction : undefined;
   return (
-    <View style={styles.inlineHeader}>
-      <View style={styles.inlineHeaderContent}>
-        {/* Measure stable title chrome, not the collapsing viewport. The target allocation
+    <View style={styles.inlineHeaderContent}>
+      {/* Measure stable title chrome, not the collapsing viewport. The target allocation
           chooses the presentation in the same render that opens or closes Explorer. */}
-        <View
-          style={styles.measuringHeader}
-          pointerEvents="none"
-          accessibilityElementsHidden
-          importantForAccessibility="no-hide-descendants"
-        >
-          <ScreenHeader
-            left={measuredLeading}
-            leftStyle={styles.measuringTitle}
-            right={measuredRail}
-            rightStyle={styles.inlineTabs}
-            borderless
-          />
-        </View>
-        <View style={styles.visibleHeader}>
-          <ScreenHeader
-            left={visibleLeading}
-            right={visibleSwitcher}
-            rightStyle={switcherStyle}
-            borderless
-          />
-        </View>
+      <View
+        style={styles.measuringHeader}
+        pointerEvents="none"
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
+      >
+        <ScreenHeader
+          left={measuredLeading}
+          leftStyle={styles.measuringTitle}
+          right={measuredRail}
+          rightStyle={styles.inlineTabs}
+          borderless
+        />
+      </View>
+      <View style={styles.visibleHeader}>
+        <ScreenHeader
+          left={visibleLeading}
+          right={visibleSwitcher}
+          rightStyle={switcherStyle}
+          borderless
+        />
       </View>
     </View>
   );
@@ -258,6 +255,7 @@ export function CompactWorkspaceHeader({
         subtitle={subtitle}
         isSubtitleDistinct={isSubtitleDistinct}
         serverId={serverId}
+        size="sm"
       />
     ),
     [subtitle, isSubtitleDistinct, serverId],
@@ -317,11 +315,7 @@ export function CompactWorkspaceHeader({
 }
 
 const styles = StyleSheet.create((theme) => ({
-  inlineHeader: { paddingVertical: bySizing({ touch: theme.spacing[2], pointer: 0 }) },
   inlineHeaderContent: { position: "relative" },
-  inlineNavigationToggle: {
-    marginLeft: bySizing({ touch: 0, pointer: -theme.spacing[2] }),
-  },
   measuringHeader: { opacity: 0 },
   visibleHeader: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0 },
   expandedTitleText: { flex: 1, minWidth: 0 },

@@ -10,9 +10,13 @@ import type { WorkspaceTabDescriptor } from "./workspace-tabs-types";
  */
 export function AdaptiveWorkspaceChrome({
   compactHeader,
+  inlineHeader,
+  inlineHeaderActive = false,
   children,
 }: {
   compactHeader: ReactNode | null;
+  inlineHeader?: ReactNode;
+  inlineHeaderActive?: boolean;
   children: ReactNode;
 }) {
   const [width, setWidth] = useState<number | null>(null);
@@ -25,6 +29,8 @@ export function AdaptiveWorkspaceChrome({
       <View onLayout={measure}>
         {compactHeader === null
           ? children
+          : inlineHeaderActive
+            ? inlineHeader
           : selectWorkspaceChrome({ width, compact: compactHeader, full: children })}
       </View>
     </WorkspaceTabMeasurementScope>

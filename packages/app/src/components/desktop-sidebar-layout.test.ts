@@ -15,6 +15,7 @@ import {
   resolveDesktopSidebarWidth,
   resolveLeftSidebarPresentation,
 } from "@/components/desktop-sidebar-layout";
+import { resolveExplorerSidebarWidth } from "@/components/explorer-sidebar-layout";
 
 describe("desktop sidebar layout", () => {
   const geometry: WindowLayout = {
@@ -222,27 +223,41 @@ describe("desktop sidebar layout", () => {
   });
 });
 
-it("reserves room for Explorer and the workspace before showing app navigation", () => {
-  const contentMinimumWidth = resolveDesktopAppContentMinimum({
-    isSettingsRoute: false,
-    explorerVisible: true,
-  });
-  expect(contentMinimumWidth).toBe(600);
-  expect(
-    canDesktopAppSidebarShare({
+it.each([
+  [867, 200, 320, false],
+  [1200, 320, 480, true],
+  [1200, 320, 600, false],
+  [1200, 200, 1000, false],
+])(
+  "preserves Explorer width with viewport %s, navigation %s, Explorer %s",
+  (viewportWidth, requestedSidebarWidth, requestedExplorerWidth, expectedShares) => {
+    const contentMinimumWidth = resolveDesktopAppContentMinimum({
+      isSettingsRoute: false,
+      explorer: { requestedWidth: requestedExplorerWidth, containerWidth: viewportWidth },
+    });
+    const shares = canDesktopAppSidebarShare({
       contentMinimumWidth,
-      requestedSidebarWidth: 320,
-      viewportWidth: 744,
-    }),
-  ).toBe(false);
-  expect(
-    canDesktopAppSidebarShare({
-      contentMinimumWidth,
-      requestedSidebarWidth: 320,
-      viewportWidth: 951,
-    }),
-  ).toBe(true);
-});
+      requestedSidebarWidth,
+      viewportWidth,
+    });
+    expect(shares).toBe(expectedShares);
+    const workspaceWidth = shares
+      ? viewportWidth -
+        resolveDesktopSidebarWidth({ requestedWidth: requestedSidebarWidth, viewportWidth })
+      : viewportWidth;
+    expect(
+      resolveExplorerSidebarWidth({
+        requestedWidth: requestedExplorerWidth,
+        containerWidth: workspaceWidth,
+      }),
+    ).toBe(
+      resolveExplorerSidebarWidth({
+        requestedWidth: requestedExplorerWidth,
+        containerWidth: viewportWidth,
+      }),
+    );
+  },
+);
 
 it("insets an overlay sidebar's content by the left safe area and leaves the dock to app chrome", () => {
   expect(resolveDesktopSidebarInsetLeft({ overlay: true, safeAreaLeft: 20 })).toBe(20);

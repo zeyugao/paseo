@@ -22,21 +22,20 @@ export const DEFAULT_TREE_RAIL_WIDTH = 260;
 export const MIN_TREE_RAIL_WIDTH = 180;
 export const MAX_TREE_RAIL_WIDTH = 600;
 
-export interface PanelLayoutInput {
-  isCompact: boolean;
-}
-
 /** How app chrome presents the left sidebar: over the workspace, beside it, or not at all. */
 export type LeftSidebarPresentation = "overlay" | "dock" | "hidden";
 
 /** The panels app chrome presents, which decide the mobile panel targets that can stay selected. */
-export interface PanelLayout extends PanelLayoutInput {
+export interface PanelLayout {
+  isCompact: boolean;
   leftSidebar: LeftSidebarPresentation;
+  leftDockAvailable: boolean;
 }
 
 export interface PanelCoreState {
   mobilePanel: MobilePanelSelection;
   desktop: DesktopSidebarState;
+  layout: PanelLayout;
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -54,8 +53,11 @@ export function clampTreeRailWidth(width: number): number {
   return clampNumber(width, MIN_TREE_RAIL_WIDTH, MAX_TREE_RAIL_WIDTH);
 }
 
-export function selectIsAgentListOpen(state: PanelCoreState, input: PanelLayoutInput): boolean {
-  return input.isCompact ? state.mobilePanel.target === "agent-list" : state.desktop.agentListOpen;
+export function selectIsAgentListOpen(state: PanelCoreState): boolean {
+  if (state.layout.leftSidebar === "hidden") return false;
+  return state.layout.leftSidebar === "overlay"
+    ? state.mobilePanel.target === "agent-list"
+    : state.desktop.agentListOpen;
 }
 
 /**

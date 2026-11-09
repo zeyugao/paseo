@@ -11,7 +11,9 @@ They are one interaction, not two independent drawers. The implementation lives 
 
 Wide layouts reuse `agent-list` for the navigation overlay. When the left dock is collapsed or
 yields its width, a touch swipe reveals the same sidebar over the workspace at the resolved sidebar
-width. The workspace does not move, and the saved dock preference does not change.
+width. Buttons and keyboard commands open the dock when it can fit, otherwise the overlay. An
+already-open overlay closes before a toggle considers docking it. The workspace does not move,
+and opening or closing an overlay does not change the saved dock preference.
 
 ## Ownership
 
@@ -28,10 +30,18 @@ Every semantic target change increments `revision`. Repeating the current target
 Compact panel selection is not persisted; a cold start begins at `agent`.
 
 Only an overlay sidebar holds `agent-list`, and only a compact layout holds `file-explorer`. App
-chrome publishes the layout (compact or wide, and the left sidebar presentation `overlay`, `dock`, or
-`hidden`) to `panel-store`, which drops any target the layout does not present. A stale
-`agent-list` would reopen the overlay on the next collapse; a stale `file-explorer` after widening
-would block the navigation swipe, which begins only from `agent`.
+chrome publishes the resolved layout and left-dock availability to `panel-store`; commands and
+visibility selectors read that transient state rather than caller snapshots. Dock availability is
+separate from presentation: a collapsed, dockable sidebar also presents its swipe overlay.
+Reconciliation drops targets the layout no longer presents, so a stale `agent-list` cannot reopen
+an overlay after docking and a stale `file-explorer` cannot block navigation after widening.
+
+An explicit "Toggle both sidebars" collapse also clears wide dock intent and invalidates an
+uncommitted opening swipe. Compact collapse preserves the saved wide dock preference and leaves
+the Explorer target for its own close action.
+Opening navigation from focus mode must exit focus and record the open intent together. Chrome
+still publishes `hidden` until its next render; dropping the intent there loses navigation when
+the same action opens both sidebars. Hidden chrome outside focus mode still rejects open commands.
 
 The UI worklet owns transient motion:
 

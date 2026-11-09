@@ -1,7 +1,6 @@
 const DEFAULT_EXPLORER_SIDEBAR_WIDTH = 320;
 const MIN_EXPLORER_SIDEBAR_WIDTH = 240;
 const MIN_WORKSPACE_BODY_WIDTH = 360;
-export const EXPLORER_WORKSPACE_MIN_WIDTH = MIN_EXPLORER_SIDEBAR_WIDTH + MIN_WORKSPACE_BODY_WIDTH;
 
 export function resolveExplorerSidebarWidth(input: {
   requestedWidth?: number;
@@ -14,6 +13,13 @@ export function resolveExplorerSidebarWidth(input: {
       ? Math.max(MIN_EXPLORER_SIDEBAR_WIDTH, input.containerWidth - MIN_WORKSPACE_BODY_WIDTH)
       : requestedWidth;
   return Math.max(MIN_EXPLORER_SIDEBAR_WIDTH, Math.min(maximumVisibleWidth, requestedWidth));
+}
+
+export function resolveExplorerWorkspaceMinimumWidth(input: {
+  requestedWidth?: number;
+  containerWidth: number;
+}): number {
+  return MIN_WORKSPACE_BODY_WIDTH + resolveExplorerSidebarWidth(input);
 }
 
 // A release keeps its UI width until React acknowledges it or replaces its allocation.

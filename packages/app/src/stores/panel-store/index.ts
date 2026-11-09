@@ -21,7 +21,6 @@ import {
   type MobilePanelView,
   type MobilePanelSelection,
   type PanelLayout,
-  type PanelLayoutInput,
   type SortOption,
 } from "./state";
 import { isWeb } from "@/constants/platform";
@@ -32,7 +31,6 @@ export type {
   MobilePanelView,
   MobilePanelSelection,
   PanelLayout,
-  PanelLayoutInput,
   SortOption,
 } from "./state";
 export {
@@ -55,6 +53,9 @@ export interface PanelState {
 
   // Desktop: independent sidebar toggles
   desktop: DesktopSidebarState;
+
+  // Resolved shell capabilities are transient, not saved dock preferences.
+  layout: PanelLayout;
 
   // File explorer settings (shared between mobile/desktop)
   expandedPathsByWorkspace: Record<string, string[]>;
@@ -82,9 +83,10 @@ export interface PanelState {
   openDesktopAgentList: () => void;
   closeDesktopAgentList: () => void;
   toggleDesktopAgentList: () => void;
-  openAgentListForLayout: (input: PanelLayoutInput) => void;
-  closeAgentListForLayout: (input: PanelLayoutInput) => void;
-  toggleAgentListForLayout: (input: PanelLayoutInput) => void;
+  openAgentListForLayout: () => void;
+  closeAgentListForLayout: () => void;
+  toggleAgentListForLayout: () => void;
+  collapseAgentListForLayout: () => void;
   applyPanelLayout: (layout: PanelLayout) => void;
 
   // File explorer settings actions
@@ -115,6 +117,37 @@ function dockAgentListPatch(state: PanelState): Pick<PanelState, "desktop" | "mo
   };
 }
 
+function openAgentListForLayoutPatch(state: PanelState) {
+  if (state.layout.leftSidebar === "hidden") {
+    if (!state.desktop.focusModeEnabled) return state;
+    // Focus hides chrome before it can publish whether navigation will dock or overlay.
+    return {
+      desktop: {
+        ...state.desktop,
+        focusModeEnabled: false,
+        agentListOpen: state.layout.isCompact ? state.desktop.agentListOpen : true,
+      },
+      mobilePanel: setMobilePanelTarget(state.mobilePanel, "agent-list"),
+    };
+  }
+  if (selectIsAgentListOpen(state)) return state;
+  return state.layout.isCompact || !state.layout.leftDockAvailable
+    ? setMobilePanelTargetPatch(state, "agent-list")
+    : dockAgentListPatch(state);
+}
+
+function closeAgentListForLayoutPatch(state: PanelState) {
+  if (state.layout.leftSidebar === "hidden") return state;
+  if (state.layout.leftSidebar === "overlay") {
+    return state.mobilePanel.target === "agent-list"
+      ? setMobilePanelTargetPatch(state, "agent")
+      : state;
+  }
+  return state.desktop.agentListOpen
+    ? { desktop: { ...state.desktop, agentListOpen: false } }
+    : state;
+}
+
 export const usePanelStore = create<PanelState>()(
   persist(
     (set) => ({
@@ -126,6 +159,7 @@ export const usePanelStore = create<PanelState>()(
         agentListOpen: DEFAULT_DESKTOP_OPEN,
         focusModeEnabled: false,
       },
+      layout: { isCompact: true, leftSidebar: "hidden", leftDockAvailable: false },
 
       // File explorer defaults
       expandedPathsByWorkspace: {},
@@ -181,41 +215,35 @@ export const usePanelStore = create<PanelState>()(
             : dockAgentListPatch(state),
         ),
 
-      openAgentListForLayout: ({ isCompact }) =>
-        set((state) => {
-          if (isCompact) {
-            return setMobilePanelTargetPatch(state, "agent-list");
-          }
-          return state.desktop.agentListOpen ? state : dockAgentListPatch(state);
-        }),
-
-      closeAgentListForLayout: ({ isCompact }) =>
-        set((state) => {
-          if (isCompact) {
-            return setMobilePanelTargetPatch(state, "agent");
-          }
-          return state.desktop.agentListOpen
-            ? { desktop: { ...state.desktop, agentListOpen: false } }
-            : state;
-        }),
-
-      toggleAgentListForLayout: ({ isCompact }) =>
-        set((state) => {
-          if (isCompact) {
-            return setMobilePanelTargetPatch(
-              state,
-              state.mobilePanel.target === "agent-list" ? "agent" : "agent-list",
-            );
-          }
-          return state.desktop.agentListOpen
-            ? { desktop: { ...state.desktop, agentListOpen: false } }
-            : dockAgentListPatch(state);
-        }),
+      openAgentListForLayout: () => set(openAgentListForLayoutPatch),
+      closeAgentListForLayout: () => set(closeAgentListForLayoutPatch),
+      toggleAgentListForLayout: () =>
+        set((state) =>
+          selectIsAgentListOpen(state)
+            ? closeAgentListForLayoutPatch(state)
+            : openAgentListForLayoutPatch(state),
+        ),
+      // Toggle-both clears wide dock intent and cancels any opening overlay swipe.
+      collapseAgentListForLayout: () =>
+        set((state) => ({
+          mobilePanel: dropOverlayAgentList(state.mobilePanel),
+          desktop:
+            state.layout.isCompact || !state.desktop.agentListOpen
+              ? state.desktop
+              : { ...state.desktop, agentListOpen: false },
+        })),
 
       applyPanelLayout: (layout) =>
         set((state) => {
           const mobilePanel = reconcileMobilePanel(state.mobilePanel, layout);
-          return mobilePanel === state.mobilePanel ? state : { mobilePanel };
+          if (
+            mobilePanel === state.mobilePanel &&
+            state.layout.isCompact === layout.isCompact &&
+            state.layout.leftSidebar === layout.leftSidebar &&
+            state.layout.leftDockAvailable === layout.leftDockAvailable
+          )
+            return state;
+          return { layout, mobilePanel };
         }),
 
       setExpandedPathsForWorkspace: (workspaceKey, paths) =>

@@ -1,51 +1,89 @@
-import { describe, expect, it, vi } from "vitest";
-
+import { beforeEach, describe, expect, it } from "vitest";
+import { selectIsAgentListOpen, usePanelStore } from "@/stores/panel-store";
 import { toggleDesktopSidebarsWithCheckoutIntent } from "./desktop-sidebar-toggle";
 
-function harness(state: { isAgentListOpen: boolean; isExplorerOpen: boolean }) {
-  const openAgentList = vi.fn();
-  const closeAgentList = vi.fn();
-  const toggleExplorer = vi.fn();
-  const handled = toggleDesktopSidebarsWithCheckoutIntent({
-    ...state,
-    openAgentList,
-    closeAgentList,
-    toggleExplorer,
+function toggleWideSidebars(explorerVisible: boolean): boolean {
+  const panel = usePanelStore.getState();
+  let explorerOpen = explorerVisible;
+  toggleDesktopSidebarsWithCheckoutIntent({
+    isAgentListOpen: selectIsAgentListOpen(panel),
+    isExplorerOpen: explorerOpen,
+    openAgentList: panel.openAgentListForLayout,
+    resetAgentList: panel.collapseAgentListForLayout,
+    toggleExplorer: () => {
+      explorerOpen = !explorerOpen;
+    },
   });
-  return { handled, openAgentList, closeAgentList, toggleExplorer };
+  return explorerOpen;
 }
 
+beforeEach(() => {
+  usePanelStore.setState({
+    desktop: { agentListOpen: false, focusModeEnabled: false },
+    mobilePanel: { target: "agent", revision: 0 },
+    layout: { isCompact: false, leftSidebar: "overlay", leftDockAvailable: true },
+  });
+});
+
 describe("toggleDesktopSidebarsWithCheckoutIntent", () => {
-  it("closes only what is open when either side is showing", () => {
-    const result = harness({ isAgentListOpen: true, isExplorerOpen: false });
-
-    expect(result.handled).toBe(true);
-    expect(result.closeAgentList).toHaveBeenCalledTimes(1);
-    expect(result.openAgentList).not.toHaveBeenCalled();
-    // The explorer is already closed; toggling it would reopen it.
-    expect(result.toggleExplorer).not.toHaveBeenCalled();
+  it("opens navigation and Explorer when both are closed", () => {
+    expect(toggleWideSidebars(false)).toBe(true);
+    expect(usePanelStore.getState().desktop.agentListOpen).toBe(true);
   });
 
-  it("closes the explorer when it is the only side showing", () => {
-    const result = harness({ isAgentListOpen: false, isExplorerOpen: true });
+  it("opens both from focus before chrome republishes a docked layout", () => {
+    const panel = usePanelStore.getState();
+    panel.toggleFocusMode();
+    panel.applyPanelLayout({ isCompact: false, leftSidebar: "hidden", leftDockAvailable: false });
 
-    expect(result.toggleExplorer).toHaveBeenCalledTimes(1);
-    expect(result.closeAgentList).not.toHaveBeenCalled();
-    expect(result.openAgentList).not.toHaveBeenCalled();
+    const explorerOpen = toggleWideSidebars(false);
+    panel.exitFocusMode();
+    panel.applyPanelLayout({ isCompact: false, leftSidebar: "dock", leftDockAvailable: true });
+
+    expect(explorerOpen).toBe(true);
+    expect(selectIsAgentListOpen(usePanelStore.getState())).toBe(true);
+    expect(usePanelStore.getState().desktop).toEqual({
+      agentListOpen: true,
+      focusModeEnabled: false,
+    });
   });
 
-  it("closes both when both are showing", () => {
-    const result = harness({ isAgentListOpen: true, isExplorerOpen: true });
-
-    expect(result.closeAgentList).toHaveBeenCalledTimes(1);
-    expect(result.toggleExplorer).toHaveBeenCalledTimes(1);
+  it("collapses both when a dock is visible", () => {
+    const panel = usePanelStore.getState();
+    panel.openDesktopAgentList();
+    panel.applyPanelLayout({ isCompact: false, leftSidebar: "dock", leftDockAvailable: true });
+    expect(toggleWideSidebars(true)).toBe(false);
+    expect(usePanelStore.getState().desktop.agentListOpen).toBe(false);
   });
 
-  it("opens both when nothing is showing", () => {
-    const result = harness({ isAgentListOpen: false, isExplorerOpen: false });
+  it("clears deferred navigation intent when only Explorer is visible", () => {
+    const panel = usePanelStore.getState();
+    panel.openDesktopAgentList();
+    panel.applyPanelLayout({ isCompact: false, leftSidebar: "overlay", leftDockAvailable: false });
+    const revision = usePanelStore.getState().mobilePanel.revision;
+    expect(toggleWideSidebars(true)).toBe(false);
+    expect(usePanelStore.getState().desktop.agentListOpen).toBe(false);
+    expect(usePanelStore.getState().mobilePanel.target).toBe("agent");
+    expect(usePanelStore.getState().mobilePanel.revision).toBeGreaterThan(revision);
+  });
 
-    expect(result.openAgentList).toHaveBeenCalledTimes(1);
-    expect(result.toggleExplorer).toHaveBeenCalledTimes(1);
-    expect(result.closeAgentList).not.toHaveBeenCalled();
+  it("closes the compact Explorer while preserving wide navigation intent", () => {
+    const panel = usePanelStore.getState();
+    panel.openDesktopAgentList();
+    panel.applyPanelLayout({ isCompact: true, leftSidebar: "overlay", leftDockAvailable: false });
+    panel.showMobileFileExplorer();
+    toggleDesktopSidebarsWithCheckoutIntent({
+      isAgentListOpen: selectIsAgentListOpen(usePanelStore.getState()),
+      isExplorerOpen: true,
+      openAgentList: panel.openAgentListForLayout,
+      resetAgentList: panel.collapseAgentListForLayout,
+      toggleExplorer: () => {
+        if (usePanelStore.getState().mobilePanel.target === "file-explorer")
+          panel.showMobileAgent();
+        else panel.showMobileFileExplorer();
+      },
+    });
+    expect(usePanelStore.getState().mobilePanel.target).toBe("agent");
+    expect(usePanelStore.getState().desktop.agentListOpen).toBe(true);
   });
 });

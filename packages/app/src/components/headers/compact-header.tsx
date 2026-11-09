@@ -1,6 +1,13 @@
-import { useCallback, useMemo, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Text, View } from "react-native";
+import {
+  ScrollView,
+  Text,
+  View,
+  type LayoutChangeEvent,
+  type StyleProp,
+  type TextStyle,
+} from "react-native";
 import { router } from "expo-router";
 import { ArrowLeft } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -14,6 +21,8 @@ import {
 } from "@/components/ui/icon-button-chrome";
 import { HEADER_INNER_HEIGHT_MOBILE, HEADER_TOP_PADDING_MOBILE } from "@/constants/layout";
 import type { ShortcutKey } from "@/utils/format-shortcut";
+import { TrailingActionScrim } from "@/components/ui/trailing-action-scrim";
+import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
 
@@ -85,28 +94,79 @@ export function CompactHeader({
   );
 }
 
-function CompactHeaderTitle({
+export function CompactHeaderTitle({
   loading,
   title,
   titleTestID,
   subtitle,
-}: Pick<CompactHeaderProps, "title" | "titleTestID" | "subtitle"> & { loading: boolean }) {
+  fadeOverflow = false,
+}: Pick<CompactHeaderProps, "title" | "titleTestID" | "subtitle"> & {
+  loading: boolean;
+  fadeOverflow?: boolean;
+}) {
   if (loading) {
     return <View style={styles.titleSkeleton} />;
   }
+  if (!title) {
+    return subtitle ?? null;
+  }
+  const titleStyle = subtitle ? styles.title : styles.singleLineTitle;
   return (
     <>
-      {title ? (
+      {fadeOverflow ? (
+        <FadingHeaderTitle title={title} titleTestID={titleTestID} style={titleStyle} />
+      ) : (
+        <Text style={titleStyle} numberOfLines={1} testID={titleTestID}>
+          {title}
+        </Text>
+      )}
+      {subtitle}
+    </>
+  );
+}
+
+interface FadingHeaderTitleProps {
+  title: string;
+  titleTestID?: string;
+  style: StyleProp<TextStyle>;
+}
+
+function FadingHeaderTitle({ title, titleTestID, style }: FadingHeaderTitleProps) {
+  const [viewportWidth, setViewportWidth] = useState(0);
+  const [textWidth, setTextWidth] = useState(0);
+  const measureViewport = useCallback((event: LayoutChangeEvent) => {
+    setViewportWidth(event.nativeEvent.layout.width);
+  }, []);
+  const measureText = useCallback((event: LayoutChangeEvent) => {
+    setTextWidth(event.nativeEvent.layout.width);
+  }, []);
+
+  return (
+    <View
+      style={[styles.fadingTitle, inlineUnistylesStyle({ width: textWidth })]}
+      onLayout={measureViewport}
+    >
+      {/* Horizontal content measures the full line; an ordinary Text reports its clipped width. */}
+      <ScrollView
+        horizontal
+        scrollEnabled={false}
+        style={styles.fadingTitleScroll}
+        showsHorizontalScrollIndicator={false}
+      >
         <Text
-          style={subtitle ? styles.title : styles.singleLineTitle}
+          style={[style, styles.unconstrainedTitle]}
           numberOfLines={1}
+          ellipsizeMode="clip"
           testID={titleTestID}
+          onLayout={measureText}
         >
           {title}
         </Text>
+      </ScrollView>
+      {textWidth > viewportWidth + 1 ? (
+        <TrailingActionScrim backdrop="surface0" width={32} />
       ) : null}
-      {subtitle}
-    </>
+    </View>
   );
 }
 
@@ -170,6 +230,17 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foreground,
     textAlign: "left",
+  },
+  fadingTitle: {
+    minWidth: 0,
+    maxWidth: "100%",
+    overflow: "hidden",
+  },
+  fadingTitleScroll: {
+    flexGrow: 0,
+  },
+  unconstrainedTitle: {
+    flexShrink: 0,
   },
   titleSkeleton: {
     width: 140,

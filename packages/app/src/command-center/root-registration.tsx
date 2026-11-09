@@ -16,7 +16,6 @@ import {
   Settings,
 } from "lucide-react-native";
 import { withUnistyles } from "react-native-unistyles";
-import { useIsCompactFormFactor } from "@/constants/layout";
 import { useKeyboardShortcutOverrides } from "@/hooks/use-keyboard-shortcut-overrides";
 import { useOpenAddProject } from "@/hooks/use-open-add-project";
 import { useImportSession } from "@/hooks/use-import-session";
@@ -124,10 +123,7 @@ export function CommandCenterRootActions() {
   // each time host filters are reconciled.
   const groupMode = useSidebarViewStore((state) => state.groupMode);
   const setGroupMode = useSidebarViewStore((state) => state.setGroupMode);
-  const isCompact = useIsCompactFormFactor();
-  const toggleMobileAgentList = usePanelStore((state) => state.toggleMobileAgentList);
-  const toggleDesktopAgentList = usePanelStore((state) => state.toggleDesktopAgentList);
-  const toggleAgentList = isCompact ? toggleMobileAgentList : toggleDesktopAgentList;
+  const toggleAgentList = usePanelStore((state) => state.toggleAgentListForLayout);
   const shortcutPlatform = useMemo(
     () => ({ isMac: getShortcutOs() === "mac", usesDesktopBindings }),
     [],

@@ -42,6 +42,8 @@ Tests must produce the same result every run:
 - No weak assertions (`toBeTruthy`, `toBeDefined`)
 - Assert the full intended behavior, not fragments
 
+Filesystem observers can deliver multiple notifications for one write. Assert the resulting state, not an exact number of downstream computations.
+
 Restart tests reopen the saved home without replaying configuration or installation. Otherwise setup can repair the state the test is meant to verify.
 
 ```typescript

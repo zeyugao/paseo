@@ -139,16 +139,20 @@ outside the inline measurement/overlay frame so both layers share one origin. Po
 keep desktop alignment; full and focus-mode headers retain their existing layout.
 Keep workspace Git actions available when either the compact header or the inline row replaces
 the full header. They share the same action group: place it in the vertical bar when available,
-otherwise in the compact header. Folding must not remove the Git entry. Use borderless icon chrome
-without a dropdown chevron; the menu includes the primary action and the other Git actions.
+otherwise in the compact header. Order the group as tab switcher, Git, overflow, then Explorer,
+omitting controls unavailable in that presentation. Folding must not remove the Git entry. Use
+borderless icon chrome without a dropdown chevron; the menu includes the primary action and the
+other Git actions.
 
 On iOS, reuse the scene's top row only when UIKit leaves a full row beside a single corner
 occlusion, outside any full-width status bar, with no native vertical bar. This is a geometry
 capability, not a device check. An eligible open dock hides the system status bar; closing it or
 leaving the active workspace restores it. Compact overlays and ordinary safe-area layouts keep
 their existing behavior. Retained inactive workspaces must not control the scene preference.
-Animate hiding over 280 ms unless Reduce Motion is enabled. Restore visibility immediately to
-match the dock's one-render close.
+The native scene root must reject a hidden preference when current UIKit traits place a vertical
+system bar. Waiting for JS to revoke the portrait preference exposes landscape content without its
+system clearance before a second, narrower layout. Animate hiding over 280 ms unless Reduce Motion
+is enabled. Restore visibility immediately to match the dock's one-render close.
 
 While app controls occupy the top edge, disable iOS scroll-to-top on the chat timeline and every
 file reader, including source, Markdown, HTML, and document previews. Hiding the status bar does
@@ -158,9 +162,12 @@ safe-area layouts retain the system gesture.
 UIKit removes a hidden status bar's occlusion even from inactive-region queries. Keep its measured
 edge extent for the same scene and screen mode; remeasure corner clearance and rebuild the row
 for the current window bounds. The eligible dock keeps its top geometry while closed, so reclaiming
-its width and reserving system-control space happen in the same render. Capability and edge
-clearance must not disappear while JS dimensions are waiting for a native geometry event;
-absolute-position consumers still require a dimension-matched snapshot.
+its width and reserving system-control space happen in the same render. Publish scene bounds,
+system insets, and bar geometry together; use those bounds for iOS window allocation after native
+geometry is ready. Keep the safe-area provider frame only for bootstrap. Shell padding and column
+allocation must consume the same React snapshot: a native safe-area view can otherwise resize the
+shell before its columns update. Absolute-position consumers still require a dimension-matched
+snapshot.
 
 The dock reserves at least 240 points and the workspace 360. Opening app navigation must preserve
 Explorer's width resolved without navigation, rather than squeezing it toward its minimum to fit

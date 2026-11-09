@@ -1,17 +1,9 @@
 import { useMemo, type ReactNode } from "react";
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
-import {
-  SafeAreaView,
-  SafeAreaInsetsContext,
-  useSafeAreaInsets,
-  type Edges,
-} from "react-native-safe-area-context";
+import { SafeAreaInsetsContext, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWindowLayout } from "./context";
 import { resolveWorkspaceActionPlacement, type DesktopDivisionLayout } from "./model";
-
-const HORIZONTAL_EDGES: Edges = ["left", "right"];
-const NO_EDGES: Edges = [];
 
 export function WindowLayoutSurface({
   children,
@@ -33,12 +25,21 @@ export function WindowLayoutSurface({
     () => (overridesCompactInsets ? { ...insets, left: 0, right: 0 } : insets),
     [overridesCompactInsets, insets],
   );
+  // Column allocation reads these same JS insets. A native SafeAreaView updates
+  // its padding in a separate Fabric commit and shifts the columns again after rotation.
+  const horizontalPadding = useMemo(
+    () =>
+      consumesHorizontalInsets
+        ? { paddingLeft: insets.left, paddingRight: insets.right }
+        : undefined,
+    [consumesHorizontalInsets, insets.left, insets.right],
+  );
   return (
-    <SafeAreaView style={style} edges={consumesHorizontalInsets ? HORIZONTAL_EDGES : NO_EDGES}>
+    <View style={[style, horizontalPadding]}>
       <SafeAreaInsetsContext.Provider value={contentInsets}>
         {children}
       </SafeAreaInsetsContext.Provider>
-    </SafeAreaView>
+    </View>
   );
 }
 

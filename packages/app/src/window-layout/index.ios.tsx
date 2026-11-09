@@ -10,14 +10,11 @@ import {
 import { StyleSheet, View, type NativeSyntheticEvent, type ViewProps } from "react-native";
 import { requireNativeViewManager } from "expo-modules-core";
 import { SafeAreaInsetsContext, useSafeAreaInsets } from "react-native-safe-area-context";
-import {
-  WindowLayoutContext,
-  WindowLayoutStatusBarHiddenContext,
-  useWindowLayout,
-} from "./context";
+import { WindowLayoutContext, WindowLayoutStatusBarHiddenContext } from "./context";
 import { resolveSafeAreaInsets, type WindowLayout } from "./model";
 import { HEADER_INNER_HEIGHT } from "@/constants/layout";
 import invariant from "tiny-invariant";
+import { AppWindowFrameContext } from "@/hooks/app-window-frame-context";
 
 export {
   useWindowLayout,
@@ -63,29 +60,40 @@ export function WindowLayoutProvider({ children }: { children: ReactNode }) {
   );
   return (
     <StatusBarPreferenceContext.Provider value={setStatusBarHidden}>
-      <WindowLayoutContext.Provider value={geometry}>
-        <WindowLayoutStatusBarHiddenContext.Provider value={statusBarHidden}>
-          <View style={styles.root}>
-            <GeometryProbe
-              pointerEvents="none"
-              style={StyleSheet.absoluteFill}
-              topChromeRowHeight={HEADER_INNER_HEIGHT}
-              statusBarHidden={statusBarHidden}
-              onGeometryChange={onGeometryChange}
-            />
-            <WindowSafeAreaInsets>{children}</WindowSafeAreaInsets>
-          </View>
-        </WindowLayoutStatusBarHiddenContext.Provider>
-      </WindowLayoutContext.Provider>
+      <AppWindowFrameContext.Provider value={geometry?.bounds ?? null}>
+        <WindowLayoutContext.Provider value={geometry}>
+          <WindowLayoutStatusBarHiddenContext.Provider value={statusBarHidden}>
+            <View style={styles.root}>
+              <GeometryProbe
+                pointerEvents="none"
+                style={StyleSheet.absoluteFill}
+                topChromeRowHeight={HEADER_INNER_HEIGHT}
+                statusBarHidden={statusBarHidden}
+                onGeometryChange={onGeometryChange}
+              />
+              <WindowSafeAreaInsets geometry={geometry}>{children}</WindowSafeAreaInsets>
+            </View>
+          </WindowLayoutStatusBarHiddenContext.Provider>
+        </WindowLayoutContext.Provider>
+      </AppWindowFrameContext.Provider>
     </StatusBarPreferenceContext.Provider>
   );
 }
 
-/** The one bottom inset every descendant reads through `useSafeAreaInsets()`. */
-function WindowSafeAreaInsets({ children }: { children: ReactNode }) {
+/** Descendants read the same scene snapshot used to allocate their columns. */
+function WindowSafeAreaInsets({
+  children,
+  geometry,
+}: {
+  children: ReactNode;
+  geometry: WindowLayout | null;
+}) {
   const systemInsets = useSafeAreaInsets();
-  const layout = useWindowLayout();
-  const insets = useMemo(() => resolveSafeAreaInsets(systemInsets, layout), [systemInsets, layout]);
+  const sourceInsets = geometry?.insets ?? systemInsets;
+  const insets = useMemo(
+    () => resolveSafeAreaInsets(sourceInsets, geometry),
+    [sourceInsets, geometry],
+  );
   return <SafeAreaInsetsContext.Provider value={insets}>{children}</SafeAreaInsetsContext.Provider>;
 }
 

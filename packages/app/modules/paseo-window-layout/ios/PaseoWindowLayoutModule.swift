@@ -10,11 +10,23 @@ public final class PaseoWindowLayoutReactDelegateHandler: ExpoReactDelegateHandl
 // Status-bar visibility belongs to this scene, including Expo's dev-client
 // container above the navigator. The probe updates this root without a global window lookup.
 private final class WindowLayoutRootViewController: UIViewController {
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    #if compiler(>=6.4)
+    if #available(iOS 27.1, *) {
+      registerForTraitChanges(UITraitCollection.systemTraitsAffectingVerticalBarEdge) {
+        (controller: WindowLayoutRootViewController, _) in
+        controller.setNeedsStatusBarAppearanceUpdate()
+      }
+    }
+    #endif
+  }
+
   var statusBarHidden = false {
     didSet {
       guard statusBarHidden != oldValue else { return }
       UIView.animate(
-        withDuration: statusBarHidden && !UIAccessibility.isReduceMotionEnabled ? 0.28 : 0,
+        withDuration: prefersStatusBarHidden && !UIAccessibility.isReduceMotionEnabled ? 0.28 : 0,
         delay: 0,
         options: [.beginFromCurrentState, .curveEaseInOut]
       ) {
@@ -28,9 +40,21 @@ private final class WindowLayoutRootViewController: UIViewController {
       }
     }
   }
-  override var prefersStatusBarHidden: Bool { statusBarHidden }
+  override var prefersStatusBarHidden: Bool {
+    // JS retains its portrait preference until the new scene geometry arrives.
+    // Resolve the system bar's visibility inside UIKit's own trait transition.
+    #if compiler(>=6.4)
+    if #available(iOS 27.1, *) {
+      switch traitCollection.verticalBarEdge {
+      case .leading, .trailing: return false
+      default: break
+      }
+    }
+    #endif
+    return statusBarHidden
+  }
   override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
-    statusBarHidden && !UIAccessibility.isReduceMotionEnabled ? .slide : .none
+    prefersStatusBarHidden && !UIAccessibility.isReduceMotionEnabled ? .slide : .none
   }
   override var childForStatusBarHidden: UIViewController? { nil }
   override var childForStatusBarStyle: UIViewController? { children.last }
@@ -178,9 +202,16 @@ final class WindowLayoutView: ExpoView {
     if let bottomBar = bottomBarGuide?.layoutFrame, bottomBar.height > 0 {
       bottomClearance = max(0, bounds.maxY - bottomBar.maxY)
     }
-    let topChrome = topChromeFrame()
+    let insets = safeAreaInsets
+    let topChrome = topChromeFrame(topInset: insets.top)
     let payload: [String: Any] = [
       "bounds": rect(bounds),
+      "insets": [
+        "top": insets.top,
+        "right": insets.right,
+        "bottom": insets.bottom,
+        "left": insets.left
+      ],
       "verticalBarEdge": barEdge,
       "verticalBar": barPayload,
       "bottomClearance": bottomClearance,
@@ -192,7 +223,7 @@ final class WindowLayoutView: ExpoView {
     onGeometryChange(payload)
   }
 
-  private func topChromeFrame() -> CGRect? {
+  private func topChromeFrame(topInset: CGFloat) -> CGRect? {
     guard topChromeRowHeight > 0, barEdge == "none",
           let scene = window?.windowScene else {
       topChromeReservation = nil
@@ -211,8 +242,8 @@ final class WindowLayoutView: ExpoView {
     let statusBar = scene.statusBarManager
     let statusFrame = statusBar?.statusBarFrame ?? .zero
     let fullWidthBarHeight = statusFrame.width >= bounds.width ? statusFrame.height : 0
-    let availableTopHeight = safeAreaInsets.top - fullWidthBarHeight
-    if statusBar?.isStatusBarHidden == false && safeAreaInsets.top > 0 &&
+    let availableTopHeight = topInset - fullWidthBarHeight
+    if statusBar?.isStatusBarHidden == false && topInset > 0 &&
        availableTopHeight < topChromeRowHeight {
       topChromeReservation = nil
       return nil

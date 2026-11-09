@@ -7,6 +7,7 @@ export interface WindowLayoutRect {
 
 export interface WindowLayout {
   bounds: WindowLayoutRect;
+  insets: { top: number; right: number; bottom: number; left: number };
   verticalBarEdge: "none" | "leading" | "trailing";
   verticalBar: WindowLayoutRect | null;
   /**
@@ -35,15 +36,19 @@ export function resolveWorkspaceTopChromeInsets(
   };
 }
 
-/** The window's measured bottom clearance replaces the rectangular safe-area bottom. */
-export function resolveSafeAreaInsets<Insets extends { bottom: number }>(
+/** Scene geometry and insets move together; the bottom bar refines the system clearance. */
+export function resolveSafeAreaInsets<Insets extends WindowLayout["insets"]>(
   systemInsets: Insets,
   layout: WindowLayout | null,
 ): Insets {
-  const clearance = layout?.bottomClearance;
-  return typeof clearance === "number" && clearance !== systemInsets.bottom
-    ? { ...systemInsets, bottom: clearance }
-    : systemInsets;
+  const insets = layout?.insets ?? systemInsets;
+  const bottom = layout?.bottomClearance ?? insets.bottom;
+  return insets.top === systemInsets.top &&
+    insets.right === systemInsets.right &&
+    bottom === systemInsets.bottom &&
+    insets.left === systemInsets.left
+    ? systemInsets
+    : { ...systemInsets, ...insets, bottom };
 }
 
 export interface DesktopDivisionLayout {
@@ -61,11 +66,10 @@ export function resolveWorkspaceActionPlacement(
 }
 
 export function resolveWorkspaceBarActions(
-  headerVariant: "compact" | "full",
-): readonly ("tab-count" | "overflow" | "explorer")[] {
-  return headerVariant === "compact"
-    ? ["tab-count", "overflow", "explorer"]
-    : ["overflow", "explorer"];
+  headerVariant: "compact" | "full" | "inline",
+): readonly ("tab-count" | "git" | "overflow" | "explorer")[] {
+  if (headerVariant === "compact") return ["tab-count", "git", "overflow", "explorer"];
+  return headerVariant === "inline" ? ["git", "overflow", "explorer"] : ["overflow", "explorer"];
 }
 
 /** One book-like partition owns allocation; horizontal folds retain the normal flow. */

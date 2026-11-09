@@ -22,6 +22,7 @@ import invariant from "tiny-invariant";
 export {
   useWindowLayout,
   useWindowLayoutHasTopChrome,
+  useWindowLayoutHasTopEdgeControls,
   useWindowLayoutStatusBarHidden,
 } from "./context";
 export { WindowLayoutActions, WindowLayoutActionsHost } from "./actions";

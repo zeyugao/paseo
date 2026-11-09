@@ -43,3 +43,11 @@ export function useWindowLayout(): WindowLayout | null {
     ? layout
     : null;
 }
+
+export function useWindowLayoutHasTopEdgeControls(): boolean {
+  const windowLayout = useWindowLayout();
+  const statusBarHidden = useWindowLayoutStatusBarHidden();
+  const hasTopChrome = useWindowLayoutHasTopChrome();
+  // Hiding the status bar removes its inset, not UIKit's top-edge tap gesture.
+  return statusBarHidden || hasTopChrome || windowLayout?.verticalBar != null;
+}

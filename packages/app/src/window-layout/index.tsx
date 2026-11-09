@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 export {
   useWindowLayout,
   useWindowLayoutHasTopChrome,
+  useWindowLayoutHasTopEdgeControls,
   useWindowLayoutStatusBarHidden,
 } from "./context";
 export { WindowLayoutActions, WindowLayoutActionsHost } from "./actions";

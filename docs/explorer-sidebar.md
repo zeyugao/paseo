@@ -146,6 +146,11 @@ their existing behavior. Retained inactive workspaces must not control the scene
 Animate hiding over 280 ms unless Reduce Motion is enabled. Restore visibility immediately to
 match the dock's one-render close.
 
+While app controls occupy the top edge, disable iOS scroll-to-top on the chat timeline and every
+file reader, including source, Markdown, HTML, and document previews. Hiding the status bar does
+not remove UIKit's tap gesture. Use the same scene-level ownership rule for all readers; ordinary
+safe-area layouts retain the system gesture.
+
 UIKit removes a hidden status bar's occlusion even from inactive-region queries. Keep its measured
 edge extent for the same scene and screen mode; remeasure corner clearance and rebuild the row
 for the current window bounds. The eligible dock keeps its top geometry while closed, so reclaiming

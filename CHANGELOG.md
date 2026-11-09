@@ -1,10 +1,10 @@
 # Changelog
 
-## 0.16.0-beta.1 - 2026-11-09
+## 0.16.0-beta.2 - 2026-11-10
 
 Plugins can add custom sidebars, work with collections across connected hosts, and keep device-specific settings. This beta rebases the Overkite changes onto upstream main.
 
-Duo keeps its folded-display Explorer layout, shared title-and-tab row beside the vertical system bar, compact controls and attention dots. Resizing either sidebar updates the tab layout. Split workspaces share one header while each pane retains its own tab rail.
+Duo keeps its folded-display Explorer layout, shared title-and-tab row beside the vertical system bar, compact controls and attention dots. Workspace titles and tab controls stay visible during rotation, and compact workspace and Explorer headers stay aligned. Git actions remain available in compact layouts. Resizing either sidebar updates the tab layout. Split workspaces share one header while each pane retains its own tab rail.
 
 File tabs keep their scroll position when tapping iOS top-edge controls. Changes detects rapid same-size edits without altering staging.
 
@@ -30,6 +30,8 @@ File tabs keep their scroll position when tapping iOS top-edge controls. Changes
 
 ### Fixed
 
+- Keep Duo header insets, tab controls and titles stable during rotation ([613351534](https://github.com/zeyugao/paseo/commit/613351534), [2124ab117](https://github.com/zeyugao/paseo/commit/2124ab117))
+- Preserve Git actions in compact workspaces and align workspace and Explorer headers ([840a425ab](https://github.com/zeyugao/paseo/commit/840a425ab), [2b8eb3818](https://github.com/zeyugao/paseo/commit/2b8eb3818))
 - Keep file scroll position when tapping iOS top-edge controls ([6b794d98a](https://github.com/zeyugao/paseo/commit/6b794d98a))
 - Detect rapid same-size edits in Changes without changing staging ([11f1046f4](https://github.com/zeyugao/paseo/commit/11f1046f4))
 - Reconnect dead host sockets promptly when returning to the app ([#9086](https://github.com/getpaseo/paseo/pull/9086))

@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.16.0-beta.1 - 2026-11-09
+
+Plugins can add custom sidebars, work with collections across connected hosts, and keep device-specific settings. This beta rebases the Overkite changes onto upstream main.
+
+Duo keeps its folded-display Explorer layout, shared title-and-tab row beside the vertical system bar, compact controls and attention dots. Resizing either sidebar updates the tab layout. Split workspaces share one header while each pane retains its own tab rail.
+
+File tabs keep their scroll position when tapping iOS top-edge controls. Changes detects rapid same-size edits without altering staging.
+
+### Added
+
+- Add plugin sidebars, cross-host collections and device-scoped settings ([#8906](https://github.com/getpaseo/paseo/pull/8906))
+- Highlight Terraform and HCL in files, diffs, tool output and web chat ([#9106](https://github.com/getpaseo/paseo/pull/9106))
+- Control provider background work ([#6220](https://github.com/getpaseo/paseo/pull/6220) by [@fxlelouarn](https://github.com/fxlelouarn))
+- Undo workspace archives ([#8904](https://github.com/getpaseo/paseo/pull/8904))
+- Change worktree base branches ([#8642](https://github.com/getpaseo/paseo/pull/8642) by [@Myasuka](https://github.com/Myasuka))
+
+### Improved
+
+- Keep chat position stable when expanding messages on Android and web ([#9085](https://github.com/getpaseo/paseo/pull/9085))
+- Fill collapsed history with complete turns ([#8358](https://github.com/getpaseo/paseo/pull/8358))
+- Center reply footers and permission controls ([#9083](https://github.com/getpaseo/paseo/pull/9083))
+- Separate folded summaries ([#9009](https://github.com/getpaseo/paseo/pull/9009))
+- Fit timing labels in narrow panes ([#9007](https://github.com/getpaseo/paseo/pull/9007))
+- Keep the composer focused after mouse Send ([#9015](https://github.com/getpaseo/paseo/pull/9015))
+- Turn pasted links into Markdown on web ([#8972](https://github.com/getpaseo/paseo/pull/8972))
+- Report routed connections accurately in Diagnostics ([#9058](https://github.com/getpaseo/paseo/pull/9058))
+- Report last-online state accurately in Diagnostics ([#9054](https://github.com/getpaseo/paseo/pull/9054))
+
+### Fixed
+
+- Keep file scroll position when tapping iOS top-edge controls ([6b794d98a](https://github.com/zeyugao/paseo/commit/6b794d98a))
+- Detect rapid same-size edits in Changes without changing staging ([11f1046f4](https://github.com/zeyugao/paseo/commit/11f1046f4))
+- Reconnect dead host sockets promptly when returning to the app ([#9086](https://github.com/getpaseo/paseo/pull/9086))
+- Prevent routed transfers from stalling under backpressure ([#9109](https://github.com/getpaseo/paseo/pull/9109))
+- Clear closed-agent attention ([#9087](https://github.com/getpaseo/paseo/pull/9087))
+- Restore archived workspace drafts with attachments ([#9079](https://github.com/getpaseo/paseo/pull/9079))
+- Avoid duplicate split-pane headers ([#9088](https://github.com/getpaseo/paseo/pull/9088))
+- Avoid duplicate workspace hover cards ([#9071](https://github.com/getpaseo/paseo/pull/9071))
+- Keep only Undo in archive toasts ([#9104](https://github.com/getpaseo/paseo/pull/9104))
+- Open History directly after a reload ([#9029](https://github.com/getpaseo/paseo/pull/9029))
+- Avoid turn-ID collisions on resume ([#9098](https://github.com/getpaseo/paseo/pull/9098))
+- Stream Changes revisions atomically ([#8907](https://github.com/getpaseo/paseo/pull/8907))
+- Release idle Claude runtimes before resuming ([#9019](https://github.com/getpaseo/paseo/pull/9019) by [@Brandon168](https://github.com/Brandon168))
+- Serialize Codex startup for shared state directories ([#9008](https://github.com/getpaseo/paseo/pull/9008) by [@michaelmwu](https://github.com/michaelmwu) and [@colonelpanic8](https://github.com/colonelpanic8))
+- Replay terminal mouse modes correctly ([#9004](https://github.com/getpaseo/paseo/pull/9004) by [@imink](https://github.com/imink))
+- Fill React-controlled browser inputs ([#9022](https://github.com/getpaseo/paseo/pull/9022))
+- Evaluate on CSP-restricted pages ([#8973](https://github.com/getpaseo/paseo/pull/8973) by [@amustapha](https://github.com/amustapha))
+- Close browser sockets cleanly ([#9067](https://github.com/getpaseo/paseo/pull/9067))
+
+### Notes
+
+- HCL highlighting in native chat is unchanged. Terminal workers from this version use protocol 6 and cannot be adopted by older daemons.
+
 ## 0.15.3-beta.5 - 2026-11-09
 
 On Duo, workspace titles and tabs, sidebar navigation, New workspace, History and Schedules use the available top edge while clearing system controls and rounded corners. Explorer fits the folded display, with its close button in the side bar when available. Narrow content uses compact controls below 550pt, and compact tabs and collapsed navigation show attention dots.

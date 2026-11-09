@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.16.0-beta.1 - 2026-11-09
+
+插件现在可以添加自定义侧栏、操作已连接主机上的跨主机集合，并保存设备独立设置。本次 beta 将 Overkite 改动 rebase 到上游 main。
+
+Duo 保留折叠屏 Explorer 布局、侧边系统栏旁的标题与标签页合并行、紧凑控件和待处理提示圆点。拖动任一侧栏时会即时更新标签页布局。分屏工作区共用一个顶栏，各 pane 保留自己的标签栏。
+
+iOS 文件页点击顶部控件不再跳回开头。Changes 能正确显示快速发生的同大小文件修改，且不改变暂存区。
+
+### 新增
+
+- 支持插件侧栏、跨主机集合和设备独立设置 ([#8906](https://github.com/getpaseo/paseo/pull/8906))
+- 在文件、diff、工具输出和网页聊天中高亮 Terraform 与 HCL ([#9106](https://github.com/getpaseo/paseo/pull/9106))
+- 控制提供商后台任务 ([#6220](https://github.com/getpaseo/paseo/pull/6220)，贡献者：[@fxlelouarn](https://github.com/fxlelouarn))
+- 撤销工作区归档 ([#8904](https://github.com/getpaseo/paseo/pull/8904))
+- 修改 worktree 基准分支 ([#8642](https://github.com/getpaseo/paseo/pull/8642)，贡献者：[@Myasuka](https://github.com/Myasuka))
+
+### 改进
+
+- Android 和网页展开消息时保持聊天位置稳定 ([#9085](https://github.com/getpaseo/paseo/pull/9085))
+- 折叠历史以完整轮次填充 ([#8358](https://github.com/getpaseo/paseo/pull/8358))
+- 居中回复页脚与权限控件 ([#9083](https://github.com/getpaseo/paseo/pull/9083))
+- 将折叠摘要独立成行 ([#9009](https://github.com/getpaseo/paseo/pull/9009))
+- 让耗时标签适配窄 pane ([#9007](https://github.com/getpaseo/paseo/pull/9007))
+- 鼠标点击 Send 后保持输入框焦点 ([#9015](https://github.com/getpaseo/paseo/pull/9015))
+- 网页粘贴链接时转换为 Markdown ([#8972](https://github.com/getpaseo/paseo/pull/8972))
+- 在 Diagnostics 中准确显示路由连接 ([#9058](https://github.com/getpaseo/paseo/pull/9058))
+- 在 Diagnostics 中准确显示最后在线状态 ([#9054](https://github.com/getpaseo/paseo/pull/9054))
+
+### 修复
+
+- iOS 文件页点击顶部控件时保持滚动位置 ([6b794d98a](https://github.com/zeyugao/paseo/commit/6b794d98a))
+- Changes 正确显示快速发生的同大小修改，且不改变暂存区 ([11f1046f4](https://github.com/zeyugao/paseo/commit/11f1046f4))
+- 返回应用时及时重连失效的主机连接 ([#9086](https://github.com/getpaseo/paseo/pull/9086))
+- 避免路由传输在背压下停滞 ([#9109](https://github.com/getpaseo/paseo/pull/9109))
+- 清除已关闭 Agent 的待处理提示 ([#9087](https://github.com/getpaseo/paseo/pull/9087))
+- 恢复已归档工作区的草稿和附件 ([#9079](https://github.com/getpaseo/paseo/pull/9079))
+- 避免分屏顶栏重复 ([#9088](https://github.com/getpaseo/paseo/pull/9088))
+- 避免工作区悬浮卡片重复 ([#9071](https://github.com/getpaseo/paseo/pull/9071))
+- 归档提示只保留 Undo ([#9104](https://github.com/getpaseo/paseo/pull/9104))
+- 重新加载后可直接打开 History ([#9029](https://github.com/getpaseo/paseo/pull/9029))
+- 避免恢复会话时轮次标识冲突 ([#9098](https://github.com/getpaseo/paseo/pull/9098))
+- 以完整版本更新流式 Changes 内容 ([#8907](https://github.com/getpaseo/paseo/pull/8907))
+- 恢复 Claude 前释放空闲运行实例 ([#9019](https://github.com/getpaseo/paseo/pull/9019)，贡献者：[@Brandon168](https://github.com/Brandon168))
+- 共享状态目录的 Codex 启动改为串行 ([#9008](https://github.com/getpaseo/paseo/pull/9008)，贡献者：[@michaelmwu](https://github.com/michaelmwu)、[@colonelpanic8](https://github.com/colonelpanic8))
+- 正确恢复终端鼠标模式 ([#9004](https://github.com/getpaseo/paseo/pull/9004)，贡献者：[@imink](https://github.com/imink))
+- 填写 React 受控浏览器输入框 ([#9022](https://github.com/getpaseo/paseo/pull/9022))
+- 在 CSP 限制页面执行脚本 ([#8973](https://github.com/getpaseo/paseo/pull/8973)，贡献者：[@amustapha](https://github.com/amustapha))
+- 正确关闭浏览器连接 ([#9067](https://github.com/getpaseo/paseo/pull/9067))
+
+### 说明
+
+- 原生聊天中的 HCL 高亮保持不变。本版本终端 worker 使用协议 6，无法由旧版 daemon 接管。
+
 ## 0.15.3-beta.5 - 2026-11-09
 
 Duo 上的工作区标题和标签页、侧栏导航、New workspace、History 和 Schedules 现在统一利用可用的顶部区域，同时避让系统控件和圆角。Explorer 适配折叠后的可用显示区域，并在有侧边系统栏时将关闭按钮放入其中。内容宽度低于 550pt 时使用紧凑控件，紧凑标签页和折叠导航会显示待处理提示圆点。

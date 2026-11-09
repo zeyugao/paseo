@@ -24,15 +24,15 @@ export function AdaptiveWorkspaceChrome({
     const measured = event.nativeEvent.layout.width;
     if (measured > 0) setWidth(measured);
   }, []);
+  let chrome = children;
+  if (compactHeader !== null) {
+    chrome = inlineHeaderActive
+      ? inlineHeader
+      : selectWorkspaceChrome({ width, compact: compactHeader, full: children });
+  }
   return (
     <WorkspaceTabMeasurementScope>
-      <View onLayout={measure}>
-        {compactHeader === null
-          ? children
-          : inlineHeaderActive
-            ? inlineHeader
-          : selectWorkspaceChrome({ width, compact: compactHeader, full: children })}
-      </View>
+      <View onLayout={measure}>{chrome}</View>
     </WorkspaceTabMeasurementScope>
   );
 }

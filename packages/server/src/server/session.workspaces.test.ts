@@ -2265,7 +2265,6 @@ test("workspace mark unread rejects workspaces without a read root agent", async
   });
 });
 
-
 test("close_items_request archives agents and kills terminals in one batch", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const archivedAt = "2026-04-01T00:00:00.000Z";

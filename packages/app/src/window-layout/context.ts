@@ -8,6 +8,15 @@ export const WindowLayoutContext = createContext<WindowLayout | null>(null);
 export const WindowLayoutContentEdgesContext = createContext({ left: true, right: true });
 export const WindowLayoutStatusBarHiddenContext = createContext(false);
 
+export const WindowLayoutContentAllocationContext = createContext<{
+  workspaceKey: string | null;
+  explorerVisible: boolean;
+  // A docked navigation sidebar owns live resize geometry through flex layout.
+  width: number | null;
+  targetWidth: number;
+  leftDockWidth: number;
+} | null>(null);
+
 export function useWindowLayoutStatusBarHidden(): boolean {
   return useContext(WindowLayoutStatusBarHiddenContext);
 }

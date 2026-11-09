@@ -8,6 +8,7 @@ import {
   resolveExplorerSidebarWidth,
   type ExplorerSidebarResize,
 } from "@/components/explorer-sidebar-layout";
+import { createSidebarResizeGeometryStore } from "@/window-layout/sidebar-resize-geometry";
 
 describe("Explorer sidebar layout", () => {
   it("keeps the sidebar width fixed when the workspace body changes size", () => {
@@ -23,6 +24,66 @@ describe("Explorer sidebar layout", () => {
     expect(resolveExplorerSidebarWidth({ requestedWidth: 900, containerWidth: 1600 })).toBe(900);
     expect(resolveExplorerSidebarWidth({ requestedWidth: 900, containerWidth: 1200 })).toBe(840);
     expect(resolveExplorerSidebarWidth({ requestedWidth: 600, containerWidth: 750 })).toBe(390);
+  });
+  describe("live native resize geometry", () => {
+    const explorerScope = {
+      viewportWidth: 1600,
+      workspaceKey: "host/workspace",
+      containerWidth: 1280,
+    };
+
+    it("keeps simultaneous windows independent even with identical scope keys", () => {
+      const firstWindow = createSidebarResizeGeometryStore();
+      const secondWindow = createSidebarResizeGeometryStore();
+      firstWindow.getState().publishLeft(1600, 360);
+      firstWindow.getState().publishExplorer({ ...explorerScope, width: 480 });
+      secondWindow.getState().publishLeft(1600, 280);
+      secondWindow.getState().publishExplorer({ ...explorerScope, width: 600 });
+
+      firstWindow.getState().publishLeft(1600, null);
+      firstWindow.getState().publishExplorer({ ...explorerScope, width: null });
+      expect(firstWindow.getState().left).toBeNull();
+      expect(firstWindow.getState().explorer).toBeNull();
+      expect(secondWindow.getState().left).toEqual({ viewportWidth: 1600, width: 280 });
+      expect(secondWindow.getState().explorer).toEqual({ ...explorerScope, width: 600 });
+
+      secondWindow.getState().publishLeft(1600, null);
+      secondWindow.getState().publishExplorer({ ...explorerScope, width: null });
+      expect(secondWindow.getState().left).toBeNull();
+      expect(secondWindow.getState().explorer).toBeNull();
+    });
+
+    it("ignores a left resize finalization from an earlier viewport", () => {
+      const store = createSidebarResizeGeometryStore();
+      const { publishLeft } = store.getState();
+      publishLeft(1600, 360);
+      publishLeft(1400, 280);
+      const current = store.getState();
+
+      publishLeft(1600, null);
+      expect(store.getState()).toBe(current);
+      expect(store.getState().left).toEqual({ viewportWidth: 1400, width: 280 });
+      publishLeft(1400, null);
+      expect(store.getState().left).toBeNull();
+    });
+
+    it.each([
+      { name: "viewport", scope: { ...explorerScope, viewportWidth: 1400 } },
+      { name: "workspace", scope: { ...explorerScope, workspaceKey: "host/other" } },
+      { name: "container", scope: { ...explorerScope, containerWidth: 1000 } },
+    ])("ignores explorer finalization from an earlier $name", ({ scope }) => {
+      const store = createSidebarResizeGeometryStore();
+      const { publishExplorer } = store.getState();
+      publishExplorer({ ...explorerScope, width: 480 });
+      publishExplorer({ ...scope, width: 360 });
+      const current = store.getState();
+
+      publishExplorer({ ...explorerScope, width: null });
+      expect(store.getState()).toBe(current);
+      expect(store.getState().explorer).toEqual({ ...scope, width: 360 });
+      publishExplorer({ ...scope, width: null });
+      expect(store.getState().explorer).toBeNull();
+    });
   });
 
   describe("native resize ownership", () => {

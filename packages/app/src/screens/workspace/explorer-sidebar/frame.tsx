@@ -43,6 +43,7 @@ function ExplorerFrameBase({
     [persistenceKey, resize],
   );
   const geometry = useExplorerGeometry({
+    workspaceKey: persistenceKey,
     width: resolveExplorerSidebarWidth({ requestedWidth: storedWidth, containerWidth }),
     containerWidth,
     overlay,

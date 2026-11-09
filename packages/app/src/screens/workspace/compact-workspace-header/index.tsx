@@ -1,6 +1,28 @@
-import { Fragment, useMemo, type ReactNode } from "react";
+import {
+  Fragment,
+  useCallback,
+  useContext,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { useTranslation } from "react-i18next";
-import { CompactHeader } from "@/components/headers/compact-header";
+import { useStore } from "zustand";
+import { CompactHeader, CompactHeaderTitle } from "@/components/headers/compact-header";
+import { ScreenHeader } from "@/components/headers/screen-header";
+import { SidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
+import { View, type LayoutChangeEvent } from "react-native";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useWindowChromeSafeAreaStyle } from "@/utils/desktop-window";
+import {
+  WindowLayoutContentEdgesContext,
+  WindowLayoutContentAllocationContext,
+  useWindowLayoutTopChromeInsets,
+} from "@/window-layout/context";
+import { useSidebarResizeGeometry } from "@/window-layout/sidebar-resize-geometry";
+import { resolveExplorerSidebarWidth } from "@/components/explorer-sidebar-layout";
 import {
   EXPLORER_TOGGLE_KEYS,
   WorkspaceExplorerToggle,
@@ -13,11 +35,18 @@ import {
   WindowLayoutActions,
 } from "@/window-layout";
 import { IconButtonChromeProvider } from "@/components/ui/icon-button-chrome";
+import {
+  resolveInlineWorkspaceTabPresentation,
+  resolveInlineWorkspaceTabBudget,
+  type WorkspaceInlineTabPresentation,
+} from "@/screens/workspace/workspace-tab-layout";
+import { WorkspaceActions } from "@/git/workspace-actions";
 
 export { MobileWorkspaceTabSwitcher } from "./tab-switcher";
 
 interface CompactWorkspaceHeaderProps {
   serverId: string;
+  workspaceDirectory?: string | null;
   isLoading: boolean;
   title: string;
   subtitle: string;
@@ -26,11 +55,215 @@ interface CompactWorkspaceHeaderProps {
   explorerToggleLabel: string;
   explorerToggleAccessibilityState: { expanded: boolean };
   tabSwitcher: ReactNode;
+  inlineTabRail?: ReactNode;
+  inlineTabsNaturalWidth?: number | null;
+  inlineHeaderGeometry: InlineWorkspaceHeaderGeometry;
   /** Workspace overflow menu. */
   children: ReactNode;
-  headerVariant: "compact" | "full";
+  headerVariant: "compact" | "full" | "inline";
   actionsActive: boolean;
 }
+
+interface InlineWorkspaceHeaderGeometry {
+  workspaceKey: string | null;
+  containerWidth: number;
+  explorer: { requestedWidth: number | undefined; containerWidth: number } | null;
+}
+
+interface InlineWorkspaceHeaderProps {
+  loading: boolean;
+  title: string;
+  projectRow: ReactNode;
+  tabRail: ReactNode;
+  tabSwitcher: ReactNode;
+  naturalWidth: number | null;
+  geometry: InlineWorkspaceHeaderGeometry;
+  horizontalPadding: number;
+  tabGap: number;
+}
+
+function InlineHeaderLeading({
+  loading,
+  title,
+  projectRow,
+  expanded = false,
+  measuring = false,
+  children,
+}: Pick<InlineWorkspaceHeaderProps, "loading" | "title" | "projectRow"> & {
+  expanded?: boolean;
+  measuring?: boolean;
+  children?: ReactNode;
+}) {
+  return (
+    <>
+      <SidebarMenuToggle
+        testID={measuring ? "workspace-header-sidebar-measurement" : undefined}
+        nativeID={measuring ? "workspace-header-sidebar-measurement" : undefined}
+      />
+      <View style={measuring ? styles.measuringTitleText : styles.inlineContent}>
+        <View style={expanded ? styles.expandedTitleText : styles.inlineTitleText}>
+          <CompactHeaderTitle
+            loading={loading}
+            title={title}
+            titleTestID={measuring ? undefined : "workspace-header-title"}
+            subtitle={projectRow}
+            fadeOverflow
+          />
+        </View>
+        {children}
+      </View>
+    </>
+  );
+}
+
+function useInlineWorkspaceHeaderWidth(geometry: InlineWorkspaceHeaderGeometry) {
+  const allocation = useContext(WindowLayoutContentAllocationContext);
+  const { store, viewportWidth } = useSidebarResizeGeometry();
+  const active = allocation?.workspaceKey === geometry.workspaceKey;
+  const leftDockWidth = active ? (allocation?.leftDockWidth ?? 0) : 0;
+  const leftWidth = useStore(store, (state) =>
+    leftDockWidth > 0 && state.left?.viewportWidth === viewportWidth ? state.left.width : null,
+  );
+  const explorerWidth = useStore(store, (state) =>
+    active &&
+    geometry.explorer &&
+    state.explorer?.viewportWidth === viewportWidth &&
+    state.explorer.workspaceKey === geometry.workspaceKey &&
+    state.explorer.containerWidth === geometry.explorer.containerWidth
+      ? state.explorer.width
+      : null,
+  );
+  const containerWidth = Math.max(
+    0,
+    geometry.containerWidth + (leftWidth === null ? 0 : leftDockWidth - leftWidth),
+  );
+  if (!geometry.explorer) return containerWidth;
+  return Math.max(
+    0,
+    containerWidth -
+      resolveExplorerSidebarWidth({
+        requestedWidth: explorerWidth ?? geometry.explorer.requestedWidth,
+        containerWidth,
+      }),
+  );
+}
+
+function InlineWorkspaceHeaderBase({
+  loading,
+  title,
+  projectRow,
+  tabRail,
+  tabSwitcher,
+  naturalWidth,
+  geometry,
+  horizontalPadding,
+  tabGap,
+}: InlineWorkspaceHeaderProps) {
+  const targetWidth = useInlineWorkspaceHeaderWidth(geometry);
+  const edges = useContext(WindowLayoutContentEdgesContext);
+  const topChrome = useWindowLayoutTopChromeInsets(useSafeAreaInsets(), edges);
+  const headerWidth = Math.max(
+    0,
+    targetWidth - (topChrome?.paddingLeft ?? 0) - (topChrome?.paddingRight ?? 0),
+  );
+  const chrome = useWindowChromeSafeAreaStyle("inline", horizontalPadding);
+  const horizontalInset =
+    ("paddingLeft" in chrome ? chrome.paddingLeft : 0) +
+    ("paddingRight" in chrome ? chrome.paddingRight : 0);
+  const [leadingWidth, setLeadingWidth] = useState(0);
+  const [lastPresentation, setLastPresentation] = useState<WorkspaceInlineTabPresentation>("tabs");
+  const measureLeading = useCallback((event: LayoutChangeEvent) => {
+    setLeadingWidth(event.nativeEvent.layout.width);
+  }, []);
+  const width = resolveInlineWorkspaceTabBudget({
+    width: headerWidth,
+    horizontalInset,
+    leadingWidth,
+    gap: tabGap,
+  });
+  const presentation =
+    leadingWidth > 0 && headerWidth > 0
+      ? resolveInlineWorkspaceTabPresentation(width, naturalWidth, lastPresentation)
+      : lastPresentation;
+  useLayoutEffect(() => {
+    setLastPresentation(presentation);
+  }, [presentation]);
+  const picker = presentation === "switcher";
+  const measuredLeading = useMemo(
+    () => (
+      <View style={styles.measuringLeading} onLayout={measureLeading}>
+        <InlineHeaderLeading loading={loading} title={title} projectRow={projectRow} measuring />
+      </View>
+    ),
+    [loading, title, projectRow, measureLeading],
+  );
+  const railWidthStyle = useMemo(
+    () => ({
+      width: Math.min(naturalWidth ?? width, width),
+    }),
+    [naturalWidth, width],
+  );
+  const railStyle = useMemo(
+    () => [styles.inlineRail, railWidthStyle, picker && styles.measuringRail],
+    [railWidthStyle, picker],
+  );
+  const visibleLeading = useMemo(
+    () => (
+      <InlineHeaderLeading
+        loading={loading}
+        title={title}
+        projectRow={projectRow}
+        expanded={picker}
+      >
+        <View
+          style={railStyle}
+          pointerEvents={picker ? "none" : "box-none"}
+          accessibilityElementsHidden={picker}
+          importantForAccessibility={picker ? "no-hide-descendants" : "auto"}
+        >
+          {tabRail}
+        </View>
+      </InlineHeaderLeading>
+    ),
+    [loading, title, projectRow, picker, railStyle, tabRail],
+  );
+  const measuredRail = useMemo(() => <View style={styles.inlineTabViewport} />, []);
+  const visibleSwitcher = picker ? tabSwitcher : undefined;
+  const switcherStyle = picker ? styles.switcherAction : undefined;
+  return (
+    <View style={styles.inlineHeader}>
+      {/* Measure stable title chrome, not the collapsing viewport. The target allocation
+          chooses the presentation in the same render that opens or closes Explorer. */}
+      <View
+        style={styles.measuringHeader}
+        pointerEvents="none"
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
+      >
+        <ScreenHeader
+          left={measuredLeading}
+          leftStyle={styles.measuringTitle}
+          right={measuredRail}
+          rightStyle={styles.inlineTabs}
+          borderless
+        />
+      </View>
+      <View style={styles.visibleHeader}>
+        <ScreenHeader
+          left={visibleLeading}
+          right={visibleSwitcher}
+          rightStyle={switcherStyle}
+          borderless
+        />
+      </View>
+    </View>
+  );
+}
+
+const InlineWorkspaceHeader = withUnistyles(InlineWorkspaceHeaderBase, (theme) => ({
+  horizontalPadding: theme.spacing[3],
+  tabGap: theme.spacing[4],
+}));
 
 /** The compact header with the workspace's project row and controls. */
 export function CompactWorkspaceHeader({
@@ -43,7 +276,11 @@ export function CompactWorkspaceHeader({
   explorerToggleAccessibilityState,
   children,
   tabSwitcher,
+  inlineTabRail,
+  inlineTabsNaturalWidth = null,
+  inlineHeaderGeometry,
   serverId,
+  workspaceDirectory,
   headerVariant,
   actionsActive,
 }: CompactWorkspaceHeaderProps) {
@@ -73,9 +310,9 @@ export function CompactWorkspaceHeader({
       />
     ),
   };
-  const actions = resolveWorkspaceBarActions(headerVariant).map((symbol) => (
-    <Fragment key={symbol}>{symbols[symbol]}</Fragment>
-  ));
+  const actions = resolveWorkspaceBarActions(headerVariant === "compact" ? "compact" : "full").map(
+    (symbol) => <Fragment key={symbol}>{symbols[symbol]}</Fragment>,
+  );
 
   return (
     <IconButtonChromeProvider value="header-island">
@@ -89,7 +326,51 @@ export function CompactWorkspaceHeader({
           actions={actionsInBar ? undefined : actions}
         />
       ) : null}
-      <WindowLayoutActions active={actionsActive}>{actions}</WindowLayoutActions>
+      {headerVariant === "inline" ? (
+        <InlineWorkspaceHeader
+          loading={isLoading}
+          title={title}
+          projectRow={projectRow}
+          tabRail={inlineTabRail}
+          tabSwitcher={tabSwitcher}
+          naturalWidth={inlineTabsNaturalWidth}
+          geometry={inlineHeaderGeometry}
+        />
+      ) : null}
+      <WindowLayoutActions active={actionsActive}>
+        {actions}
+        {headerVariant === "inline" && workspaceDirectory ? (
+          <WorkspaceActions serverId={serverId} cwd={workspaceDirectory} menuOnly />
+        ) : null}
+      </WindowLayoutActions>
     </IconButtonChromeProvider>
   );
 }
+
+const styles = StyleSheet.create((theme) => ({
+  inlineHeader: { position: "relative" },
+  measuringHeader: { opacity: 0 },
+  visibleHeader: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0 },
+  expandedTitleText: { flex: 1, minWidth: 0 },
+  switcherAction: { marginLeft: theme.spacing[4] },
+  measuringTitle: {
+    flex: 0,
+    flexBasis: "auto",
+    flexShrink: 0,
+    minWidth: 0,
+  },
+  measuringLeading: { flexDirection: "row", alignItems: "center", gap: theme.spacing[2] },
+  measuringTitleText: { flexShrink: 1, minWidth: 0, maxWidth: 240 },
+  inlineContent: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[4],
+  },
+  inlineTitleText: { flexShrink: 1, minWidth: 0 },
+  inlineRail: { flexShrink: 0, maxWidth: "100%" },
+  measuringRail: { position: "absolute", opacity: 0 },
+  inlineTabs: { flex: 1, minWidth: 0, marginLeft: theme.spacing[4] },
+  inlineTabViewport: { flex: 1, minWidth: 0 },
+}));

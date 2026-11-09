@@ -127,6 +127,12 @@ During a native resize, project that allocation with temporary, window-scoped si
 Only header chrome and the Explorer rail subscribe to those updates; keep column motion on the UI
 thread and save width preferences on release. Retire a publisher when its window or workspace allocation changes
 so queued gesture callbacks cannot revive geometry from the previous allocation.
+Keep the complete measured tab track above the header presentation branches. Changing React
+parents remounts the rail, and native `onLayout` can arrive after the new host paints; retaining
+only label widths still exposes an empty track during rotation. Keep its last natural width while
+the picker replaces it, rather than returning through a full-row placeholder.
+The title must also paint before layout callbacks arrive; only its overflow fade may depend on
+measurements, not the first line's visibility.
 Give the visible track its width in the parent's layout pass, and keep + in one host between fit
 and scroll states. Below the normal rail budget, keep the rail when every tab at its natural width
 plus the + button still fits. Otherwise, pin the tab switcher to the far right and let the title

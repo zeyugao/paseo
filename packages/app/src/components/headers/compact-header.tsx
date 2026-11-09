@@ -23,6 +23,7 @@ import { HEADER_INNER_HEIGHT_MOBILE, HEADER_TOP_PADDING_MOBILE } from "@/constan
 import type { ShortcutKey } from "@/utils/format-shortcut";
 import { TrailingActionScrim } from "@/components/ui/trailing-action-scrim";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
+import { bySizing, TOUCH_TARGET } from "@/components/ui/control-geometry";
 
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
 
@@ -41,6 +42,8 @@ interface CompactHeaderProps {
   loading?: boolean;
   /** Icon actions inherit the island chrome through the shared button primitives. */
   actions?: ReactNode;
+  /** Match the workspace's single-row touch header. */
+  workspaceRow?: boolean;
 }
 
 /**
@@ -58,26 +61,34 @@ export function CompactHeader({
   subtitle,
   loading = false,
   actions,
+  workspaceRow = false,
 }: CompactHeaderProps) {
   const insets = useSafeAreaInsets();
   const rootStyle = useMemo(
     () => [
       styles.root,
+      workspaceRow && styles.workspaceRoot,
       {
         paddingTop: insets.top + HEADER_TOP_PADDING_MOBILE,
         marginLeft: insets.left,
         marginRight: insets.right,
       },
     ],
-    [insets.top, insets.left, insets.right],
+    [insets.top, insets.left, insets.right, workspaceRow],
   );
 
   return (
     <IconButtonChromeProvider value="header-island">
       <View style={rootStyle}>
-        <View style={styles.row}>
+        <View style={[styles.row, workspaceRow && styles.workspaceRow]}>
           <View style={styles.island}>
-            {navigation === "menu" ? <SidebarMenuToggle /> : <BackButton onBack={onBack} />}
+            {navigation === "menu" ? (
+              <SidebarMenuToggle
+                style={workspaceRow ? styles.workspaceNavigationToggle : undefined}
+              />
+            ) : (
+              <BackButton onBack={onBack} />
+            )}
           </View>
           <View style={styles.titleGroup}>
             <CompactHeaderTitle
@@ -201,6 +212,15 @@ function BackButton({ onBack }: { onBack?: () => void }) {
 const styles = StyleSheet.create((theme) => ({
   root: {
     paddingHorizontal: theme.spacing[3],
+  },
+  workspaceRoot: {
+    paddingBottom: bySizing({ touch: HEADER_TOP_PADDING_MOBILE, pointer: 0 }),
+  },
+  workspaceRow: {
+    height: bySizing({ touch: TOUCH_TARGET, pointer: HEADER_INNER_HEIGHT_MOBILE }),
+  },
+  workspaceNavigationToggle: {
+    marginLeft: bySizing({ touch: 0, pointer: -theme.spacing[2] }),
   },
   row: {
     height: HEADER_INNER_HEIGHT_MOBILE,

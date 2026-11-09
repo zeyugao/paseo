@@ -134,9 +134,10 @@ fill the space up to it. Widening the workspace or closing tabs can restore the 
 normal budget, overflowing tabs retain their natural widths and scroll. Keep header height stable
 and omit its bottom separator. Compact, portrait, and focus-mode layouts retain their existing
 headers.
-Keep the workspace Git actions available as a menu in the vertical bar when that inline row
-replaces the full header. Use the bar's borderless icon chrome without a dropdown chevron. The
-menu includes the primary action as well as the other Git actions.
+Keep workspace Git actions available when either the compact header or the inline row replaces
+the full header. They share the same action group: place it in the vertical bar when available,
+otherwise in the compact header. Folding must not remove the Git entry. Use borderless icon chrome
+without a dropdown chevron; the menu includes the primary action and the other Git actions.
 
 On iOS, reuse the scene's top row only when UIKit leaves a full row beside a single corner
 occlusion, outside any full-width status bar, with no native vertical bar. This is a geometry

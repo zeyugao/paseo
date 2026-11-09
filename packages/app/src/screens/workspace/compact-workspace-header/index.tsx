@@ -310,8 +310,17 @@ export function CompactWorkspaceHeader({
       />
     ),
   };
-  const actions = resolveWorkspaceBarActions(headerVariant === "compact" ? "compact" : "full").map(
-    (symbol) => <Fragment key={symbol}>{symbols[symbol]}</Fragment>,
+  const actions = (
+    <>
+      {resolveWorkspaceBarActions(headerVariant === "compact" ? "compact" : "full").map(
+        (symbol) => (
+          <Fragment key={symbol}>{symbols[symbol]}</Fragment>
+        ),
+      )}
+      {headerVariant !== "full" && workspaceDirectory ? (
+        <WorkspaceActions serverId={serverId} cwd={workspaceDirectory} menuOnly />
+      ) : null}
+    </>
   );
 
   return (
@@ -337,12 +346,7 @@ export function CompactWorkspaceHeader({
           geometry={inlineHeaderGeometry}
         />
       ) : null}
-      <WindowLayoutActions active={actionsActive}>
-        {actions}
-        {headerVariant === "inline" && workspaceDirectory ? (
-          <WorkspaceActions serverId={serverId} cwd={workspaceDirectory} menuOnly />
-        ) : null}
-      </WindowLayoutActions>
+      <WindowLayoutActions active={actionsActive}>{actions}</WindowLayoutActions>
     </IconButtonChromeProvider>
   );
 }

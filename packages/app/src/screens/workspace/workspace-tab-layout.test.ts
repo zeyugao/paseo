@@ -12,8 +12,14 @@ import {
   selectWorkspaceChrome,
   computeWorkspaceTabLayout,
   retainWorkspaceTabMeasuredWidth,
+  shouldUseInlineWorkspaceHeader,
+  WORKSPACE_INLINE_TABS_MIN_WIDTH,
+  resolveInlineWorkspaceTabPresentation,
+  resolveInlineWorkspaceTabBudget,
+  workspaceTabNaturalWidth,
 } from "@/screens/workspace/workspace-tab-layout";
 import { resolveWorkspaceTopChromeInsets, type WindowLayout } from "@/window-layout/model";
+import { resolveExplorerSidebarWidth } from "@/components/explorer-sidebar-layout";
 
 describe("workspace top chrome placement", () => {
   const layout: WindowLayout = {
@@ -75,6 +81,188 @@ describe("workspace top chrome placement", () => {
       paddingLeft: 6,
       paddingRight: 144,
     });
+  });
+});
+
+describe("inline workspace header availability", () => {
+  const landscape: WindowLayout = {
+    bounds: { x: 0, y: 0, width: 951, height: 669 },
+    verticalBarEdge: "trailing",
+    verticalBar: { x: 867, y: 0, width: 84, height: 669 },
+    divisions: [],
+  };
+
+  it("merges the header only beside a usable trailing bar in a landscape window", () => {
+    expect(shouldUseInlineWorkspaceHeader(landscape)).toBe(true);
+    expect(shouldUseInlineWorkspaceHeader(null)).toBe(false);
+    expect(shouldUseInlineWorkspaceHeader({ ...landscape, verticalBar: null })).toBe(false);
+    expect(shouldUseInlineWorkspaceHeader({ ...landscape, verticalBarEdge: "leading" })).toBe(
+      false,
+    );
+    expect(
+      shouldUseInlineWorkspaceHeader({
+        ...landscape,
+        bounds: { x: 0, y: 0, width: 669, height: 951 },
+      }),
+    ).toBe(false);
+    expect(
+      shouldUseInlineWorkspaceHeader({
+        ...landscape,
+        bounds: { x: 0, y: 0, width: 669, height: 669 },
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps compact and focus-mode headers independent of the landscape bar", () => {
+    expect(shouldUseInlineWorkspaceHeader(landscape, true, false)).toBe(false);
+    expect(shouldUseInlineWorkspaceHeader(landscape, false, true)).toBe(false);
+    expect(shouldUseInlineWorkspaceHeader(landscape, false, false)).toBe(true);
+  });
+});
+
+describe("inline workspace tab presentation", () => {
+  function requiredWidth(labels: number[], addButtonWidth = 40) {
+    const inlineMetrics = {
+      ...metrics,
+      actionsReservedWidth: addButtonWidth,
+      rowPaddingHorizontal: 4,
+      rowHorizontalInset: labels.length > 0 ? metrics.tabGap / 2 : 0,
+    };
+    const layout = computeWorkspaceTabLayout({
+      viewportWidth: 1000,
+      tabLabelWidths: labels,
+      metrics: inlineMetrics,
+      compact: false,
+      preserveNaturalWidths: true,
+    });
+    return workspaceTabNaturalWidth(layout, inlineMetrics);
+  }
+
+  it("keeps a single tab and its add button at the exact narrow fit boundary", () => {
+    const required = requiredWidth([105]);
+    expect(required).toBeLessThan(WORKSPACE_INLINE_TABS_MIN_WIDTH);
+    expect(resolveInlineWorkspaceTabPresentation(required - 1, required)).toBe("switcher");
+    expect(resolveInlineWorkspaceTabPresentation(required, required)).toBe("tabs");
+  });
+
+  it("does not mistake enough room for the tab alone for room for its add button", () => {
+    const required = requiredWidth([105]);
+    expect(resolveInlineWorkspaceTabPresentation(required - 40, required)).toBe("switcher");
+    expect(resolveInlineWorkspaceTabPresentation(required, requiredWidth([105], 44))).toBe(
+      "switcher",
+    );
+  });
+
+  it("fits multiple short tabs without treating their count as a collapse rule", () => {
+    const required = requiredWidth([29, 52]);
+    expect(resolveInlineWorkspaceTabPresentation(required, required)).toBe("tabs");
+    expect(resolveInlineWorkspaceTabPresentation(required - 1, required)).toBe("switcher");
+  });
+
+  it("restores a narrow rail when closing a tab makes the complete track fit", () => {
+    const available = requiredWidth([105]);
+    const picker = resolveInlineWorkspaceTabPresentation(available, requiredWidth([105, 105]));
+    expect(picker).toBe("switcher");
+    expect(resolveInlineWorkspaceTabPresentation(available, requiredWidth([105]), picker)).toBe(
+      "tabs",
+    );
+  });
+
+  it("keeps a wide overflowing track as a scrolling rail", () => {
+    expect(
+      resolveInlineWorkspaceTabPresentation(
+        WORKSPACE_INLINE_TABS_MIN_WIDTH,
+        requiredWidth([160, 160, 160]),
+      ),
+    ).toBe("tabs");
+  });
+
+  it("includes both outboard slot margins before choosing overflow", () => {
+    const inlineMetrics = {
+      ...metrics,
+      actionsReservedWidth: 44,
+      rowPaddingHorizontal: 4,
+      rowHorizontalInset: 2,
+    };
+    const atWidth = (viewportWidth: number) =>
+      computeWorkspaceTabLayout({
+        viewportWidth,
+        tabLabelWidths: [126, 126],
+        metrics: inlineMetrics,
+        compact: false,
+        preserveNaturalWidths: true,
+      });
+    // Two 160-point chips, two 4-point slots, 8-point padding, and the 44-point add button.
+    expect(workspaceTabNaturalWidth(atWidth(380), inlineMetrics)).toBe(380);
+    expect(atWidth(380).requiresHorizontalScrollFallback).toBe(false);
+    expect(atWidth(379).requiresHorizontalScrollFallback).toBe(true);
+    expect(atWidth(376).requiresHorizontalScrollFallback).toBe(true);
+  });
+
+  it("reserves the complete slot margins at a narrow multi-tab fit boundary", () => {
+    const required = requiredWidth([29, 52], 44);
+    expect(required).toBe(210);
+    expect(resolveInlineWorkspaceTabPresentation(209, required)).toBe("switcher");
+    expect(resolveInlineWorkspaceTabPresentation(210, required)).toBe("tabs");
+  });
+
+  it("retains its presentation until a changed track has complete measurements", () => {
+    expect(resolveInlineWorkspaceTabPresentation(180, null, "tabs")).toBe("tabs");
+    expect(resolveInlineWorkspaceTabPresentation(180, null, "switcher")).toBe("switcher");
+    expect(resolveInlineWorkspaceTabPresentation(240, 230, "switcher")).toBe("tabs");
+    expect(resolveInlineWorkspaceTabPresentation(200, 230, "tabs")).toBe("switcher");
+  });
+
+  it("switches from the target main width when Explorer opens, not the previous wide frame", () => {
+    const workspaceWidth = 867;
+    const explorerWidth = resolveExplorerSidebarWidth({
+      requestedWidth: 440,
+      containerWidth: workspaceWidth,
+    });
+    const chrome = { horizontalInset: 24, leadingWidth: 150, gap: 16 };
+    const trackWidth = requiredWidth([105, 105]);
+    const openBudget = resolveInlineWorkspaceTabBudget({
+      ...chrome,
+      width: workspaceWidth - explorerWidth,
+    });
+    const closedBudget = resolveInlineWorkspaceTabBudget({ ...chrome, width: workspaceWidth });
+    expect(resolveInlineWorkspaceTabPresentation(closedBudget, trackWidth)).toBe("tabs");
+    expect(resolveInlineWorkspaceTabPresentation(openBudget, trackWidth, "tabs")).toBe("switcher");
+    expect(resolveInlineWorkspaceTabPresentation(closedBudget, trackWidth, "switcher")).toBe(
+      "tabs",
+    );
+  });
+
+  it("reserves header chrome and the title gap at the exact fit boundary", () => {
+    const geometry = { width: 400, horizontalInset: 24, leadingWidth: 120, gap: 16 };
+    const budget = resolveInlineWorkspaceTabBudget(geometry);
+    expect(budget).toBe(240);
+    expect(resolveInlineWorkspaceTabPresentation(budget, 240)).toBe("tabs");
+    const obstructed = resolveInlineWorkspaceTabBudget({ ...geometry, horizontalInset: 25 });
+    expect(resolveInlineWorkspaceTabPresentation(obstructed, 240)).toBe("switcher");
+  });
+
+  it("does not let a long measured title consume the entire collapse budget", () => {
+    const budget = resolveInlineWorkspaceTabBudget({
+      width: 420,
+      horizontalInset: 24,
+      leadingWidth: 900,
+      gap: 16,
+    });
+    expect(budget).toBe(248);
+    expect(resolveInlineWorkspaceTabPresentation(budget, 248)).toBe("tabs");
+    expect(resolveInlineWorkspaceTabPresentation(budget, 249)).toBe("switcher");
+  });
+
+  it("does not allocate a negative rail when window chrome consumes the header", () => {
+    const budget = resolveInlineWorkspaceTabBudget({
+      width: 20,
+      horizontalInset: 24,
+      leadingWidth: 150,
+      gap: 16,
+    });
+    expect(budget).toBe(0);
+    expect(resolveInlineWorkspaceTabPresentation(budget, 40)).toBe("switcher");
   });
 });
 
@@ -217,6 +405,21 @@ describe("computeWorkspaceTabLayout", () => {
     expect(result.requiresHorizontalScrollFallback).toBe(true);
     expect(result.items.map((item) => item.width)).toEqual([160, 118, 90]);
     expect(result.items.every((item) => item.showLabel)).toBe(true);
+  });
+
+  it("keeps overflowing embedded tabs visible at natural widths without removing close controls", () => {
+    const viewportWidth = 460;
+    expect(resolveInlineWorkspaceTabPresentation(viewportWidth, null)).toBe("tabs");
+    const result = computeWorkspaceTabLayout({
+      viewportWidth,
+      tabLabelWidths: [168, 84, 56],
+      metrics,
+      compact: false,
+      preserveNaturalWidths: true,
+    });
+    expect(result.requiresHorizontalScrollFallback).toBe(true);
+    expect(result.items.map((item) => item.width)).toEqual([160, 118, 90]);
+    expect(result.closeButtonPolicy).toBe("all");
   });
 
   it("returns empty layout details when there are no tabs", () => {

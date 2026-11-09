@@ -7,11 +7,16 @@ import {
   useWindowLayout,
   resolveDesktopDivisionLayout,
 } from "@/window-layout";
-import { WindowLayoutContentEdgesContext } from "@/window-layout/context";
+import {
+  WindowLayoutContentAllocationContext,
+  WindowLayoutContentEdgesContext,
+} from "@/window-layout/context";
+import { SidebarResizeGeometryProvider } from "@/window-layout/sidebar-resize-geometry";
 import { AddHostProvider, AddHostFlowHost } from "@/hosts/add-host";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useIsExplorerSidebarOpen } from "@/workspace-tabs/explorer-sidebar";
+import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import { ComposerEditingSessionsProvider } from "@/composer/editing-session";
 import { SheetHostScope } from "@/components/ui/isolated-bottom-sheet-modal";
 import "@/styles/unistyles";
@@ -111,7 +116,11 @@ import { useCompactWebViewportZoomLock } from "@/hooks/use-compact-web-viewport-
 import { useOpenProject } from "@/hooks/use-open-project";
 import { useAppSettings } from "@/hooks/use-settings";
 import { useOpenAgentListGesture } from "@/mobile-panels/gestures";
-import { MobilePanelsProvider, useIsMobilePanelActive } from "@/mobile-panels/provider";
+import {
+  MobilePanelsProvider,
+  useIsMobilePanelActive,
+  useLeftPanelWidth,
+} from "@/mobile-panels/provider";
 import {
   KeyboardActionDispatcherProvider,
   useKeyboardActionDispatcher,
@@ -390,15 +399,38 @@ const WINDOW_SIDEBAR_TOGGLE_HORIZONTAL_PADDING = 12;
 
 function WindowLayoutContentFrame({
   edges,
+  compact,
+  workspaceKey,
+  explorerVisible,
+  unreservedWidth,
+  divided,
   children,
 }: {
   edges: { left: boolean; right: boolean };
+  compact: boolean;
+  workspaceKey: string | null;
+  explorerVisible: boolean;
+  unreservedWidth: number;
+  divided: boolean;
   children: ReactNode;
 }) {
+  const sidebarWidth = useLeftPanelWidth();
+  const dockedSidebarWidth = divided ? 0 : sidebarWidth;
+  // Native stack screens can retain the previous docked frame for a layout pass.
+  // Without a navigation dock, the root owns the entire content allocation.
+  const width = edges.left ? unreservedWidth : null;
+  const targetWidth = edges.left ? unreservedWidth : unreservedWidth - dockedSidebarWidth;
+  const leftDockWidth = edges.left ? 0 : dockedSidebarWidth;
+  const allocation = useMemo(
+    () => (compact ? null : { workspaceKey, explorerVisible, width, targetWidth, leftDockWidth }),
+    [compact, workspaceKey, explorerVisible, width, targetWidth, leftDockWidth],
+  );
   return (
-    <WindowLayoutContentEdgesContext.Provider value={edges}>
-      <View style={flexStyle}>{children}</View>
-    </WindowLayoutContentEdgesContext.Provider>
+    <WindowLayoutContentAllocationContext.Provider value={allocation}>
+      <WindowLayoutContentEdgesContext.Provider value={edges}>
+        <View style={flexStyle}>{children}</View>
+      </WindowLayoutContentEdgesContext.Provider>
+    </WindowLayoutContentAllocationContext.Provider>
   );
 }
 
@@ -406,8 +438,7 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const daemons = useHosts();
   const { settings, updateSettings } = useAppSettings();
-  const toggleMobileAgentList = usePanelStore((state) => state.toggleMobileAgentList);
-  const toggleDesktopAgentList = usePanelStore((state) => state.toggleDesktopAgentList);
+  const toggleAgentList = usePanelStore((state) => state.toggleAgentListForLayout);
   const exitFocusMode = usePanelStore((state) => state.exitFocusMode);
   const isFocusModeEnabled = usePanelStore((state) => state.desktop.focusModeEnabled);
   const isDesktopAgentListOpen = usePanelStore((state) => state.desktop.agentListOpen);
@@ -434,7 +465,6 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const isWorkspaceFocusModeEnabled = isWorkspaceRoute && isFocusModeEnabled;
   const chromeEnabled = chromeEnabledOverride ?? daemons.length > 0;
   const hasMountedDesktopSidebar = useLatchedBoolean(chromeEnabled);
-  const toggleAgentList = isCompactLayout ? toggleMobileAgentList : toggleDesktopAgentList;
   const toggleDesktopSidebars = useCallback(() => {
     // The focused workspace owns its layout key, its checkout, and therefore the
     // only correct answer to "is the explorer open". Let it decide when there is
@@ -466,28 +496,43 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   useGlobalNewWorkspaceAction();
 
   const activeWorkspace = useActiveWorkspaceSelection();
+  const activeWorkspaceKey = activeWorkspace
+    ? `${activeWorkspace.serverId}:${activeWorkspace.workspaceId}`
+    : null;
   const explorerVisible = useIsExplorerSidebarOpen({
     isCompact: isCompactLayout,
-    workspaceKey: activeWorkspace
-      ? `${activeWorkspace.serverId}:${activeWorkspace.workspaceId}`
-      : null,
+    workspaceKey: activeWorkspaceKey,
   });
+  const requestedExplorerWidth = useWorkspaceLayoutStore((state) =>
+    activeWorkspaceKey ? state.explorerSidebarWidthByWorkspace[activeWorkspaceKey] : undefined,
+  );
   const appContentMinimumWidth = resolveDesktopAppContentMinimum({
-    explorerVisible: isWorkspaceRoute && explorerVisible,
+    explorer:
+      isWorkspaceRoute && explorerVisible
+        ? { requestedWidth: requestedExplorerWidth, containerWidth: viewportWidth }
+        : undefined,
     isSettingsRoute: pathname.includes("/settings"),
   });
   const desktopSidebarMounted = hasMountedDesktopSidebar && !isWorkspaceFocusModeEnabled;
-  const desktopSidebarVisible = resolveDesktopSidebarVisibility({
+  const leftDockAvailable = resolveDesktopSidebarVisibility({
     chromeEnabled,
     isCompactLayout,
     isMounted: desktopSidebarMounted,
-    isOpen: isDesktopAgentListOpen,
+    isOpen: true,
     divisionLayout,
     canShare: canDesktopAppSidebarShare({
       contentMinimumWidth: appContentMinimumWidth,
       requestedSidebarWidth: sidebarWidth,
       viewportWidth,
     }),
+  });
+  const desktopSidebarVisible = resolveDesktopSidebarVisibility({
+    chromeEnabled,
+    isCompactLayout,
+    isMounted: desktopSidebarMounted,
+    isOpen: isDesktopAgentListOpen,
+    divisionLayout,
+    canShare: leftDockAvailable,
   });
   const sidebarPresentation = resolveLeftSidebarPresentation({
     chromeEnabled,
@@ -498,8 +543,12 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const applyPanelLayout = usePanelStore((state) => state.applyPanelLayout);
   // Publishes the layout to the store, which owns the panel targets each layout allows.
   useLayoutEffect(() => {
-    applyPanelLayout({ isCompact: isCompactLayout, leftSidebar: sidebarPresentation });
-  }, [applyPanelLayout, isCompactLayout, sidebarPresentation]);
+    applyPanelLayout({
+      isCompact: isCompactLayout,
+      leftSidebar: sidebarPresentation,
+      leftDockAvailable,
+    });
+  }, [applyPanelLayout, isCompactLayout, sidebarPresentation, leftDockAvailable]);
   const hasTopLeftWindowControls = useHasWindowChromeObstruction("top-left");
   const appChromeLayout = resolveDesktopAppChromeLayout({
     desktopSidebarRendered: desktopSidebarVisible,
@@ -522,7 +571,16 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
     [desktopSidebarVisible],
   );
   const workspaceContent = (
-    <WindowLayoutContentFrame edges={contentEdges}>{children}</WindowLayoutContentFrame>
+    <WindowLayoutContentFrame
+      edges={contentEdges}
+      compact={isCompactLayout}
+      workspaceKey={activeWorkspaceKey}
+      explorerVisible={explorerVisible}
+      unreservedWidth={divisionLayout?.contentWidth ?? viewportWidth}
+      divided={divisionLayout !== null}
+    >
+      {children}
+    </WindowLayoutContentFrame>
   );
   const workspaceChrome = (
     <WindowLayoutSurface compact={isCompactLayout} style={rowStyle}>
@@ -602,7 +660,9 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
 
   return (
     <AppContainerLifetime sidebarGesturesEnabled={sidebarPresentation === "overlay"}>
-      <SheetHostScope enabled={isCompactLayout}>{surface}</SheetHostScope>
+      <SidebarResizeGeometryProvider viewportWidth={viewportWidth}>
+        <SheetHostScope enabled={isCompactLayout}>{surface}</SheetHostScope>
+      </SidebarResizeGeometryProvider>
     </AppContainerLifetime>
   );
 }

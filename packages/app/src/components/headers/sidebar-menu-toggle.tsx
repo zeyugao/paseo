@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
@@ -59,7 +59,7 @@ function SidebarMenuToggleButton({
   resolvedStyle: StyleProp<ViewStyle>;
 }) {
   const { t } = useTranslation();
-  const isOpen = usePanelStore((state) => selectIsAgentListOpen(state, { isCompact: isMobile }));
+  const isOpen = usePanelStore(selectIsAgentListOpen);
   const toggleAgentListForLayout = usePanelStore((state) => state.toggleAgentListForLayout);
   const attentionBucket = useSidebarAttention(isOpen);
   const toggleShortcutKeys = useMemo(
@@ -67,16 +67,12 @@ function SidebarMenuToggleButton({
     [],
   );
 
-  const handlePress = useCallback(() => {
-    toggleAgentListForLayout({ isCompact: isMobile });
-  }, [toggleAgentListForLayout, isMobile]);
-
   const accessibilityState = useMemo(() => ({ expanded: isOpen }), [isOpen]);
   const attentionLabel = attentionBucket ? t(ATTENTION_LABEL_KEYS[attentionBucket]) : undefined;
 
   return (
     <HeaderToggleButton
-      onPress={handlePress}
+      onPress={toggleAgentListForLayout}
       tooltipLabel={t("shell.menu.toggleSidebar")}
       tooltipKeys={toggleShortcutKeys}
       tooltipSide={tooltipSide}

@@ -1,6 +1,5 @@
 import { ComposerDockBackground } from "@/composer/dock";
 import { useMemo, type ReactNode } from "react";
-import type { LayoutChangeEvent } from "react-native";
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
@@ -19,7 +18,6 @@ interface ScreenHeaderProps {
   leftStyle?: StyleProp<ViewStyle>;
   rightStyle?: StyleProp<ViewStyle>;
   borderless?: boolean;
-  onRowLayout?: (event: LayoutChangeEvent) => void;
 }
 
 /**
@@ -32,7 +30,6 @@ export function ScreenHeader({
   leftStyle,
   rightStyle,
   borderless,
-  onRowLayout,
 }: ScreenHeaderProps) {
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
@@ -55,7 +52,6 @@ export function ScreenHeader({
         <WindowChromeSafeArea
           placement="inline"
           horizontalPadding={baseHorizontalPadding}
-          onLayout={onRowLayout}
           style={rowStyle}
         >
           <TitlebarDragRegion />

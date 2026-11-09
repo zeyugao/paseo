@@ -5,9 +5,13 @@ import { WorkspaceTabMeasurementScope } from "./workspace-desktop-tabs-row";
 
 export function AdaptiveWorkspaceChrome({
   compactHeader,
+  inlineHeader,
+  inlineHeaderActive = false,
   children,
 }: {
   compactHeader: ReactNode;
+  inlineHeader?: ReactNode;
+  inlineHeaderActive?: boolean;
   children: ReactNode;
 }) {
   const [width, setWidth] = useState<number | null>(null);
@@ -18,7 +22,9 @@ export function AdaptiveWorkspaceChrome({
   return (
     <WorkspaceTabMeasurementScope>
       <View onLayout={measure}>
-        {selectWorkspaceChrome({ width, compact: compactHeader, full: children })}
+        {inlineHeaderActive
+          ? inlineHeader
+          : selectWorkspaceChrome({ width, compact: compactHeader, full: children })}
       </View>
     </WorkspaceTabMeasurementScope>
   );

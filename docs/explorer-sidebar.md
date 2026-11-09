@@ -114,6 +114,30 @@ workspace tabs, launcher, and panel host. Below 600 points the shell is the swip
 overlay; at 600 points and above it reserves width beside the workspace. Native docking keeps its
 touch resize handle. Full workspace splits remain a separate web-only capability.
 
+In landscape beside a trailing native vertical bar, keep the compact workspace title and main
+tabs in one header row. Give fitting tabs and the + button only their natural width; the title
+shrinks first and uses the remaining space without a fixed width or fractional cap. Fade the title
+only when that space runs out. Tabs follow with a 16-point gap; do not right-align fitting tabs.
+Natural width includes the sortable slots' outer margins, not only their chip bodies.
+Choose the presentation from the root's target content allocation and the resolved Explorer
+width in the same render that opens or closes the dock. Measure only the stable leading content;
+Native Screens can deliver an older header width after the target allocation has changed. Do not
+let that `onLayout` replace the target width or switch the picker back to tabs.
+During a native resize, project that allocation with temporary, window-scoped sidebar widths.
+Only the inline header subscribes to those updates; keep column motion on the UI thread and save
+width preferences on release. Retire a publisher when its window or workspace allocation changes
+so queued gesture callbacks cannot revive geometry from the previous allocation.
+Give the visible track its width in the parent's layout pass, and keep + in one host between fit
+and scroll states. Below the normal rail budget, keep the rail when every tab at its natural width
+plus the + button still fits. Otherwise, pin the tab switcher to the far right and let the title
+fill the space up to it. Widening the workspace or closing tabs can restore the rail. Above the
+normal budget, overflowing tabs retain their natural widths and scroll. Keep header height stable
+and omit its bottom separator. Compact, portrait, and focus-mode layouts retain their existing
+headers.
+Keep the workspace Git actions available as a menu in the vertical bar when that inline row
+replaces the full header. Use the bar's borderless icon chrome without a dropdown chevron. The
+menu includes the primary action as well as the other Git actions.
+
 On iOS, reuse the scene's top row only when UIKit leaves a full row beside a single corner
 occlusion, outside any full-width status bar, with no native vertical bar. This is a geometry
 capability, not a device check. An eligible open dock hides the system status bar; closing it or
@@ -129,9 +153,16 @@ its width and reserving system-control space happen in the same render. Capabili
 clearance must not disappear while JS dimensions are waiting for a native geometry event;
 absolute-position consumers still require a dimension-matched snapshot.
 
-The dock reserves at least 240 points and the workspace 360. App navigation yields when it cannot
-share the remaining width with both. This keeps a portrait tablet from rendering three unusably
-narrow columns; widening restores navigation without changing its saved open state.
+The dock reserves at least 240 points and the workspace 360. Opening app navigation must preserve
+Explorer's width resolved without navigation, rather than squeezing it toward its minimum to fit
+another dock. Navigation yields to an overlay when those widths cannot share the window, keeping
+the Explorer divider fixed. Widening restores navigation without changing its saved open state.
+
+Native-stack screens can retain their previous frame for a layout pass after navigation yields.
+Publish Explorer visibility and the unreserved workspace width together at the root, scoped to the
+active workspace. An undocked workspace uses that allocation rather than the stale native screen
+width. Docked navigation keeps flex ownership so live resize gestures are not constrained by a
+persisted width. Keep the header's measured-width rule unchanged.
 
 Compact panel gestures own overlay visibility; the workspace layout owns its tab selection and
 contents on every platform. Explicit pane destinations bypass compact sheet placement, so choosing

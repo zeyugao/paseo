@@ -311,12 +311,10 @@ type WindowChromeSafeAreaProps = ViewProps & {
   horizontalPadding?: number;
 };
 
-export function WindowChromeSafeArea({
-  placement,
+export function useWindowChromeSafeAreaStyle(
+  placement: WindowChromeSafeAreaPlacement,
   horizontalPadding = 0,
-  style,
-  ...props
-}: WindowChromeSafeAreaProps) {
+) {
   const obstruction = useContext(WindowChromeContext);
   const corners = useContext(WindowChromeCornersContext);
   const safeAreaStyle = useMemo(() => {
@@ -329,6 +327,16 @@ export function WindowChromeSafeArea({
       paddingRight: paddingRight + horizontalPadding,
     };
   }, [corners, horizontalPadding, obstruction, placement]);
+  return safeAreaStyle;
+}
+
+export function WindowChromeSafeArea({
+  placement,
+  horizontalPadding = 0,
+  style,
+  ...props
+}: WindowChromeSafeAreaProps) {
+  const safeAreaStyle = useWindowChromeSafeAreaStyle(placement, horizontalPadding);
   const combinedStyle = useMemo(() => [style, safeAreaStyle], [safeAreaStyle, style]);
   return <View {...props} style={combinedStyle} />;
 }

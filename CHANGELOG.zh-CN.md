@@ -1,10 +1,10 @@
 # Changelog
 
-## 0.16.0-beta.1 - 2026-11-09
+## 0.16.0-beta.2 - 2026-11-10
 
 插件现在可以添加自定义侧栏、操作已连接主机上的跨主机集合，并保存设备独立设置。本次 beta 将 Overkite 改动 rebase 到上游 main。
 
-Duo 保留折叠屏 Explorer 布局、侧边系统栏旁的标题与标签页合并行、紧凑控件和待处理提示圆点。拖动任一侧栏时会即时更新标签页布局。分屏工作区共用一个顶栏，各 pane 保留自己的标签栏。
+Duo 保留折叠屏 Explorer 布局、侧边系统栏旁的标题与标签页合并行、紧凑控件和待处理提示圆点。旋转时工作区标题和标签控件保持显示，紧凑工作区与 Explorer 顶栏保持对齐。紧凑布局保留 Git 操作。拖动任一侧栏时会即时更新标签页布局。分屏工作区共用一个顶栏，各 pane 保留自己的标签栏。
 
 iOS 文件页点击顶部控件不再跳回开头。Changes 能正确显示快速发生的同大小文件修改，且不改变暂存区。
 
@@ -30,6 +30,8 @@ iOS 文件页点击顶部控件不再跳回开头。Changes 能正确显示快�
 
 ### 修复
 
+- Duo 旋转时保持顶栏留白、标签控件和标题稳定 ([613351534](https://github.com/zeyugao/paseo/commit/613351534), [2124ab117](https://github.com/zeyugao/paseo/commit/2124ab117))
+- 紧凑工作区保留 Git 操作，并对齐工作区与 Explorer 顶栏 ([840a425ab](https://github.com/zeyugao/paseo/commit/840a425ab), [2b8eb3818](https://github.com/zeyugao/paseo/commit/2b8eb3818))
 - iOS 文件页点击顶部控件时保持滚动位置 ([6b794d98a](https://github.com/zeyugao/paseo/commit/6b794d98a))
 - Changes 正确显示快速发生的同大小修改，且不改变暂存区 ([11f1046f4](https://github.com/zeyugao/paseo/commit/11f1046f4))
 - 返回应用时及时重连失效的主机连接 ([#9086](https://github.com/getpaseo/paseo/pull/9086))

@@ -1,5 +1,5 @@
 import {
-  AdaptiveWorkspaceChrome,
+  ProjectedWorkspaceChrome,
   type WorkspaceCompactHeaderTabs,
 } from "./adaptive-workspace-chrome";
 import { WindowTopChrome } from "@/window-layout/top-chrome";
@@ -3781,7 +3781,8 @@ function WorkspaceScreenContent({
     <View style={styles.centerColumn}>
       {rendersDesktopSplitContent ? null : (
         <WindowTopChrome>
-          <AdaptiveWorkspaceChrome
+          <ProjectedWorkspaceChrome
+            geometry={inlineHeaderGeometry}
             compactHeader={compactWorkspaceHeader}
             inlineHeader={inlineWorkspaceHeader}
             inlineHeaderActive={usesInlineWorkspaceHeader}
@@ -3789,7 +3790,7 @@ function WorkspaceScreenContent({
             {fullWorkspaceActions}
             {renderWorkspaceScreenHeader()}
             {desktopTabRail}
-          </AdaptiveWorkspaceChrome>
+          </ProjectedWorkspaceChrome>
         </WindowTopChrome>
       )}
       <View style={styles.centerContent}>
@@ -3809,6 +3810,8 @@ function WorkspaceScreenContent({
         normalizedServerId={normalizedServerId}
         normalizedWorkspaceId={normalizedWorkspaceId}
         isWorkspaceFocused={isRouteFocused}
+        inlineHeaderActive={usesInlineWorkspaceHeader}
+        headerGeometry={inlineHeaderGeometry}
         closingTabIds={closingTabIds}
         hoveredCloseTabKey={hoveredCloseTabKey}
         setHoveredCloseTabKey={setHoveredCloseTabKey}
@@ -3851,6 +3854,8 @@ function WorkspaceScreenContent({
     normalizedWorkspaceId,
     isRouteFocused,
     isExplorerSidebarShowing,
+    usesInlineWorkspaceHeader,
+    inlineHeaderGeometry,
     closingTabIds,
     hoveredCloseTabKey,
     selectTabInPane,

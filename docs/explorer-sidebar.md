@@ -124,16 +124,19 @@ width in the same render that opens or closes the dock. Measure only the stable 
 Native Screens can deliver an older header width after the target allocation has changed. Do not
 let that `onLayout` replace the target width or switch the picker back to tabs.
 During a native resize, project that allocation with temporary, window-scoped sidebar widths.
-Only the inline header subscribes to those updates; keep column motion on the UI thread and save
-width preferences on release. Retire a publisher when its window or workspace allocation changes
+Only header chrome and the Explorer rail subscribe to those updates; keep column motion on the UI
+thread and save width preferences on release. Retire a publisher when its window or workspace allocation changes
 so queued gesture callbacks cannot revive geometry from the previous allocation.
 Give the visible track its width in the parent's layout pass, and keep + in one host between fit
 and scroll states. Below the normal rail budget, keep the rail when every tab at its natural width
 plus the + button still fits. Otherwise, pin the tab switcher to the far right and let the title
 fill the space up to it. Widening the workspace or closing tabs can restore the rail. Above the
 normal budget, overflowing tabs retain their natural widths and scroll. Keep header height stable
-and omit its bottom separator. Compact, portrait, and focus-mode layouts retain their existing
-headers.
+and omit its bottom separator. Touch workspace single-row headers share the same control-height
+row and top clearance in portrait and landscape. Explorer matches that top clearance without
+adding bottom padding; its dock shell owns the sole separator below the tabs. Keep clearance
+outside the inline measurement/overlay frame so both layers share one origin. Pointer layouts
+keep desktop alignment; full and focus-mode headers retain their existing layout.
 Keep workspace Git actions available when either the compact header or the inline row replaces
 the full header. They share the same action group: place it in the vertical bar when available,
 otherwise in the compact header. Folding must not remove the Git entry. Use borderless icon chrome

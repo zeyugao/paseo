@@ -8,7 +8,6 @@ import {
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { useStore } from "zustand";
 import { CompactHeader, CompactHeaderTitle } from "@/components/headers/compact-header";
 import { ScreenHeader } from "@/components/headers/screen-header";
 import { SidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
@@ -18,11 +17,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWindowChromeSafeAreaStyle } from "@/utils/desktop-window";
 import {
   WindowLayoutContentEdgesContext,
-  WindowLayoutContentAllocationContext,
   useWindowLayoutTopChromeInsets,
 } from "@/window-layout/context";
-import { useSidebarResizeGeometry } from "@/window-layout/sidebar-resize-geometry";
-import { resolveExplorerSidebarWidth } from "@/components/explorer-sidebar-layout";
 import {
   EXPLORER_TOGGLE_KEYS,
   WorkspaceExplorerToggle,
@@ -41,6 +37,11 @@ import {
   type WorkspaceInlineTabPresentation,
 } from "@/screens/workspace/workspace-tab-layout";
 import { WorkspaceActions } from "@/git/workspace-actions";
+import { bySizing } from "@/components/ui/control-geometry";
+import {
+  useWorkspaceHeaderWidth,
+  type WorkspaceHeaderGeometry,
+} from "@/screens/workspace/use-workspace-header-width";
 
 export { MobileWorkspaceTabSwitcher } from "./tab-switcher";
 
@@ -57,17 +58,11 @@ interface CompactWorkspaceHeaderProps {
   tabSwitcher: ReactNode;
   inlineTabRail?: ReactNode;
   inlineTabsNaturalWidth?: number | null;
-  inlineHeaderGeometry: InlineWorkspaceHeaderGeometry;
+  inlineHeaderGeometry: WorkspaceHeaderGeometry;
   /** Workspace overflow menu. */
   children: ReactNode;
   headerVariant: "compact" | "full" | "inline";
   actionsActive: boolean;
-}
-
-interface InlineWorkspaceHeaderGeometry {
-  workspaceKey: string | null;
-  containerWidth: number;
-  explorer: { requestedWidth: number | undefined; containerWidth: number } | null;
 }
 
 interface InlineWorkspaceHeaderProps {
@@ -77,7 +72,7 @@ interface InlineWorkspaceHeaderProps {
   tabRail: ReactNode;
   tabSwitcher: ReactNode;
   naturalWidth: number | null;
-  geometry: InlineWorkspaceHeaderGeometry;
+  geometry: WorkspaceHeaderGeometry;
   horizontalPadding: number;
   tabGap: number;
 }
@@ -97,6 +92,7 @@ function InlineHeaderLeading({
   return (
     <>
       <SidebarMenuToggle
+        style={styles.inlineNavigationToggle}
         testID={measuring ? "workspace-header-sidebar-measurement" : undefined}
         nativeID={measuring ? "workspace-header-sidebar-measurement" : undefined}
       />
@@ -116,38 +112,6 @@ function InlineHeaderLeading({
   );
 }
 
-function useInlineWorkspaceHeaderWidth(geometry: InlineWorkspaceHeaderGeometry) {
-  const allocation = useContext(WindowLayoutContentAllocationContext);
-  const { store, viewportWidth } = useSidebarResizeGeometry();
-  const active = allocation?.workspaceKey === geometry.workspaceKey;
-  const leftDockWidth = active ? (allocation?.leftDockWidth ?? 0) : 0;
-  const leftWidth = useStore(store, (state) =>
-    leftDockWidth > 0 && state.left?.viewportWidth === viewportWidth ? state.left.width : null,
-  );
-  const explorerWidth = useStore(store, (state) =>
-    active &&
-    geometry.explorer &&
-    state.explorer?.viewportWidth === viewportWidth &&
-    state.explorer.workspaceKey === geometry.workspaceKey &&
-    state.explorer.containerWidth === geometry.explorer.containerWidth
-      ? state.explorer.width
-      : null,
-  );
-  const containerWidth = Math.max(
-    0,
-    geometry.containerWidth + (leftWidth === null ? 0 : leftDockWidth - leftWidth),
-  );
-  if (!geometry.explorer) return containerWidth;
-  return Math.max(
-    0,
-    containerWidth -
-      resolveExplorerSidebarWidth({
-        requestedWidth: explorerWidth ?? geometry.explorer.requestedWidth,
-        containerWidth,
-      }),
-  );
-}
-
 function InlineWorkspaceHeaderBase({
   loading,
   title,
@@ -159,7 +123,7 @@ function InlineWorkspaceHeaderBase({
   horizontalPadding,
   tabGap,
 }: InlineWorkspaceHeaderProps) {
-  const targetWidth = useInlineWorkspaceHeaderWidth(geometry);
+  const targetWidth = useWorkspaceHeaderWidth(geometry);
   const edges = useContext(WindowLayoutContentEdgesContext);
   const topChrome = useWindowLayoutTopChromeInsets(useSafeAreaInsets(), edges);
   const headerWidth = Math.max(
@@ -232,29 +196,31 @@ function InlineWorkspaceHeaderBase({
   const switcherStyle = picker ? styles.switcherAction : undefined;
   return (
     <View style={styles.inlineHeader}>
-      {/* Measure stable title chrome, not the collapsing viewport. The target allocation
+      <View style={styles.inlineHeaderContent}>
+        {/* Measure stable title chrome, not the collapsing viewport. The target allocation
           chooses the presentation in the same render that opens or closes Explorer. */}
-      <View
-        style={styles.measuringHeader}
-        pointerEvents="none"
-        accessibilityElementsHidden
-        importantForAccessibility="no-hide-descendants"
-      >
-        <ScreenHeader
-          left={measuredLeading}
-          leftStyle={styles.measuringTitle}
-          right={measuredRail}
-          rightStyle={styles.inlineTabs}
-          borderless
-        />
-      </View>
-      <View style={styles.visibleHeader}>
-        <ScreenHeader
-          left={visibleLeading}
-          right={visibleSwitcher}
-          rightStyle={switcherStyle}
-          borderless
-        />
+        <View
+          style={styles.measuringHeader}
+          pointerEvents="none"
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          <ScreenHeader
+            left={measuredLeading}
+            leftStyle={styles.measuringTitle}
+            right={measuredRail}
+            rightStyle={styles.inlineTabs}
+            borderless
+          />
+        </View>
+        <View style={styles.visibleHeader}>
+          <ScreenHeader
+            left={visibleLeading}
+            right={visibleSwitcher}
+            rightStyle={switcherStyle}
+            borderless
+          />
+        </View>
       </View>
     </View>
   );
@@ -328,6 +294,7 @@ export function CompactWorkspaceHeader({
       {headerVariant === "compact" ? (
         <CompactHeader
           navigation="menu"
+          workspaceRow
           title={title}
           titleTestID="workspace-header-title"
           subtitle={projectRow}
@@ -352,7 +319,11 @@ export function CompactWorkspaceHeader({
 }
 
 const styles = StyleSheet.create((theme) => ({
-  inlineHeader: { position: "relative" },
+  inlineHeader: { paddingVertical: bySizing({ touch: theme.spacing[2], pointer: 0 }) },
+  inlineHeaderContent: { position: "relative" },
+  inlineNavigationToggle: {
+    marginLeft: bySizing({ touch: 0, pointer: -theme.spacing[2] }),
+  },
   measuringHeader: { opacity: 0 },
   visibleHeader: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0 },
   expandedTitleText: { flex: 1, minWidth: 0 },

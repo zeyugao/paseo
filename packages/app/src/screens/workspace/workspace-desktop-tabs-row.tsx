@@ -1761,6 +1761,7 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: "transparent",
   },
   tabsContainerSidebar: {
+    borderBottomWidth: 0,
     backgroundColor: theme.colors.surfaceSidebar,
   },
   tabsScroll: {

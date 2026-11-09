@@ -186,18 +186,18 @@ test("classifies a removed file as deleted", async () => {
   const root = await createRoot();
   const target = join(root, "removed.txt");
   await writeFile(target, "before");
-  const events: FileChange[] = [];
+  const deliveredTypes: FileChange["type"][] = [];
   const subscription = await subscribeToFileChanges(root, (error, batch) => {
     expect(error).toBeNull();
-    events.push(...batch);
+    for (const event of batch) {
+      if (event.path === target) deliveredTypes.push(event.type);
+    }
   });
 
   await rm(target);
-  // Native recursive delivery can be coalesced before the backend's deletion audit.
-  // Assert eventual classification without imposing Vitest's one-second default.
-  await expect
-    .poll(() => events.find((event) => event.path === target)?.type, { timeout: 10_000 })
-    .toBe("delete");
+  // Earlier native notifications for this path may precede the removal.
+  // Coalesced delivery still needs the backend's deletion-audit budget.
+  await expect.poll(() => deliveredTypes, { timeout: 10_000 }).toContain("delete");
   await subscription.unsubscribe();
 });
 

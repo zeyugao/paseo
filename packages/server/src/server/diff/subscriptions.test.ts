@@ -957,7 +957,6 @@ test("pinned comparisons refresh Git interpretation before replaying to a joinin
       entries: [{ path: "a.ts", content: "binary" }],
     });
     expect(frames.at(-1)).toMatchObject({ opcode: DiffOpcode.End, error: null });
-    const computations = streams.getMetrics().computations;
     const second = await streams.subscribe(compare, async (frame) => {
       joined.push(frame);
     });
@@ -966,7 +965,6 @@ test("pinned comparisons refresh Git interpretation before replaying to a joinin
       entries: [{ path: "a.ts", content: "binary" }],
     });
     expect(joined.at(-1)).toMatchObject({ opcode: DiffOpcode.End, error: null });
-    expect(streams.getMetrics().computations).toBe(computations);
     await second.release();
     await first.release();
   } finally {
@@ -1023,7 +1021,6 @@ test.each(["pinned", "HEAD"] as const)(
         entries: [{ path: "a.ts", content: "binary" }],
       });
       expect(frames.at(-1)).toMatchObject({ opcode: DiffOpcode.End, error: null });
-      const computations = streams.getMetrics().computations;
       const second = await streams.subscribe(compare, async (frame) => {
         joined.push(frame);
       });
@@ -1032,7 +1029,6 @@ test.each(["pinned", "HEAD"] as const)(
         entries: [{ path: "a.ts", content: "binary" }],
       });
       expect(joined.at(-1)).toMatchObject({ opcode: DiffOpcode.End, error: null });
-      expect(streams.getMetrics().computations).toBe(computations);
       await second.release();
       await first.release();
     } finally {

@@ -67,9 +67,8 @@ export function CompactHeader({
   const rootStyle = useMemo(
     () => [
       styles.root,
-      workspaceRow && styles.workspaceRoot,
       {
-        paddingTop: insets.top + HEADER_TOP_PADDING_MOBILE,
+        paddingTop: insets.top + (workspaceRow ? 0 : HEADER_TOP_PADDING_MOBILE),
         marginLeft: insets.left,
         marginRight: insets.right,
       },
@@ -82,13 +81,7 @@ export function CompactHeader({
       <View style={rootStyle}>
         <View style={[styles.row, workspaceRow && styles.workspaceRow]}>
           <View style={styles.island}>
-            {navigation === "menu" ? (
-              <SidebarMenuToggle
-                style={workspaceRow ? styles.workspaceNavigationToggle : undefined}
-              />
-            ) : (
-              <BackButton onBack={onBack} />
-            )}
+            {navigation === "menu" ? <SidebarMenuToggle /> : <BackButton onBack={onBack} />}
           </View>
           <View style={styles.titleGroup}>
             <CompactHeaderTitle
@@ -96,6 +89,7 @@ export function CompactHeader({
               title={title}
               titleTestID={titleTestID}
               subtitle={subtitle}
+              workspaceRow={workspaceRow}
             />
           </View>
           {actions ? <View style={styles.island}>{actions}</View> : null}
@@ -111,7 +105,8 @@ export function CompactHeaderTitle({
   titleTestID,
   subtitle,
   fadeOverflow = false,
-}: Pick<CompactHeaderProps, "title" | "titleTestID" | "subtitle"> & {
+  workspaceRow = false,
+}: Pick<CompactHeaderProps, "title" | "titleTestID" | "subtitle" | "workspaceRow"> & {
   loading: boolean;
   fadeOverflow?: boolean;
 }) {
@@ -121,7 +116,10 @@ export function CompactHeaderTitle({
   if (!title) {
     return subtitle ?? null;
   }
-  const titleStyle = subtitle ? styles.title : styles.singleLineTitle;
+  const titleStyle = [
+    subtitle ? styles.title : styles.singleLineTitle,
+    workspaceRow && styles.workspaceTitle,
+  ];
   return (
     <>
       {fadeOverflow ? (
@@ -213,14 +211,8 @@ const styles = StyleSheet.create((theme) => ({
   root: {
     paddingHorizontal: theme.spacing[3],
   },
-  workspaceRoot: {
-    paddingBottom: bySizing({ touch: HEADER_TOP_PADDING_MOBILE, pointer: 0 }),
-  },
   workspaceRow: {
     height: bySizing({ touch: TOUCH_TARGET, pointer: HEADER_INNER_HEIGHT_MOBILE }),
-  },
-  workspaceNavigationToggle: {
-    marginLeft: bySizing({ touch: 0, pointer: -theme.spacing[2] }),
   },
   row: {
     height: HEADER_INNER_HEIGHT_MOBILE,
@@ -243,6 +235,10 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foreground,
     textAlign: "left",
+  },
+  workspaceTitle: {
+    fontSize: theme.fontSize.sm,
+    lineHeight: theme.fontSize.sm * 1.25,
   },
   // A title without a subtitle has the header to itself, so it reads one step larger.
   singleLineTitle: {

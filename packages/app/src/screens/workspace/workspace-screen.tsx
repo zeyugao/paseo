@@ -3810,8 +3810,6 @@ function WorkspaceScreenContent({
         normalizedServerId={normalizedServerId}
         normalizedWorkspaceId={normalizedWorkspaceId}
         isWorkspaceFocused={isRouteFocused}
-        inlineHeaderActive={usesInlineWorkspaceHeader}
-        headerGeometry={inlineHeaderGeometry}
         closingTabIds={closingTabIds}
         hoveredCloseTabKey={hoveredCloseTabKey}
         setHoveredCloseTabKey={setHoveredCloseTabKey}
@@ -3854,8 +3852,6 @@ function WorkspaceScreenContent({
     normalizedWorkspaceId,
     isRouteFocused,
     isExplorerSidebarShowing,
-    usesInlineWorkspaceHeader,
-    inlineHeaderGeometry,
     closingTabIds,
     hoveredCloseTabKey,
     selectTabInPane,

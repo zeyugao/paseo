@@ -132,11 +132,14 @@ and scroll states. Below the normal rail budget, keep the rail when every tab at
 plus the + button still fits. Otherwise, pin the tab switcher to the far right and let the title
 fill the space up to it. Widening the workspace or closing tabs can restore the rail. Above the
 normal budget, overflowing tabs retain their natural widths and scroll. Keep header height stable
-and omit its bottom separator. Touch workspace single-row headers share the same control-height
-row and top clearance in portrait and landscape. Explorer matches that top clearance without
-adding bottom padding; its dock shell owns the sole separator below the tabs. Keep clearance
-outside the inline measurement/overlay frame so both layers share one origin. Pointer layouts
-keep desktop alignment; full and focus-mode headers retain their existing layout.
+and omit its bottom separator. Touch workspace single-row headers and Explorer share one
+control-height row without extra vertical padding. Fit the two-line workspace title inside that
+row: small primary text and a smaller project caption. Keep the leading sidebar control's touch
+target intact. In both orientations, add its rounded-corner gutter only while the navigation
+sidebar is collapsed. When expanded, use the same default leading inset as other pages; do not
+add a workspace-specific inset.
+Explorer's dock shell owns the sole separator below its tabs. Keep the inline measurement and
+overlay layers on the same origin. Full and focus-mode headers retain their existing layout.
 Keep workspace Git actions available when either the compact header or the inline row replaces
 the full header. They share the same action group: place it in the vertical bar when available,
 otherwise in the compact header. Order the group as tab switcher, Git, overflow, then Explorer,

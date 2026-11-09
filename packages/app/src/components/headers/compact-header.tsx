@@ -22,7 +22,6 @@ import {
 import { HEADER_INNER_HEIGHT_MOBILE, HEADER_TOP_PADDING_MOBILE } from "@/constants/layout";
 import type { ShortcutKey } from "@/utils/format-shortcut";
 import { TrailingActionScrim } from "@/components/ui/trailing-action-scrim";
-import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { bySizing, TOUCH_TARGET } from "@/components/ui/control-geometry";
 
 const ThemedArrowLeft = withUnistyles(ArrowLeft);
@@ -151,29 +150,35 @@ function FadingHeaderTitle({ title, titleTestID, style }: FadingHeaderTitleProps
   }, []);
 
   return (
-    <View
-      style={[styles.fadingTitle, inlineUnistylesStyle({ width: textWidth })]}
-      onLayout={measureViewport}
-    >
-      {/* Horizontal content measures the full line; an ordinary Text reports its clipped width. */}
+    <View style={styles.fadingTitle} onLayout={measureViewport}>
+      <Text
+        style={[style, styles.clippedTitle]}
+        numberOfLines={1}
+        ellipsizeMode="clip"
+        testID={titleTestID}
+      >
+        {title}
+      </Text>
+      {/* A horizontal scroll content measures the full line even when the visible title is clipped. */}
       <ScrollView
         horizontal
         scrollEnabled={false}
-        style={styles.fadingTitleScroll}
+        style={styles.titleMeasurement}
+        pointerEvents="none"
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
         showsHorizontalScrollIndicator={false}
       >
-        <Text
-          style={[style, styles.unconstrainedTitle]}
-          numberOfLines={1}
-          ellipsizeMode="clip"
-          testID={titleTestID}
-          onLayout={measureText}
-        >
+        <Text style={[style, styles.unconstrainedTitle]} numberOfLines={1} onLayout={measureText}>
           {title}
         </Text>
       </ScrollView>
       {textWidth > viewportWidth + 1 ? (
-        <TrailingActionScrim backdrop="surface0" width={32} />
+        <TrailingActionScrim
+          backdrop="surface0"
+          width={32}
+          testID={titleTestID ? `${titleTestID}-fade` : undefined}
+        />
       ) : null}
     </View>
   );
@@ -248,12 +253,21 @@ const styles = StyleSheet.create((theme) => ({
     textAlign: "left",
   },
   fadingTitle: {
+    flexDirection: "row",
     minWidth: 0,
     maxWidth: "100%",
     overflow: "hidden",
   },
-  fadingTitleScroll: {
-    flexGrow: 0,
+  clippedTitle: {
+    flexShrink: 1,
+  },
+  titleMeasurement: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    opacity: 0,
   },
   unconstrainedTitle: {
     flexShrink: 0,

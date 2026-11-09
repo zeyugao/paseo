@@ -504,11 +504,50 @@ interface WorkspaceTabLabelMeasurement {
   width: number;
 }
 
-const TabMeasurementCache = createContext<Map<string, WorkspaceTabLabelMeasurement> | null>(null);
+interface WorkspaceTabTrackState {
+  presentations: Map<string, WorkspaceTabPresentation>;
+  setPresentations: Dispatch<SetStateAction<Map<string, WorkspaceTabPresentation>>>;
+  labelMeasurements: Map<string, WorkspaceTabLabelMeasurement>;
+  setLabelMeasurements: Dispatch<SetStateAction<Map<string, WorkspaceTabLabelMeasurement>>>;
+  snapshot: WorkspaceTabTrackSnapshot | null;
+  setSnapshot: Dispatch<SetStateAction<WorkspaceTabTrackSnapshot | null>>;
+  addButtonWidth: number;
+  setAddButtonWidth: Dispatch<SetStateAction<number>>;
+}
+
+const WorkspaceTabTrackContext = createContext<WorkspaceTabTrackState | null>(null);
 
 export function WorkspaceTabMeasurementScope({ children }: { children: React.ReactNode }) {
-  const cache = useMemo(() => new Map<string, WorkspaceTabLabelMeasurement>(), []);
-  return <TabMeasurementCache.Provider value={cache}>{children}</TabMeasurementCache.Provider>;
+  const [presentations, setPresentations] = useState(
+    () => new Map<string, WorkspaceTabPresentation>(),
+  );
+  const [labelMeasurements, setLabelMeasurements] = useState(
+    () => new Map<string, WorkspaceTabLabelMeasurement>(),
+  );
+  const [snapshot, setSnapshot] = useState<WorkspaceTabTrackSnapshot | null>(null);
+  const [addButtonWidth, setAddButtonWidth] = useState(0);
+  const track = useMemo(
+    () => ({
+      presentations,
+      setPresentations,
+      labelMeasurements,
+      setLabelMeasurements,
+      snapshot,
+      setSnapshot,
+      addButtonWidth,
+      setAddButtonWidth,
+    }),
+    [presentations, labelMeasurements, snapshot, addButtonWidth],
+  );
+  return (
+    <WorkspaceTabTrackContext.Provider value={track}>{children}</WorkspaceTabTrackContext.Provider>
+  );
+}
+
+function useWorkspaceTabTrack() {
+  const track = useContext(WorkspaceTabTrackContext);
+  if (!track) throw new Error("Workspace tab track requires its measurement scope");
+  return track;
 }
 
 interface WorkspaceTabTrackSnapshot {
@@ -554,8 +593,8 @@ function useWorkspaceTabNaturalWidth({
       ? workspaceTabNaturalWidth(layout, metrics)
       : null;
   useLayoutEffect(() => {
-    onChange?.(naturalWidth);
-  }, [naturalWidth, onChange]);
+    if (enabled) onChange?.(naturalWidth);
+  }, [enabled, naturalWidth, onChange]);
 }
 
 function workspaceTabLabelSignature(labels: WorkspaceTabLabel[]): string {
@@ -1068,9 +1107,18 @@ export function useWorkspaceNewTabKeyboardAction({
 }
 
 export function WorkspaceDesktopTabsRow(props: WorkspaceDesktopTabsRowProps) {
-  const [presentations, setPresentations] = useState(
-    () => new Map<string, WorkspaceTabPresentation>(),
+  const track = useContext(WorkspaceTabTrackContext);
+  return track ? (
+    <WorkspaceDesktopTabsRowContent {...props} />
+  ) : (
+    <WorkspaceTabMeasurementScope>
+      <WorkspaceDesktopTabsRowContent {...props} />
+    </WorkspaceTabMeasurementScope>
   );
+}
+
+function WorkspaceDesktopTabsRowContent(props: WorkspaceDesktopTabsRowProps) {
+  const { presentations, setPresentations } = useWorkspaceTabTrack();
   const handlePresentation = useCallback(
     (tabKey: string, presentation: WorkspaceTabPresentation) => {
       setPresentations((current) => {
@@ -1082,7 +1130,7 @@ export function WorkspaceDesktopTabsRow(props: WorkspaceDesktopTabsRowProps) {
         return next;
       });
     },
-    [],
+    [setPresentations],
   );
   const currentTabKeys = useMemo(
     () => new Set(props.tabs.map((item) => item.tab.key)),
@@ -1100,7 +1148,7 @@ export function WorkspaceDesktopTabsRow(props: WorkspaceDesktopTabsRowProps) {
       }
       return next;
     });
-  }, [currentTabKeys]);
+  }, [currentTabKeys, setPresentations]);
   const resolvedTabs = useMemo(
     () =>
       props.tabs.flatMap((item) => {
@@ -1178,19 +1226,21 @@ function ResolvedWorkspaceDesktopTabsRow({
   const [tabsContainerWidth, setTabsContainerWidth] = useState<number>(0);
   const tabsScrollRef = useRef<ScrollView>(null);
   const [exitFocusModeWidth, setExitFocusModeWidth] = useState<number>(0);
-  const [inlineAddButtonWidth, setInlineAddButtonWidth] = useState(0);
-  const measureInlineAddButton = useCallback((event: LayoutChangeEvent) => {
-    updateMeasuredWidth(setInlineAddButtonWidth, event);
-  }, []);
+  const {
+    labelMeasurements,
+    setLabelMeasurements,
+    snapshot: trackSnapshot,
+    setSnapshot: setTrackSnapshot,
+    addButtonWidth: inlineAddButtonWidth,
+    setAddButtonWidth: setInlineAddButtonWidth,
+  } = useWorkspaceTabTrack();
+  const measureInlineAddButton = useCallback(
+    (event: LayoutChangeEvent) => {
+      updateMeasuredWidth(setInlineAddButtonWidth, event);
+    },
+    [setInlineAddButtonWidth],
+  );
   const tabScrollBoundary = useHorizontalScrollBoundary();
-  const measurementCache = useContext(TabMeasurementCache);
-  const [labelMeasurements, setLabelMeasurements] = useState(() => new Map(measurementCache ?? []));
-  useLayoutEffect(() => {
-    if (!measurementCache) return;
-    measurementCache.clear();
-    for (const [key, value] of labelMeasurements) measurementCache.set(key, value);
-  }, [measurementCache, labelMeasurements]);
-  const [trackSnapshot, setTrackSnapshot] = useState<WorkspaceTabTrackSnapshot | null>(null);
 
   const handleTabsContainerLayout = useCallback((event: LayoutChangeEvent) => {
     updateMeasuredWidth(setTabsContainerWidth, event);
@@ -1291,11 +1341,8 @@ function ResolvedWorkspaceDesktopTabsRow({
       }
       return next;
     });
-  }, [currentTabLabelKeys]);
+  }, [currentTabLabelKeys, setLabelMeasurements]);
   const publishMeasuredTrack = useCallback(() => {
-    if (tabsContainerWidth <= 0) {
-      return;
-    }
     const labelWidths = completeWorkspaceTabLabelWidths(tabLabels, labelMeasurements);
     if (!labelWidths) {
       return;
@@ -1315,7 +1362,7 @@ function ResolvedWorkspaceDesktopTabsRow({
         labelWidths,
       };
     });
-  }, [labelMeasurements, tabLabelSignature, tabLabels, tabs, tabsContainerWidth]);
+  }, [labelMeasurements, tabLabelSignature, tabLabels, tabs, setTrackSnapshot]);
 
   useLayoutEffect(() => {
     publishMeasuredTrack();
@@ -1337,7 +1384,7 @@ function ResolvedWorkspaceDesktopTabsRow({
         return next;
       });
     },
-    [],
+    [setLabelMeasurements],
   );
 
   const displayedTabs = useMemo(() => {

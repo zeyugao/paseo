@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, writeFile, rm, readFile, lstat } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, readFile, lstat, utimes, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { expect, test } from "vitest";
@@ -43,6 +43,64 @@ test("working tree comparisons preserve staged deletions whose file remains on d
     expect(comparison.metrics.highlightCalls).toBe(0);
     await comparison.close();
     expect(git("diff", "--cached", "--name-status")).toBe("D\tx.ts");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("index comparisons retain racy equal-size edits without changing staging", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "diff-racy-index-"));
+  const git = (...args: string[]) =>
+    execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    }).trim();
+  try {
+    git("init", "-b", "main");
+    git("config", "user.email", "test@example.com");
+    git("config", "user.name", "Test");
+    // Coarse stat matching exercises Git's racy-index guard on every filesystem.
+    git("config", "core.trustctime", "false");
+    git("config", "core.checkstat", "minimal");
+    const filePath = join(cwd, "x.ts");
+    await writeFile(filePath, "const value = 1;\n");
+    git("add", ".");
+    git("-c", "commit.gpgsign=false", "commit", "-m", "base");
+    const timestamp = new Date("2020-01-01T00:00:00.000Z");
+    await writeFile(filePath, "const value = 2;\n");
+    await utimes(filePath, timestamp, timestamp);
+    git("add", ".");
+    const indexPath = join(cwd, ".git", "index");
+    await utimes(indexPath, timestamp, timestamp);
+    const originalIndex = await readFile(indexPath);
+    const originalMtime = (await lstat(indexPath, { bigint: true })).mtimeNs;
+    await writeFile(filePath, "const value = 3;\n");
+    await utimes(filePath, timestamp, timestamp);
+    expect(git("diff", "--name-only")).toBe("x.ts");
+
+    const comparison = await listComparison({
+      cwd,
+      base: { kind: "index" },
+      head: { kind: "worktree" },
+      highlight: false,
+    });
+    try {
+      expect(comparison.files.map((file) => file.entry.path)).toEqual(["x.ts"]);
+      const record = await readBody(comparison);
+      expect(record.body.hunks[0].lines).toContainEqual({
+        type: "remove",
+        content: "const value = 2;",
+      });
+      expect(record.body.hunks[0].lines).toContainEqual({
+        type: "add",
+        content: "const value = 3;",
+      });
+      expect(await readFile(indexPath)).toEqual(originalIndex);
+      expect((await lstat(indexPath, { bigint: true })).mtimeNs).toBe(originalMtime);
+    } finally {
+      await comparison.close();
+    }
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -278,7 +336,7 @@ test.each(["worktree", "index", "rev"] as const)(
 test.skipIf(process.platform === "win32")(
   "comparison roots preserve trailing folder spaces",
   async () => {
-    const root = await mkdtemp(join(tmpdir(), "diff-space-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "diff-space-")));
     const cwd = join(root, "repo ");
     const { mkdir } = await import("node:fs/promises");
     await mkdir(cwd);

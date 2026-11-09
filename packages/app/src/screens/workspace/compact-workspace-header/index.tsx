@@ -264,6 +264,9 @@ export function CompactWorkspaceHeader({
   );
   const symbols = {
     "tab-count": tabSwitcher,
+    git: workspaceDirectory ? (
+      <WorkspaceActions serverId={serverId} cwd={workspaceDirectory} menuOnly />
+    ) : null,
     overflow: children,
     explorer: (
       <WorkspaceExplorerToggle
@@ -278,14 +281,9 @@ export function CompactWorkspaceHeader({
   };
   const actions = (
     <>
-      {resolveWorkspaceBarActions(headerVariant === "compact" ? "compact" : "full").map(
-        (symbol) => (
-          <Fragment key={symbol}>{symbols[symbol]}</Fragment>
-        ),
-      )}
-      {headerVariant !== "full" && workspaceDirectory ? (
-        <WorkspaceActions serverId={serverId} cwd={workspaceDirectory} menuOnly />
-      ) : null}
+      {resolveWorkspaceBarActions(headerVariant).map((symbol) => (
+        <Fragment key={symbol}>{symbols[symbol]}</Fragment>
+      ))}
     </>
   );
 

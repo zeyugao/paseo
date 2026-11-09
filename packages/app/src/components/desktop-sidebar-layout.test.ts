@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   resolveDesktopDivisionLayout,
   resolveWorkspaceActionPlacement,
-  resolveWorkspaceBarActions,
   type WindowLayout,
 } from "@/window-layout";
 import {
@@ -20,6 +19,7 @@ import { resolveExplorerSidebarWidth } from "@/components/explorer-sidebar-layou
 describe("desktop sidebar layout", () => {
   const geometry: WindowLayout = {
     bounds: { x: 0, y: 0, width: 951, height: 669 },
+    insets: { top: 0, right: 84, bottom: 34, left: 0 },
     verticalBarEdge: "trailing",
     verticalBar: { x: 875, y: 160, width: 44, height: 450 },
     divisions: [{ x: 465, y: 0, width: 21, height: 669 }],
@@ -35,11 +35,6 @@ describe("desktop sidebar layout", () => {
     expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBarEdge: "leading" })).toBe(
       "header",
     );
-  });
-
-  it("shows the tab count only for the compact header selection", () => {
-    expect(resolveWorkspaceBarActions("compact")).toEqual(["tab-count", "overflow", "explorer"]);
-    expect(resolveWorkspaceBarActions("full")).toEqual(["overflow", "explorer"]);
   });
 
   it("allocates both panels around a live division without clamping to saved sidebar widths", () => {

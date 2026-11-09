@@ -76,6 +76,7 @@ vi.stubGlobal("React", React);
 const layout = { sidebarWidth: 465, gap: 21, contentWidth: 381 };
 const geometry: WindowLayout = {
   bounds: { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight },
+  insets: headerInsets,
   verticalBarEdge: "trailing",
   verticalBar: { x: 20, y: 20, width: 44, height: 400 },
   divisions: [],

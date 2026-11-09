@@ -24,6 +24,7 @@ import { resolveExplorerSidebarWidth } from "@/components/explorer-sidebar-layou
 describe("workspace top chrome placement", () => {
   const layout: WindowLayout = {
     bounds: { x: 0, y: 0, width: 669, height: 951 },
+    insets: { top: 84, right: 0, bottom: 34, left: 0 },
     verticalBarEdge: "none",
     verticalBar: null,
     divisions: [],
@@ -87,6 +88,7 @@ describe("workspace top chrome placement", () => {
 describe("inline workspace header availability", () => {
   const landscape: WindowLayout = {
     bounds: { x: 0, y: 0, width: 951, height: 669 },
+    insets: { top: 0, right: 84, bottom: 34, left: 0 },
     verticalBarEdge: "trailing",
     verticalBar: { x: 867, y: 0, width: 84, height: 669 },
     divisions: [],

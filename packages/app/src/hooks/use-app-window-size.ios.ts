@@ -1,6 +1,9 @@
+import { useContext } from "react";
 import { useSafeAreaFrame } from "react-native-safe-area-context";
+import { AppWindowFrameContext } from "./app-window-frame-context";
 
-// Frame and insets must come from the same provider event during rotation.
+// Once the native probe is ready, frame, insets and system-control geometry share one event.
 export function useAppWindowSize() {
-  return useSafeAreaFrame();
+  const safeAreaFrame = useSafeAreaFrame();
+  return useContext(AppWindowFrameContext) ?? safeAreaFrame;
 }

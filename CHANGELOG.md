@@ -1,8 +1,12 @@
 # Changelog
 
-## 0.15.3-beta.4 - 2026-11-07
+## 0.15.3-beta.5 - 2026-11-09
 
 On Duo, workspace titles and tabs, sidebar navigation, New workspace, History and Schedules use the available top edge while clearing system controls and rounded corners. Explorer fits the folded display, with its close button in the side bar when available. Narrow content uses compact controls below 550pt, and compact tabs and collapsed navigation show attention dots.
+
+Landscape workspaces beside Duo's vertical bar place the title and tabs in one row. Tabs stay at their natural width beside the title, scroll when the rail is wide enough, and switch to the tab picker when space is tight. The choice updates while either sidebar is being resized.
+
+Opening both sidebars from focus mode restores navigation as well as Explorer. Compact workspace actions include Scripts, and the vertical bar keeps workspace Git actions available through its icon menu. Eligible Explorer top rows hide the iOS status bar while open and restore it immediately on close.
 
 Opening or closing the sidebar no longer triggers the transcript's system scroll-to-top gesture. Workspaces with existing agents retain their tabs during startup instead of briefly showing the New launcher.
 

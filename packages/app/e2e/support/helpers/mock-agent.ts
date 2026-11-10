@@ -86,7 +86,12 @@ export function buildAgentRoute(
   return buildHostAgentDetailRoute(serverId, agentId, workspaceId);
 }
 
-/** Boots the app directly at the agent's workspace route and waits for the open intent to settle. */
+/**
+ * Boots the app directly at the agent's workspace route and waits for the route to consume the
+ * legacy `open` search parameter. The route defers opening the requested tab until workspace
+ * hydration finishes, so callers that immediately select another tab must first wait for the
+ * requested agent tab to become selected.
+ */
 export async function openAgentRoute(
   page: Page,
   input: { workspaceId: string; agentId: string },

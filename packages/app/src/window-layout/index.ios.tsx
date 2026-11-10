@@ -6,7 +6,7 @@ import { AppWindowFrameContext } from "@/hooks/app-window-frame-context";
 import { TopBandContext, WindowLayoutContext, useWindowLayout } from "./context";
 import { resolveSafeAreaInsets, resolveTopBand, type WindowLayout } from "./model";
 
-export { useWindowLayout } from "./context";
+export { useWindowLayout, useWindowLayoutHasTopEdgeControls } from "./context";
 export { WindowLayoutActions, WindowLayoutActionsHost } from "./actions";
 export { WindowLayoutSurface, WindowLayoutDivisionGap } from "./surface";
 export { WindowLayoutTopInset } from "./top-inset";

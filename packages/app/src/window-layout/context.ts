@@ -21,3 +21,10 @@ export function useWindowLayout(): WindowLayout | null {
 export function useTopBand(): TopBand | null {
   return useContext(TopBandContext);
 }
+
+/** App controls in the system's top band must not trigger UIKit's status-bar tap gesture. */
+export function useWindowLayoutHasTopEdgeControls(): boolean {
+  const layout = useWindowLayout();
+  const topBand = useTopBand();
+  return topBand !== null || layout?.verticalBar != null;
+}

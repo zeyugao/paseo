@@ -16,6 +16,7 @@ import {
   iconButtonChromeGlyphSize,
   mutedIconColorMapping,
 } from "@/components/ui/icon-button-chrome";
+import { bySizing } from "@/components/ui/control-geometry";
 
 const ThemedPanelLeft = withUnistyles(PanelLeft);
 
@@ -108,9 +109,13 @@ function SidebarMenuToggleButton({
 
 export function SidebarMenuToggle({ style, ...props }: SidebarMenuToggleProps = {}) {
   const isMobile = useIsCompactFormFactor();
+  const isOpen = usePanelStore((state) => selectIsAgentListOpen(state, { isCompact: isMobile }));
   const ownsTopLeft = useOwnsWindowChromeCorner("top-left");
   const hasTopLeftWindowControls = useHasWindowChromeObstruction("top-left");
-  const resolvedStyle = useMemo(() => [styles.leadingToggle, style], [style]);
+  const resolvedStyle = useMemo(
+    () => [styles.leadingToggle, !isOpen && styles.collapsedLeadingToggle, style],
+    [isOpen, style],
+  );
   const placeholderStyle = useMemo(
     () => [headerIconSlotStyle.slot, resolvedStyle],
     [resolvedStyle],
@@ -149,6 +154,10 @@ const styles = StyleSheet.create((theme) => ({
       xs: 0,
       md: -theme.spacing[2],
     },
+  },
+  // Without navigation beside it, the touch control must clear the window's rounded corner.
+  collapsedLeadingToggle: {
+    marginLeft: bySizing({ touch: 0, pointer: -theme.spacing[2] }),
   },
   mobileMenuIcon: {
     width: MOBILE_MENU_LINE_WIDTH,

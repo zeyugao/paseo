@@ -34,6 +34,11 @@ Yoga without waiting for the workspace's JS render; applying `insets.top` in Rea
 padding visible during rotation. Modals outside that root use their own context inset. Changes to
 the native probe or spacer require a client rebuild; a Metro reload cannot apply them.
 
+When iOS places workspace controls in the system top band, opt chat and file scrollers out of
+UIKit's status-bar tap-to-top gesture. Use window-layout context to identify that ownership;
+safe-area insets alone miss Duo's reserved vertical bar. Keep standard status-bar tap behavior
+when the system owns the top edge.
+
 ## Sheets
 
 On compact layouts, files and subagents open in a sheet over the workspace, so the tab switcher

@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { FlatList, Text, View, type ListRenderItem } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
+import { useWindowLayoutHasTopEdgeControls } from "@/window-layout";
 import type { HighlightToken } from "@getpaseo/highlight";
 import { syntaxTokenStyleFor } from "@/styles/syntax-token-styles";
 import type { WorkspaceFileLocation } from "@/workspace/file-open";
@@ -33,6 +34,7 @@ export function FileSourceView({
   navigationRevision,
   presentation,
 }: FileSourceViewProps) {
+  const hasTopEdgeControls = useWindowLayoutHasTopEdgeControls();
   const listRef = useRef<FlatList<HighlightToken[]>>(null);
   const [lines, setLines] = useState<HighlightToken[][] | null>(null);
   // Navigating within the file does not rebuild its lines; a new build starts at the latest line.
@@ -57,6 +59,7 @@ export function FileSourceView({
   return (
     <FlatList
       ref={listRef}
+      scrollsToTop={!hasTopEdgeControls}
       data={lines}
       keyExtractor={sourceLineKey}
       initialNumToRender={24}

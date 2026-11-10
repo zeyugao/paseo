@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export { useWindowLayout } from "./context";
+export { useWindowLayout, useWindowLayoutHasTopEdgeControls } from "./context";
 export { WindowLayoutActions, WindowLayoutActionsHost } from "./actions";
 export { WindowLayoutSurface, WindowLayoutDivisionGap } from "./surface";
 export { WindowLayoutTopInset } from "./top-inset";

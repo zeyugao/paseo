@@ -143,8 +143,10 @@ overlay; at 600 points and above it reserves width beside the workspace. Native 
 touch resize handle. Full workspace splits remain a separate web-only capability.
 
 The dock reserves at least 240 points and the workspace 360. App navigation yields when it cannot
-share the remaining width with both. This keeps a portrait tablet from rendering three unusably
-narrow columns; widening restores navigation without changing its saved open state.
+share the remaining width with both. Navigation buttons, shortcuts, and commands then toggle its
+overlay, not its saved dock preference. Widening restores that preference. A reserved display
+division keeps the workspace allocation fixed when navigation closes; it does not force navigation
+open.
 
 Compact panel gestures own overlay visibility; the workspace layout owns its tab selection and
 contents on every platform. Explicit pane destinations bypass compact sheet placement, so choosing

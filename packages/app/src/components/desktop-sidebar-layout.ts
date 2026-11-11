@@ -21,7 +21,8 @@ export function resolveDesktopSidebarVisibility(input: {
     input.chromeEnabled &&
     !input.isCompactLayout &&
     input.isMounted &&
-    (input.divisionLayout != null || (input.isOpen && input.canShare))
+    input.isOpen &&
+    (input.divisionLayout != null || input.canShare)
   );
 }
 

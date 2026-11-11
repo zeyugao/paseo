@@ -13,6 +13,7 @@ import {
 function makePanelState(overrides: Partial<PanelCoreState> = {}): PanelCoreState {
   return {
     mobilePanel: { target: "agent", revision: 0 },
+    layout: { isCompact: false, leftSidebar: "dock", canDockAgentList: true },
     desktop: {
       agentListOpen: false,
       focusModeEnabled: false,
@@ -113,6 +114,20 @@ describe("panel-store visibility selectors", () => {
 
     expect(selectIsAgentListOpen(state, { isCompact: false })).toBe(true);
   });
+
+  it("reports the overlay rather than the saved dock preference after navigation yields", () => {
+    const state = makePanelState({
+      layout: { isCompact: false, leftSidebar: "overlay", canDockAgentList: false },
+      desktop: { agentListOpen: true, focusModeEnabled: false },
+    });
+    expect(selectIsAgentListOpen(state, { isCompact: false })).toBe(false);
+    expect(
+      selectIsAgentListOpen(
+        { ...state, mobilePanel: { target: "agent-list", revision: 1 } },
+        { isCompact: false },
+      ),
+    ).toBe(true);
+  });
 });
 
 it("discards obsolete checkout selection while preserving other panel preferences", () => {
@@ -128,7 +143,9 @@ it("discards obsolete checkout selection while preserving other panel preference
 describe("panel-store wide navigation overlay", () => {
   it("subscribes with the current selection and observes future commands until unsubscribe", () => {
     usePanelStore.getState().showMobileAgent();
-    usePanelStore.getState().applyPanelLayout({ isCompact: false, leftSidebar: "hidden" });
+    usePanelStore
+      .getState()
+      .applyPanelLayout({ isCompact: false, leftSidebar: "hidden", canDockAgentList: false });
     const published = usePanelStore.getState().mobilePanel;
     const received: (typeof published)[] = [];
     const unsubscribe = subscribeMobilePanelSelection((selection) => received.push(selection));
@@ -149,11 +166,11 @@ describe("panel-store wide navigation overlay", () => {
     const panels = usePanelStore.getState();
     panels.showMobileAgent();
     panels.closeDesktopAgentList();
+    panels.applyPanelLayout({ isCompact: false, leftSidebar: "dock", canDockAgentList: true });
   });
 
   it.each([
     ["openDesktopAgentList", () => usePanelStore.getState().openDesktopAgentList()],
-    ["toggleDesktopAgentList", () => usePanelStore.getState().toggleDesktopAgentList()],
     [
       "openAgentListForLayout",
       () => usePanelStore.getState().openAgentListForLayout({ isCompact: false }),
@@ -171,27 +188,75 @@ describe("panel-store wide navigation overlay", () => {
     expect(usePanelStore.getState().mobilePanel.target).toBe("agent");
   });
 
+  it.each([false, true])(
+    "opens and closes yielded navigation without changing saved dock intent %s",
+    (agentListOpen) => {
+      usePanelStore.setState({ desktop: { agentListOpen, focusModeEnabled: false } });
+      const panels = usePanelStore.getState();
+      panels.applyPanelLayout({
+        isCompact: false,
+        leftSidebar: "overlay",
+        canDockAgentList: false,
+      });
+
+      panels.toggleAgentListForLayout({ isCompact: false });
+      expect(selectIsAgentListOpen(usePanelStore.getState(), { isCompact: false })).toBe(true);
+      expect(usePanelStore.getState().desktop.agentListOpen).toBe(agentListOpen);
+
+      panels.toggleAgentListForLayout({ isCompact: false });
+      expect(selectIsAgentListOpen(usePanelStore.getState(), { isCompact: false })).toBe(false);
+      expect(usePanelStore.getState().desktop.agentListOpen).toBe(agentListOpen);
+
+      panels.openAgentListForLayout({ isCompact: false });
+      expect(usePanelStore.getState().mobilePanel.target).toBe("agent-list");
+      panels.closeAgentListForLayout({ isCompact: false });
+      expect(usePanelStore.getState().mobilePanel.target).toBe("agent");
+      expect(usePanelStore.getState().desktop.agentListOpen).toBe(agentListOpen);
+
+      panels.applyPanelLayout({
+        isCompact: false,
+        leftSidebar: agentListOpen ? "dock" : "overlay",
+        canDockAgentList: true,
+      });
+      expect(selectIsAgentListOpen(usePanelStore.getState(), { isCompact: false })).toBe(
+        agentListOpen,
+      );
+    },
+  );
+
   it("drops the overlay target once the sidebar is no longer presented as an overlay", () => {
     usePanelStore.getState().showMobileAgentList();
-    usePanelStore.getState().applyPanelLayout({ isCompact: false, leftSidebar: "overlay" });
+    usePanelStore
+      .getState()
+      .applyPanelLayout({ isCompact: false, leftSidebar: "overlay", canDockAgentList: false });
     expect(usePanelStore.getState().mobilePanel.target).toBe("agent-list");
 
-    usePanelStore.getState().applyPanelLayout({ isCompact: false, leftSidebar: "dock" });
+    usePanelStore
+      .getState()
+      .applyPanelLayout({ isCompact: false, leftSidebar: "dock", canDockAgentList: true });
     expect(usePanelStore.getState().mobilePanel.target).toBe("agent");
 
     usePanelStore.getState().showMobileAgentList();
-    usePanelStore.getState().applyPanelLayout({ isCompact: false, leftSidebar: "hidden" });
+    usePanelStore
+      .getState()
+      .applyPanelLayout({ isCompact: false, leftSidebar: "hidden", canDockAgentList: false });
     expect(usePanelStore.getState().mobilePanel.target).toBe("agent");
   });
 
   it.each(["dock", "hidden"] as const)(
     "invalidates an opening swipe when presentation becomes %s before its target commits",
     (presentation) => {
-      usePanelStore.getState().applyPanelLayout({ isCompact: false, leftSidebar: "overlay" });
+      usePanelStore
+        .getState()
+        .applyPanelLayout({ isCompact: false, leftSidebar: "overlay", canDockAgentList: false });
       const startedRevision = usePanelStore.getState().mobilePanel.revision;
       expect(usePanelStore.getState().mobilePanel.target).toBe("agent");
 
-      usePanelStore.getState().applyPanelLayout({ isCompact: false, leftSidebar: presentation });
+      usePanelStore.getState().applyPanelLayout({
+        isCompact: false,
+        leftSidebar: presentation,
+        canDockAgentList: presentation === "dock",
+      });
 
       expect(usePanelStore.getState().mobilePanel.target).toBe("agent");
       expect(usePanelStore.getState().mobilePanel.revision).toBeGreaterThan(startedRevision);
@@ -203,7 +268,9 @@ describe("panel-store wide navigation overlay", () => {
     (leftSidebar) => {
       usePanelStore.getState().showMobileFileExplorer();
 
-      usePanelStore.getState().applyPanelLayout({ isCompact: true, leftSidebar });
+      usePanelStore
+        .getState()
+        .applyPanelLayout({ isCompact: true, leftSidebar, canDockAgentList: false });
 
       expect(usePanelStore.getState().mobilePanel.target).toBe("file-explorer");
     },
@@ -215,7 +282,11 @@ describe("panel-store wide navigation overlay", () => {
       usePanelStore.getState().showMobileFileExplorer();
       const openedRevision = usePanelStore.getState().mobilePanel.revision;
 
-      usePanelStore.getState().applyPanelLayout({ isCompact: false, leftSidebar });
+      usePanelStore.getState().applyPanelLayout({
+        isCompact: false,
+        leftSidebar,
+        canDockAgentList: leftSidebar === "dock",
+      });
 
       expect(usePanelStore.getState().mobilePanel.target).toBe("agent");
       expect(usePanelStore.getState().mobilePanel.revision).toBeGreaterThan(openedRevision);

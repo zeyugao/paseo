@@ -1,5 +1,5 @@
 import { usesDesktopBindings } from "@/keyboard";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { router, type Href } from "expo-router";
 import { useTranslation } from "react-i18next";
 import {
@@ -125,9 +125,11 @@ export function CommandCenterRootActions() {
   const groupMode = useSidebarViewStore((state) => state.groupMode);
   const setGroupMode = useSidebarViewStore((state) => state.setGroupMode);
   const isCompact = useIsCompactFormFactor();
-  const toggleMobileAgentList = usePanelStore((state) => state.toggleMobileAgentList);
-  const toggleDesktopAgentList = usePanelStore((state) => state.toggleDesktopAgentList);
-  const toggleAgentList = isCompact ? toggleMobileAgentList : toggleDesktopAgentList;
+  const toggleAgentListForLayout = usePanelStore((state) => state.toggleAgentListForLayout);
+  const toggleAgentList = useCallback(
+    () => toggleAgentListForLayout({ isCompact }),
+    [isCompact, toggleAgentListForLayout],
+  );
   const shortcutPlatform = useMemo(
     () => ({ isMac: getShortcutOs() === "mac", usesDesktopBindings }),
     [],

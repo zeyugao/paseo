@@ -32,11 +32,13 @@ export type LeftSidebarPresentation = "overlay" | "dock" | "hidden";
 /** The panels app chrome presents, which decide the mobile panel targets that can stay selected. */
 export interface PanelLayout extends PanelLayoutInput {
   leftSidebar: LeftSidebarPresentation;
+  canDockAgentList: boolean;
 }
 
 export interface PanelCoreState {
   mobilePanel: MobilePanelSelection;
   desktop: DesktopSidebarState;
+  layout: PanelLayout;
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -55,7 +57,11 @@ export function clampTreeRailWidth(width: number): number {
 }
 
 export function selectIsAgentListOpen(state: PanelCoreState, input: PanelLayoutInput): boolean {
-  return input.isCompact ? state.mobilePanel.target === "agent-list" : state.desktop.agentListOpen;
+  if (input.isCompact) return state.mobilePanel.target === "agent-list";
+  if (state.layout.leftSidebar === "hidden") return false;
+  return state.layout.leftSidebar === "dock"
+    ? state.desktop.agentListOpen
+    : state.mobilePanel.target === "agent-list";
 }
 
 /**

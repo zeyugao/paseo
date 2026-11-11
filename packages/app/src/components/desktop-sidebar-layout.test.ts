@@ -77,22 +77,20 @@ describe("desktop sidebar layout", () => {
     expect(resolveSidebarActivity(true, true, true)).toBe(true);
   });
 
-  it("temporarily reveals navigation for a division without changing the saved closed intent", () => {
+  it("keeps navigation togglable without moving the content allocation across a division", () => {
+    const divisionLayout = { sidebarWidth: 465, gap: 21, contentWidth: 381 };
     const visibility = {
       chromeEnabled: true,
       isCompactLayout: false,
       isMounted: true,
-      isOpen: false,
       canShare: false,
+      divisionLayout,
     };
+    expect(resolveDesktopSidebarVisibility({ ...visibility, isOpen: true })).toBe(true);
+    expect(resolveDesktopSidebarVisibility({ ...visibility, isOpen: false })).toBe(false);
     expect(
-      resolveDesktopSidebarVisibility({
-        ...visibility,
-        divisionLayout: { sidebarWidth: 465, gap: 21, contentWidth: 381 },
-      }),
-    ).toBe(true);
-    expect(resolveDesktopSidebarVisibility({ ...visibility, divisionLayout: null })).toBe(false);
-    expect(visibility.isOpen).toBe(false);
+      resolveDesktopSidebarVisibility({ ...visibility, divisionLayout: null, isOpen: true }),
+    ).toBe(false);
   });
 
   it("keeps a retained sidebar hidden while app chrome is suppressed", () => {

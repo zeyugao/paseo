@@ -430,8 +430,7 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const daemons = useHosts();
   const { settings, updateSettings } = useAppSettings();
-  const toggleMobileAgentList = usePanelStore((state) => state.toggleMobileAgentList);
-  const toggleDesktopAgentList = usePanelStore((state) => state.toggleDesktopAgentList);
+  const toggleAgentListForLayout = usePanelStore((state) => state.toggleAgentListForLayout);
   const exitFocusMode = usePanelStore((state) => state.exitFocusMode);
   const isFocusModeEnabled = usePanelStore((state) => state.desktop.focusModeEnabled);
   const isDesktopAgentListOpen = usePanelStore((state) => state.desktop.agentListOpen);
@@ -458,7 +457,10 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const isWorkspaceFocusModeEnabled = isWorkspaceRoute && isFocusModeEnabled;
   const chromeEnabled = chromeEnabledOverride ?? daemons.length > 0;
   const hasMountedDesktopSidebar = useLatchedBoolean(chromeEnabled);
-  const toggleAgentList = isCompactLayout ? toggleMobileAgentList : toggleDesktopAgentList;
+  const toggleAgentList = useCallback(
+    () => toggleAgentListForLayout({ isCompact: isCompactLayout }),
+    [isCompactLayout, toggleAgentListForLayout],
+  );
   const toggleDesktopSidebars = useCallback(() => {
     // The focused workspace owns its layout key, its checkout, and therefore the
     // only correct answer to "is the explorer open". Let it decide when there is
@@ -502,17 +504,20 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
     isSettingsRoute: pathname.includes("/settings"),
   });
   const desktopSidebarMounted = hasMountedDesktopSidebar && !isWorkspaceFocusModeEnabled;
+  const canDockAgentList =
+    divisionLayout !== null ||
+    canDesktopAppSidebarShare({
+      contentMinimumWidth: appContentMinimumWidth,
+      requestedSidebarWidth: sidebarWidth,
+      viewportWidth,
+    });
   const desktopSidebarVisible = resolveDesktopSidebarVisibility({
     chromeEnabled,
     isCompactLayout,
     isMounted: desktopSidebarMounted,
     isOpen: isDesktopAgentListOpen,
     divisionLayout,
-    canShare: canDesktopAppSidebarShare({
-      contentMinimumWidth: appContentMinimumWidth,
-      requestedSidebarWidth: sidebarWidth,
-      viewportWidth,
-    }),
+    canShare: canDockAgentList,
   });
   const sidebarPresentation = resolveLeftSidebarPresentation({
     chromeEnabled,
@@ -523,8 +528,12 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const applyPanelLayout = usePanelStore((state) => state.applyPanelLayout);
   // Publishes the layout to the store, which owns the panel targets each layout allows.
   useLayoutEffect(() => {
-    applyPanelLayout({ isCompact: isCompactLayout, leftSidebar: sidebarPresentation });
-  }, [applyPanelLayout, isCompactLayout, sidebarPresentation]);
+    applyPanelLayout({
+      isCompact: isCompactLayout,
+      leftSidebar: sidebarPresentation,
+      canDockAgentList,
+    });
+  }, [applyPanelLayout, isCompactLayout, sidebarPresentation, canDockAgentList]);
   const hasTopLeftWindowControls = useHasWindowChromeObstruction("top-left");
   const appChromeLayout = resolveDesktopAppChromeLayout({
     desktopSidebarRendered: desktopSidebarVisible,

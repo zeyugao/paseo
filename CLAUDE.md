@@ -118,11 +118,31 @@ When Mo requests an APK, use `npm run build:apk:arm64` for an ARM64 build: write
 
 See [docs/development.md](docs/development.md) for full setup, build sync requirements, and debugging.
 
+## Rebasing onto upstream/main
+
+Rebasing onto `upstream/main` must produce a series of complete, final functional changes on top of the selected upstream commit.
+
+- Organize commits by the final feature or fix, with its code, tests, and docs together. Rework, split, or squash the local history as needed; keep dependencies in working order.
+- Fold conflict resolution, compatibility adjustments, and follow-up corrections into the commit that owns the final behavior.
+- Do not preserve the process history of “old implementation → conflict reconciliation → restoration fixes.” Renaming those intermediate commits does not satisfy this rule.
+- Preserve the intended final behavior and verify the resulting tree against it. Any additional behavior change needs explicit approval.
+- Leave upstream history and existing release branches and tags unchanged; follow the release policy below.
+
 ## Release branches
 
-Merge normal PRs into `main`, including while a beta soaks or a release is being finalized. Each
-release builds in a short-lived release workspace from `origin/main` or a release tag; see
-[release base and source](docs/release.md#release-base-and-source).
+Merge normal PRs into `main`, including while a beta soaks or a release is being finalized.
+Keep fork release metadata off `main`; retain each release branch and tag when `main` is
+rebased or rewritten. See [release base and source](docs/release.md#release-base-and-source).
+
+### Overkite TestFlight releases
+
+1. Capture the approved `main` commit and create a new `release/vX.Y.Z-beta.N` worktree from it.
+2. Choose an unused version from published release tags and set it across workspaces and the lockfile only on the release branch. Do not write release contents or changelog entries; TestFlight notes are exactly `Internal Test`. `main` keeps upstream versions and changelogs; never merge back fork `chore(release)` commits.
+3. Create a new annotated `vX.Y.Z-beta.N` tag and atomically push the release branch and tag. Retain both with their original history; never move a published tag or rebase the release branch onto rewritten `main`.
+4. The tag run dispatches the actual build on the default branch; that build checks out the requested tag. Ensure the dispatch workflow is present on both the remote default branch and the release tag.
+5. Follow the dispatched build, not only the tag run. Confirm the matching version/build finishes Apple processing and is distributed to **Overkite Internal** before reporting success. Do not submit external or App Store review.
+
+To manually build an existing tag: `gh workflow run ios-release.yml --ref main -f tag=vX.Y.Z-beta.N`.
 
 ## Critical rules
 

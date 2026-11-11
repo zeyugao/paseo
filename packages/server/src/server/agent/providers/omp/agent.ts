@@ -77,7 +77,7 @@ import { assertChangesAreLive, validateProviderOptions } from "../../provider-op
 import { OmpSubagentCardTracker } from "./subagent-card-tracker.js";
 import { ompSkillPromptUserText, shouldDisplayOmpCustomMessage } from "./custom-message.js";
 import { getUserMessageText } from "./message-history.js";
-import { mapOmpSystemNoticeToNotification } from "./system-notice.js";
+import { mapOmpSystemNoticeToToolCalls } from "./system-notice.js";
 import { materializeProviderImage } from "../provider-image-output.js";
 import { OmpCliRuntime } from "./cli-runtime.js";
 import { listOmpImportableSessions, readOmpImportSessionConfig } from "./session-descriptor.js";
@@ -107,6 +107,8 @@ import { mapOmpTodoReminderEvent, mapOmpTodoState, mapOmpTodoToolResult } from "
 import { mapOmpRuntimeEventToTimelineItem } from "./event-mapper.js";
 import { mapOmpAdvisorMessageToToolCall } from "./advisor-message.js";
 import { handleOmpHostToolRuntimeEvent, OmpHostToolRouter } from "./host-tools.js";
+import { mapOmpIrcMessageToToolCall } from "./irc-message.js";
+import { readOmpNativeMessageId } from "./native-message-id.js";
 import { OmpSubagentIndex } from "./subagent-index.js";
 import { OmpQuestionUi } from "./question-ui.js";
 import { mapOmpToolDetail } from "./tool-call-mapper.js";
@@ -118,6 +120,7 @@ import {
 import { DEFAULT_OMP_THINKING_LEVEL, mapOmpModel } from "./map-omp-model.js";
 
 const OMP_PROVIDER = "omp";
+const OMP_STEER_DRAIN_TIMEOUT_MS = 2_000;
 const OMP_CORE_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
   supportsSessionPersistence: true,
@@ -470,15 +473,6 @@ function buildResumeStartInput(input: {
   };
 }
 
-function readNativeMessageId(
-  message: OmpAgentMessage & { id?: unknown; entryId?: unknown },
-): string | undefined {
-  if (typeof message.id === "string") {
-    return message.id;
-  }
-  return typeof message.entryId === "string" ? message.entryId : undefined;
-}
-
 function withOmpCapabilities(): AgentCapabilityFlags {
   return {
     ...OMP_CORE_CAPABILITIES,
@@ -585,14 +579,14 @@ function isOmpAgentSessionEvent(event: OmpRuntimeEvent): event is OmpAgentSessio
   switch (event.type) {
     case "agent_start":
     case "turn_start":
+    case "turn_end":
     case "message_start":
     case "message_end":
     case "message_update":
     case "tool_execution_start":
     case "tool_execution_update":
+    case "tool_stream_update":
     case "tool_execution_end":
-    case "compaction_start":
-    case "compaction_end":
     case "agent_end":
       return true;
     default:
@@ -703,8 +697,24 @@ export class OmpAgentSession implements AgentSession {
   private readonly pendingExtensionUiRequests = new Map<string, AgentPermissionRequest>();
   private readonly questionUi = new OmpQuestionUi();
   private activeTurnId: string | null = null;
+  // Held from the admission check until activeTurnId is assigned so a prompt
+  // arriving while queued steers drain still rejects synchronously.
+  private turnAdmissionPending = false;
   private readonly pendingClientMessages: Array<{ clientMessageId: string | null; text: string }> =
     [];
+  private pendingSteerSubmissions: Array<{
+    text: string;
+    clientMessageId: string | null;
+    clientRecord: { clientMessageId: string | null; text: string };
+  }> = [];
+  private suppressingUnreadSteerRun = false;
+  private unreadSteerRunSettled = false;
+  private pendingSteerDrain: {
+    promise: Promise<boolean>;
+    resolve: (drained: boolean) => void;
+    timer: NodeJS.Timeout;
+  } | null = null;
+  private steerDrainBlocked = false;
   private activeAssistantMessageId: string | null = null;
   private activeTurnTerminalAssistantMessage: OmpAgentMessage | null = null;
   private activeTurnStarted = false;
@@ -718,7 +728,8 @@ export class OmpAgentSession implements AgentSession {
   private readonly pendingPromptResults = new Map<string, OmpPromptResult>();
   private pendingNoTurnCompletionAbort: AbortController | null = null;
   private lastKnownThinkingOptionId: string | null;
-  private manualCompactionRunning = false;
+  /** Guards against a second out-of-band `/compact` while one is in flight. */
+  private outOfBandCompactionRunning = false;
   private commandCache: AgentSlashCommand[] | null = null;
   private readonly subagentIndex = new OmpSubagentIndex();
   private readonly subagentCardTracker: OmpSubagentCardTracker;
@@ -732,6 +743,7 @@ export class OmpAgentSession implements AgentSession {
   private readonly providerIdleDeadlineMs: number;
   private readonly noTurnScheduler: OmpNoTurnScheduler;
   private readonly usagePoller: OmpUsagePoller;
+  private initialUsageReadStarted = false;
   private closed = false;
   private live: boolean;
   private readonly emittedUserMessageIds = new Set<string>();
@@ -899,8 +911,17 @@ export class OmpAgentSession implements AgentSession {
     streamingBehavior?: "steer" | "followUp";
     announceTurn?: boolean;
   }): Promise<StartTurnResult> {
-    if (this.activeTurnId) {
+    if (this.activeTurnId || this.turnAdmissionPending) {
       throw new Error("An OMP turn is already active");
+    }
+    this.turnAdmissionPending = true;
+    try {
+      await this.waitForPendingSteerDrain();
+      if (this.activeTurnId) {
+        throw new Error("An OMP turn became active while waiting for queued steers");
+      }
+    } finally {
+      this.turnAdmissionPending = false;
     }
 
     const turnId = randomUUID();
@@ -912,6 +933,8 @@ export class OmpAgentSession implements AgentSession {
     this.outOfBandTurnStartAnnounced = false;
     this.activeTurnHasUserMessage = false;
     this.activePromptRequestId = null;
+    this.pendingSteerSubmissions = [];
+    this.suppressingUnreadSteerRun = false;
     this.clearNoTurnBuffers();
     const payload = await convertPromptInput(prompt, { model: this.state.model });
     if (this.closed) throw new Error("OMP session is closed");
@@ -988,15 +1011,23 @@ export class OmpAgentSession implements AgentSession {
       return { status: "unavailable" };
     if (this.parseSlashCommandInput(payload.text)) return { status: "unavailable" };
     const submission = this.rememberClientMessage(options.clientMessageId ?? null, payload.text);
+    // OMP can echo the input synchronously, before the steer RPC acknowledges it.
+    this.pendingSteerSubmissions.push({
+      text: payload.text,
+      clientMessageId: options.clientMessageId ?? null,
+      clientRecord: submission,
+    });
     try {
       await this.runtimeSession.steer(payload.text, payload.images);
     } catch (error) {
-      this.forgetClientMessage(submission);
+      this.forgetSteerSubmission(submission);
       if (isOmpSteerTransportFailure(error)) throw error;
       return { status: "unavailable" };
     }
-    if (this.closed || this.activeTurnId !== options.expectedTurnId)
+    if (this.closed || this.activeTurnId !== options.expectedTurnId) {
+      this.forgetSteerSubmission(submission);
       return { status: "unavailable" };
+    }
     if (options.clearPendingPermissions) {
       for (const requestId of this.pendingExtensionUiRequests.keys()) {
         await this.respondToPermission(requestId, {
@@ -1006,6 +1037,121 @@ export class OmpAgentSession implements AgentSession {
       }
     }
     return { status: "accepted" };
+  }
+
+  private handleUnreadSteerPhantomEvent(event: OmpAgentSessionEvent): void {
+    if (event.type === "agent_start") {
+      this.unreadSteerRunSettled = false;
+      void this.runtimeSession.abort().catch((error: unknown) => {
+        this.logger.debug({ err: error }, "OMP unread-steer phantom abort failed");
+      });
+      return;
+    }
+    if (event.type === "message_end") {
+      this.consumeUnreadSteerMessage(event.message);
+      return;
+    }
+    if (event.type === "agent_end") {
+      this.settlePendingSteerDrain(event.messages ?? []);
+    }
+  }
+
+  private consumeUnreadSteerMessage(message: OmpAgentMessage): void {
+    if (message.role !== "user") return;
+    const messageId = readOmpNativeMessageId(message);
+    if (messageId && this.emittedUserMessageIds.has(messageId)) return;
+    const submission = this.takePendingSteerSubmission(getUserMessageText(message.content));
+    if (!submission) return;
+    if (messageId) this.emittedUserMessageIds.add(messageId);
+    this.forgetSteerSubmission(submission.clientRecord);
+  }
+
+  private settlePendingSteerDrain(messages: OmpAgentMessage[]): void {
+    if (!this.suppressingUnreadSteerRun) return;
+    this.unreadSteerRunSettled = false;
+    for (const message of messages) this.consumeUnreadSteerMessage(message);
+    this.unreadSteerRunSettled = true;
+    this.finishPendingSteerDrainIfReady();
+  }
+
+  private finishPendingSteerDrainIfReady(): void {
+    if (
+      !this.suppressingUnreadSteerRun ||
+      !this.unreadSteerRunSettled ||
+      this.pendingSteerSubmissions.length > 0
+    )
+      return;
+    this.suppressingUnreadSteerRun = false;
+    this.unreadSteerRunSettled = false;
+    this.steerDrainBlocked = false;
+    this.finishPendingSteerDrain(true);
+  }
+
+  private forgetSteerSubmission(submission: {
+    clientMessageId: string | null;
+    text: string;
+  }): void {
+    this.forgetClientMessage(submission);
+    const index = this.pendingSteerSubmissions.findIndex(
+      (pending) => pending.clientRecord === submission,
+    );
+    if (index >= 0) this.pendingSteerSubmissions.splice(index, 1);
+    this.finishPendingSteerDrainIfReady();
+  }
+
+  private beginPendingSteerDrain(): void {
+    if (this.pendingSteerDrain) {
+      return;
+    }
+    this.unreadSteerRunSettled = false;
+    let resolve!: (drained: boolean) => void;
+    const promise = new Promise<boolean>((resolvePromise) => {
+      resolve = resolvePromise;
+    });
+    const timer = setTimeout(() => {
+      this.pendingSteerDrain = null;
+      this.steerDrainBlocked = true;
+      resolve(false);
+    }, OMP_STEER_DRAIN_TIMEOUT_MS);
+    this.pendingSteerDrain = { promise, resolve, timer };
+  }
+
+  private finishPendingSteerDrain(drained: boolean): void {
+    const pending = this.pendingSteerDrain;
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingSteerDrain = null;
+    pending.resolve(drained);
+  }
+
+  private async waitForPendingSteerDrain(): Promise<void> {
+    if (this.steerDrainBlocked) {
+      throw new Error("OMP queued steer did not drain; refusing to start a replacement turn");
+    }
+    const pending = this.pendingSteerDrain;
+    if (!pending) {
+      return;
+    }
+    const drained = await pending.promise;
+    if (!drained) {
+      throw new Error("OMP queued steer did not drain; refusing to start a replacement turn");
+    }
+  }
+
+  private takePendingSteerSubmission(text: string):
+    | {
+        text: string;
+        clientMessageId: string | null;
+        clientRecord: { clientMessageId: string | null; text: string };
+      }
+    | undefined {
+    const index = this.pendingSteerSubmissions.findIndex((submission) => submission.text === text);
+    if (index < 0) {
+      return undefined;
+    }
+    return this.pendingSteerSubmissions.splice(index, 1)[0];
   }
 
   private rememberClientMessage(
@@ -1026,12 +1172,27 @@ export class OmpAgentSession implements AgentSession {
     if (index >= 0) this.pendingClientMessages.splice(index, 1);
   }
 
-  private takeClientMessage(): { clientMessageId: string | null; text: string } | undefined {
+  private takeClientMessage(
+    text?: string,
+  ): { clientMessageId: string | null; text: string } | undefined {
+    if (text) {
+      const index = this.pendingClientMessages.findIndex((submission) => submission.text === text);
+      if (index >= 0) {
+        return this.pendingClientMessages.splice(index, 1)[0];
+      }
+    }
     return this.pendingClientMessages.shift();
   }
 
   subscribe(callback: (event: AgentStreamEvent) => void): () => void {
     this.subscribers.add(callback);
+    // The manager subscribes right after replaying history on load/resume;
+    // this one-shot read populates the context window meter without waiting
+    // for the first turn.
+    if (!this.initialUsageReadStarted) {
+      this.initialUsageReadStarted = true;
+      void this.usagePoller.readInitial();
+    }
     return () => {
       this.subscribers.delete(callback);
     };
@@ -1185,7 +1346,25 @@ export class OmpAgentSession implements AgentSession {
 
   async interrupt(): Promise<void> {
     const turnId = this.activeTurnId;
-    await this.runtimeSession.abort();
+    const wasSuppressingUnreadSteerRun = this.suppressingUnreadSteerRun;
+    // OMP has no clear_queue RPC: a steer it has not read yet survives abort and starts a
+    // phantom run. Keep the submissions so that run can be re-aborted and swallowed instead
+    // of resuming the turn the user just stopped.
+    if (this.pendingSteerSubmissions.length > 0) {
+      this.beginPendingSteerDrain();
+      this.suppressingUnreadSteerRun = true;
+    }
+    try {
+      await this.runtimeSession.abort();
+    } catch (error) {
+      if (!wasSuppressingUnreadSteerRun) {
+        this.suppressingUnreadSteerRun = false;
+        this.unreadSteerRunSettled = false;
+        this.steerDrainBlocked = false;
+        this.finishPendingSteerDrain(false);
+      }
+      throw error;
+    }
     if (turnId && this.activeTurnId === turnId) {
       this.usagePoller.stopTurn();
       this.resetActiveTurn({ terminalizeWork: true });
@@ -1240,6 +1419,11 @@ export class OmpAgentSession implements AgentSession {
     this.unsubscribeRuntime?.();
     this.usagePoller.close();
     this.cancelNoTurnPromptCompletion();
+    this.pendingSteerSubmissions = [];
+    this.suppressingUnreadSteerRun = false;
+    this.unreadSteerRunSettled = false;
+    this.steerDrainBlocked = false;
+    this.finishPendingSteerDrain(false);
     try {
       await this.runtimeSession.close();
     } finally {
@@ -1439,7 +1623,7 @@ export class OmpAgentSession implements AgentSession {
     const outputs = this.pendingNoTurnOutputs.filter((output) => output.turnId === turnId);
     this.clearNoTurnBuffers();
     if (promptText) {
-      const clientMessageId = this.takeClientMessage()?.clientMessageId;
+      const clientMessageId = this.takeClientMessage(promptText)?.clientMessageId;
       this.emit({
         type: "timeline",
         provider: this.provider,
@@ -1492,37 +1676,60 @@ export class OmpAgentSession implements AgentSession {
     customInstructions: string | undefined,
     emit: (event: AgentStreamEvent) => void,
   ): Promise<void> {
-    if (this.manualCompactionRunning) {
+    if (this.outOfBandCompactionRunning) {
       throw new Error("An OMP compact command is already running");
     }
-    // OMP answers a manual compact with its RPC response alone, without
-    // compaction_start or compaction_end, so the request owns both rows.
-    this.manualCompactionRunning = true;
-    const emitCompaction = (status: "loading" | "completed") =>
+    // OMP reports no wire event for manual compaction — `auto_compaction_*` is
+    // maintenance-only — so the RPC call itself drives the loading/completed rows.
+    // Synthesize the turn boundaries through the session stream so the manager
+    // keeps the agent running for the whole RPC rather than leaving it idle.
+    const turnId = randomUUID();
+    this.outOfBandCompactionRunning = true;
+    const emitCompaction = (status: "loading" | "completed"): void => {
       emit({
         type: "timeline",
         provider: this.provider,
         item: { type: "compaction", status, trigger: "manual" },
       });
-    emitCompaction("loading");
+    };
+    // Timeline delivery is best-effort. The manager persists each row before
+    // broadcasting it, so a throwing emitter can still have recorded the row:
+    // the completed marker is attempted on every exit path, and a delivery
+    // failure never turns a successful compaction into a reported failure.
+    const tryEmitCompaction = (status: "loading" | "completed"): void => {
+      try {
+        emitCompaction(status);
+      } catch {
+        // Infrastructure fault: nothing actionable from this command.
+      }
+    };
     try {
-      await this.runtimeSession.compact(customInstructions);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      emitCompaction("completed");
-      emit({
-        type: "timeline",
-        provider: this.provider,
-        item: {
-          type: "assistant_message",
-          text: `[Error] Failed to compact context: ${message}`,
-        },
-      });
-      return;
+      this.emit({ type: "turn_started", provider: this.provider, turnId });
+      tryEmitCompaction("loading");
+      try {
+        await this.runtimeSession.compact(customInstructions);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Close the loading row before surfacing the failure.
+        tryEmitCompaction("completed");
+        emit({
+          type: "timeline",
+          provider: this.provider,
+          item: {
+            type: "assistant_message",
+            text: `[Error] Failed to compact context: ${message}`,
+          },
+        });
+        return;
+      }
+      tryEmitCompaction("completed");
     } finally {
-      this.manualCompactionRunning = false;
+      try {
+        this.emit({ type: "turn_completed", provider: this.provider, turnId });
+      } finally {
+        this.outOfBandCompactionRunning = false;
+      }
     }
-    emitCompaction("completed");
     await this.usagePoller.refresh();
   }
 
@@ -1692,6 +1899,11 @@ export class OmpAgentSession implements AgentSession {
   }
 
   private handleExtraRuntimeEvent(event: OmpRuntimeEvent): boolean {
+    if (event.type === "session_settled") {
+      this.settlePendingSteerDrain([]);
+      this.settleTurnAfterSessionSettled();
+      return true;
+    }
     if (event.type === "model_changed") {
       void this.refreshState()
         .then(() =>
@@ -1876,12 +2088,21 @@ export class OmpAgentSession implements AgentSession {
   }
 
   private handleSessionEvent(event: OmpAgentSessionEvent): void {
+    // OMP can be briefly idle between cycles while queued work is still scheduled.
+    // Only its terminal agent_end may settle the turn or finish an interrupted drain.
+    if (event.type === "agent_end" && event.isTerminal === false) {
+      return;
+    }
+    if (this.suppressingUnreadSteerRun && !this.activeTurnId) {
+      this.handleUnreadSteerPhantomEvent(event);
+      return;
+    }
+
     const turnId = this.currentTurnIdForEvent();
 
     switch (event.type) {
       case "agent_start":
-        this.activeTurnStarted = true;
-        this.clearNoTurnBuffers();
+        this.emitTurnStarted(turnId);
         this.emit({
           type: "thread_started",
           provider: this.provider,
@@ -1889,13 +2110,9 @@ export class OmpAgentSession implements AgentSession {
         });
         return;
       case "turn_start":
-        this.activeTurnStarted = true;
-        this.clearNoTurnBuffers();
-        if (this.outOfBandTurnStartAnnounced) {
-          this.outOfBandTurnStartAnnounced = false;
-        } else {
-          this.emit({ type: "turn_started", provider: this.provider, turnId });
-        }
+        // OMP emits turn_start for each model cycle inside one agent run. Older compatible
+        // runtimes may omit agent_start, so retain the first turn_start as a fallback.
+        this.emitTurnStartedIfNeeded(turnId);
         return;
       case "message_start":
         this.handleMessageStart(event);
@@ -1930,12 +2147,10 @@ export class OmpAgentSession implements AgentSession {
         this.handleToolExecutionEnd(event, turnId);
         return;
       }
-      case "compaction_start":
-      case "compaction_end":
-        this.handleCompactionEvent(event, turnId);
-        return;
+
       case "agent_end": {
         const messages = event.messages ?? [];
+        this.settlePendingSteerDrain(messages);
         let terminalMessages: OmpAgentMessage[] | null = null;
         if (messages.some((message) => message.role === "assistant")) {
           terminalMessages = messages;
@@ -1954,8 +2169,31 @@ export class OmpAgentSession implements AgentSession {
         return;
       }
       default:
+        // Frame-only events end here, including turn_end and tool_stream_update:
+        // their content already arrived through message_end and tool_execution_end.
         return;
     }
+  }
+
+  private emitTurnStarted(turnId: string | undefined): void {
+    this.activeTurnStarted = true;
+    this.clearNoTurnBuffers();
+    if (this.outOfBandTurnStartAnnounced) {
+      // The prompt already announced turn_started so the lifecycle event must not repeat it.
+      this.outOfBandTurnStartAnnounced = false;
+      return;
+    }
+    this.emit({
+      type: "turn_started",
+      provider: this.provider,
+      turnId,
+    });
+  }
+  private emitTurnStartedIfNeeded(turnId: string | undefined): void {
+    if (this.activeTurnStarted) {
+      return;
+    }
+    this.emitTurnStarted(turnId);
   }
 
   private handleToolExecutionEnd(
@@ -1984,26 +2222,6 @@ export class OmpAgentSession implements AgentSession {
         this.logger.debug({ event }, "Dropped malformed OMP todo tool result");
       }
     }
-  }
-
-  private handleCompactionEvent(
-    event: Extract<OmpAgentSessionEvent, { type: "compaction_start" | "compaction_end" }>,
-    turnId: string | undefined,
-  ): void {
-    // A manual compact emits its own rows around the request.
-    if (this.manualCompactionRunning) {
-      return;
-    }
-    this.emit({
-      type: "timeline",
-      provider: this.provider,
-      turnId,
-      item: {
-        type: "compaction",
-        status: event.type === "compaction_start" ? "loading" : "completed",
-        trigger: event.reason === "manual" ? "manual" : "auto",
-      },
-    });
   }
 
   private handleMessageUpdate(
@@ -2070,16 +2288,25 @@ export class OmpAgentSession implements AgentSession {
             this.emitSkillPromptEcho(turnId);
             return;
           }
-          const item =
+          const customItem =
             mapOmpAdvisorMessageToToolCall(event.message, text) ??
-            mapOmpSystemNoticeToNotification(text);
-          this.emit({
-            type: "timeline",
-            provider: this.provider,
-            turnId,
-            item:
-              item ?? mapCustomMessageToToolCall(event.message, text, `omp-custom-${randomUUID()}`),
-          });
+            mapOmpIrcMessageToToolCall(event.message, text);
+          const items: AgentTimelineItem[] = customItem
+            ? [customItem]
+            : mapOmpSystemNoticeToToolCalls(event.message, text);
+          if (items.length === 0) {
+            items.push(
+              mapCustomMessageToToolCall(event.message, text, `omp-custom-${randomUUID()}`),
+            );
+          }
+          for (const item of items) {
+            this.emit({
+              type: "timeline",
+              provider: this.provider,
+              turnId,
+              item,
+            });
+          }
         }
       }
       return;
@@ -2092,8 +2319,12 @@ export class OmpAgentSession implements AgentSession {
     if (!text) {
       return;
     }
-    const nativeMessage = event.message as OmpAgentMessage & { id?: unknown; entryId?: unknown };
-    const messageId = readNativeMessageId(nativeMessage);
+    const nativeMessage = event.message as OmpAgentMessage & {
+      id?: unknown;
+      entryId?: unknown;
+      steering?: unknown;
+    };
+    const messageId = readOmpNativeMessageId(nativeMessage);
     const emitUserMessage = (resolvedMessageId?: string): void => {
       if (resolvedMessageId) {
         // OMP re-emits user message_end frames for entries it has already
@@ -2104,7 +2335,9 @@ export class OmpAgentSession implements AgentSession {
         }
         this.emittedUserMessageIds.add(resolvedMessageId);
       }
-      const clientMessageId = this.takeClientMessage()?.clientMessageId;
+      const consumed = this.takeClientMessage(text);
+      if (consumed) this.forgetSteerSubmission(consumed);
+      const clientMessageId = consumed?.clientMessageId;
       this.emit({
         type: "timeline",
         provider: this.provider,
@@ -2231,6 +2464,23 @@ export class OmpAgentSession implements AgentSession {
     void this.refreshAfterTurn(finalUsage);
   }
 
+  // OMP's settle watcher reports `session_settled` once a stretch of agent
+  // activity is fully quiet: the terminal `agent_end` went out and nothing
+  // queued or running in the background can re-wake the session. When the
+  // terminal `agent_end` never reached this side (a frame dropped mid-flight),
+  // this is the last chance to settle the turn instead of advertising
+  // "running" forever on a session OMP already considers idle.
+  private settleTurnAfterSessionSettled(): void {
+    if (!this.activeTurnId || !this.activeTurnStarted) {
+      return;
+    }
+    const turnId = this.activeTurnId;
+    const messages = this.activeTurnTerminalAssistantMessage
+      ? [this.activeTurnTerminalAssistantMessage]
+      : [];
+    void this.completeTurnAfterProviderIdle(turnId, messages);
+  }
+
   private async completeTurnAfterProviderIdle(
     turnId: string | undefined,
     messages: OmpAgentMessage[],
@@ -2301,6 +2551,7 @@ export class OmpAgentClient implements AgentClient {
   private readonly usagePollScheduler?: OmpUsagePollScheduler;
   private readonly providerIdleDeadlineMs?: number;
   private readonly runtime?: OmpRuntime;
+  private readonly injectedRuntime: boolean;
 
   constructor(options: OmpAgentClientOptions) {
     const runtimeSettings = mergeOmpRuntimeSettings(
@@ -2319,6 +2570,7 @@ export class OmpAgentClient implements AgentClient {
     this.usagePollScheduler = options.usagePollScheduler;
     this.providerIdleDeadlineMs = options.providerIdleDeadlineMs;
     this.runtime = options.runtime;
+    this.injectedRuntime = options.runtime !== undefined;
   }
 
   private async configureNativePaseoTools(
@@ -2619,6 +2871,11 @@ export class OmpAgentClient implements AgentClient {
   }
 
   async isAvailable(): Promise<boolean> {
+    if (this.injectedRuntime) {
+      // A runtime seam was injected (tests, embedders); it decides availability,
+      // so probing the host for the omp binary would report a false negative.
+      return true;
+    }
     try {
       const launch = await this.resolveOmpLaunch();
       const availability = await checkProviderLaunchAvailable(launch);

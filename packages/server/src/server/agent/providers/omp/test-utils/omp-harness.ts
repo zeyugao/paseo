@@ -325,6 +325,15 @@ export class OmpHarness {
     return await session.run(input);
   }
 
+  async runOutOfBandCommand(
+    prompt: string,
+    emit: (event: AgentStreamEvent) => void,
+  ): Promise<void> {
+    const handler = this.requireSession().tryHandleOutOfBand(prompt);
+    if (!handler) throw new Error(`OMP session did not handle prompt out of band: ${prompt}`);
+    await handler.run({ emit });
+  }
+
   async startPromptWithFalseLocalOnlyResult(
     input: string,
   ): Promise<{ completed: () => boolean; completion: Promise<unknown> }> {
@@ -586,6 +595,27 @@ export class OmpHarness {
 
   startTurnDetached(message: string) {
     return this.requireSession().startTurn(message);
+  }
+
+  async startActiveTurn(message: string, clientMessageId?: string): Promise<string> {
+    const promptStarted = this.omp.latestSession().nextPrompt();
+    const { turnId } = await this.requireSession().startTurn(
+      message,
+      clientMessageId ? { clientMessageId } : undefined,
+    );
+    await promptStarted;
+    return turnId;
+  }
+
+  async steerActiveTurn(
+    prompt: string,
+    options: {
+      expectedTurnId: string;
+      clientMessageId?: string;
+      clearPendingPermissions?: boolean;
+    },
+  ) {
+    return await this.requireSession().steerActiveTurn(prompt, options);
   }
 
   async interrupt(): Promise<void> {

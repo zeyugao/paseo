@@ -42,6 +42,7 @@ function ExplorerFrameBase({
     width: resolveExplorerSidebarWidth({ requestedWidth: storedWidth, containerWidth }),
     containerWidth,
     overlay,
+    isOpen,
     resizeEnabled,
     onResize,
   });

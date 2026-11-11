@@ -3,6 +3,7 @@ import {
   type WorkspaceCompactHeaderTabs,
 } from "./adaptive-workspace-chrome";
 import { WindowLayoutContentAllocationContext } from "@/window-layout/context";
+import { useWorkspaceContainerWidth } from "./use-workspace-header-width";
 import { shouldUseInlineWorkspaceHeader } from "./workspace-tab-layout";
 import { planTimelineTailFetch } from "@/timeline/timeline-sync-plan";
 import { useHostFeature } from "@/runtime/host-features";
@@ -813,10 +814,12 @@ function useWorkspaceViewport(isCompact: boolean, workspaceKey: string | null) {
     [],
   );
   const width = allocation?.width ?? undefined;
+  const targetWidth = allocation?.targetWidth ?? measuredWidth;
+  const containerWidth = useWorkspaceContainerWidth(workspaceKey, targetWidth);
   return {
     width,
-    containerWidth: width ?? measuredWidth,
-    targetWidth: allocation?.targetWidth ?? measuredWidth,
+    containerWidth,
+    targetWidth,
     explorerVisible: isCompact ? localExplorerVisible : allocation?.explorerVisible === true,
     onLayout: measure,
   };

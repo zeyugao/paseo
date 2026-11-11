@@ -6,6 +6,7 @@ export interface ExplorerGeometryInput {
   width: number;
   containerWidth: number;
   overlay: boolean;
+  isOpen: boolean;
   resizeEnabled: boolean;
   onResize: (width: number) => void;
 }

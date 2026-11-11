@@ -10,14 +10,20 @@ export interface WorkspaceHeaderGeometry {
   explorer: { requestedWidth: number | undefined; containerWidth: number } | null;
 }
 
+export function useWorkspaceContainerWidth(workspaceKey: string | null, targetWidth: number) {
+  const allocation = useContext(WindowLayoutContentAllocationContext);
+  const { store, viewportWidth } = useSidebarResizeGeometry();
+  const leftDockWidth = allocation?.workspaceKey === workspaceKey ? allocation.leftDockWidth : 0;
+  const leftWidth = useStore(store, (state) =>
+    leftDockWidth > 0 && state.left?.viewportWidth === viewportWidth ? state.left.width : null,
+  );
+  return Math.max(0, targetWidth + (leftWidth === null ? 0 : leftDockWidth - leftWidth));
+}
+
 export function useWorkspaceHeaderWidth(geometry: WorkspaceHeaderGeometry) {
   const allocation = useContext(WindowLayoutContentAllocationContext);
   const { store, viewportWidth } = useSidebarResizeGeometry();
   const active = allocation?.workspaceKey === geometry.workspaceKey;
-  const leftDockWidth = active ? (allocation?.leftDockWidth ?? 0) : 0;
-  const leftWidth = useStore(store, (state) =>
-    leftDockWidth > 0 && state.left?.viewportWidth === viewportWidth ? state.left.width : null,
-  );
   const explorerWidth = useStore(store, (state) =>
     active &&
     geometry.explorer &&
@@ -27,10 +33,7 @@ export function useWorkspaceHeaderWidth(geometry: WorkspaceHeaderGeometry) {
       ? state.explorer.width
       : null,
   );
-  const containerWidth = Math.max(
-    0,
-    geometry.containerWidth + (leftWidth === null ? 0 : leftDockWidth - leftWidth),
-  );
+  const containerWidth = useWorkspaceContainerWidth(geometry.workspaceKey, geometry.containerWidth);
   if (!geometry.explorer) return containerWidth;
   return Math.max(
     0,

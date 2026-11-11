@@ -28,6 +28,7 @@ export function useExplorerGeometry({
   width,
   containerWidth,
   overlay,
+  isOpen,
   resizeEnabled,
   onResize,
 }: ExplorerGeometryInput): ExplorerGeometry {
@@ -169,23 +170,23 @@ export function useExplorerGeometry({
       workspaceKey,
     ],
   );
-  // Reanimated retains the last animated value when its style is removed. Keep this
-  // style attached across folding and explicitly size overlays to the workspace viewport.
-  const animatedWidthStyle = useAnimatedStyle(() => {
-    if (overlay) return { width: containerWidth };
-    {
-      return {
-        width: resolveExplorerSidebarFrameWidth({
-          width,
-          containerWidth,
-          overlay,
-          resizeEnabled,
-          resize: resizeWorkspaceKey.value === workspaceKey ? resize.value : null,
-          resizeWidth: resizeWidth.value,
-        }),
-      };
-    }
-  }, [containerWidth, overlay, resizeEnabled, width, workspaceKey]);
+  // Keep visibility with width on the UI thread: React can reveal the dock before a new
+  // animated width reaches Fabric, exposing the hidden dock's previous clamped width.
+  // Overlays stay laid out while hidden so native scroll ranges survive folding.
+  const animatedWidthStyle = useAnimatedStyle(
+    () => ({
+      display: overlay || isOpen ? "flex" : "none",
+      width: resolveExplorerSidebarFrameWidth({
+        width,
+        containerWidth,
+        overlay,
+        resizeEnabled,
+        resize: resizeWorkspaceKey.value === workspaceKey ? resize.value : null,
+        resizeWidth: resizeWidth.value,
+      }),
+    }),
+    [containerWidth, overlay, isOpen, resizeEnabled, width, workspaceKey],
+  );
   return {
     frameStyle: animatedWidthStyle,
     panelStyle: {

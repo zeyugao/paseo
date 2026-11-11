@@ -98,9 +98,11 @@ Ordinary leaf routes retain the stack appearance policy.
 The shell is outside the workspace split canvas so it divides the full workspace, including the header. It has its own persisted width and resize handle. Main-pane splits
 never read or modify that width.
 
-Budget workspace headers against the shell's target allocation, including live navigation and
-Explorer resize widths. A retained native stack can report its previous docked frame for one layout
-pass, so its `onLayout` must not choose the first header presentation. Keep the top-clearance spacer,
+Budget workspace headers and the Explorer dock against the same target allocation, including live
+navigation and Explorer resize widths. A retained native stack can report its previous docked frame
+for one layout pass; using that measurement makes Explorer open at its old clamped width and then
+shift again. Native dock visibility and animated width must reach Fabric in the same UI-thread
+update; a React-only reveal can expose the previous width first. Keep the top-clearance spacer,
 tab track presentations, label measurements, layout snapshot, and + width above the header branches.
 Recreating the native spacer when Explorer narrows the workspace can expose a zero-height first
 layout before its native height reaches Yoga. Header variants under that owner must not add another

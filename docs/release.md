@@ -2,6 +2,10 @@
 
 All workspaces share one version and release together.
 
+For an Overkite-only TestFlight build, use the [internal TestFlight flow](#ios--overkite-internal-testflight)
+and its checklist. The changelog review and npm publication steps below apply to full releases,
+not to internal TestFlight builds.
+
 ## Two steps
 
 A release has exactly two steps. The agent does the first, the user authorizes the second.
@@ -20,7 +24,7 @@ A release has exactly two steps. The agent does the first, the user authorizes t
 - commit the approved release inputs locally on the release branch
 - run the release, which publishes npm and pushes the release branch and tag
 - create the release heartbeat immediately and babysit it to completion
-- [reconcile `main`](#reconcile-main) with what shipped
+- retain the release branch and tag as the shipped history
 
 Rules that apply to both steps:
 
@@ -34,8 +38,10 @@ Rules that apply to both steps:
 ## Main stays open
 
 Merge normal PRs into `main` at any time, including while a beta soaks or a release is being
-finalized. Each release builds in a short-lived release workspace, and its published tag records
-the shipped source.
+finalized. `main` carries development changes against upstream; its history may be rebased or
+rewritten. Keep workspace versions and changelogs aligned with upstream rather than adding fork
+release commits to `main`. Prepare each release in a separate workspace on a retained release
+branch. The branch and its annotated tag preserve the source history used for that build.
 
 ## Choosing a path
 
@@ -78,8 +84,9 @@ base plus any approved cherry-picks, and every source, diff, and CI check uses i
 
 | Release                                                  | Base                                                         | Changes on top               |
 | -------------------------------------------------------- | ------------------------------------------------------------ | ---------------------------- |
-| Starting release: first beta of a line, or direct stable | `origin/main`, captured once                                 | None                         |
-| Follow-up beta                                           | The selected published beta tag, normally the series' latest | Approved commits from `main` |
+| Overkite internal TestFlight                             | The selected `main` commit, captured once                    | Approved release metadata    |
+| Starting release: first beta of a line, or direct stable | The selected `main` commit, captured once                    | Approved release metadata    |
+| Follow-up beta outside the TestFlight flow               | The selected published beta tag, normally the series' latest | Approved commits from `main` |
 | Promotion                                                | The beta tag being promoted                                  | None by default              |
 | Stable hotfix                                            | The latest appropriate stable tag                            | Approved commits from `main` |
 
@@ -94,14 +101,14 @@ An explicit user instruction can select another base.
    Resolve conflicts within the approved changes and report how. A resolution that needs new
    behavior is a scope addition: surface it for selection.
 4. Confirm CI for the release source. When the source is a commit whose CI already passed (the
-   captured `origin/main`, or the beta tag being promoted), use that run and watch pending CI to
+   captured `main` commit, or the beta tag being promoted), use that run and watch pending CI to
    completion. Otherwise push the release branch and run `gh workflow run ci.yml --ref <branch>`,
    because CI push runs target only `main`.
 5. Keep the changelog, any explicitly requested ACP catalog update, lockfile preparation, and the
    version commit local until the go-ahead. The release command pushes the release branch and tag
    as one batch, and the tag push starts the release workflows. Then run
    `gh workflow run ci.yml --ref <branch>` so CI covers the complete release commit.
-6. [Reconcile `main`](#reconcile-main).
+6. Retain the release branch and tag. Do not merge or cherry-pick release metadata back to `main`.
 
 A stable hotfix can take the version a patch beta line would promote to, such as `0.13.3`
 shipping while `0.13.3-beta.2` soaks. Never republish or reuse a shipped version. Continue the line
@@ -116,14 +123,15 @@ for the unchanged content.
 When the user asks for a follow-up beta or a promotion, list what `main` has that the base does
 not, then get the batch approved. There is no release label or queue.
 
-1. Find the commits on `origin/main` whose patches are not in the base tag:
+1. Capture the selected `main` commit and compare its content with the base tag:
 
    ```bash
-   git log --cherry-pick --right-only --no-merges --format='%h %s' <base-tag>...origin/main
+   git diff --stat <base-tag> <main-sha>
+   git diff <base-tag> <main-sha>
    ```
 
-   Patch equivalence recognizes commits already cherry-picked into the tag, so trust the tag
-   content over PR state or branch names.
+   Use the log to locate candidate changes, not to prove that a release contains them. Rebasing
+   or regrouping `main` can change commit and patch identities without changing the code.
 
 2. Present a short include/defer list. Link each PR and give one plain reason. List separately the
    prerequisites an included PR depends on and anything that adds scope beyond what the beta
@@ -135,21 +143,16 @@ not, then get the batch approved. There is no release label or queue.
 
 For a promotion, every item defaults to defer.
 
-## Reconcile main
+## Retained release history
 
-After the release push, open a PR into `main` that brings in what shipped and keeps newer
-development on `main`:
+Keep the release branch and annotated tag after publication. Do not rebase them onto a later
+`main`, move a published tag, or delete a release branch as post-release cleanup. They retain
+the original commits even when `main` is rewritten.
 
-- The shipped `CHANGELOG.md` and `CHANGELOG.zh-CN.md` entries, exactly as tagged. A beta or
-  promotion entry replaces the series entry on `main`. A stable hotfix on an older line goes
-  below any newer entries.
-- The shipped version in every `package.json` and `package-lock.json`, unless `main` already
-  carries a newer version, plus the F-Droid changelog files a stable release generates.
-- No claims about unshipped work: a shipped entry describes only the tagged content, and notes
-  `main` holds for changes that have not shipped stay out of it.
-
-Delete the release branch once the PR merges. The tag is the record of shipped source; Paseo
-maintains no release track besides `main`.
+Version bumps, lockfile version synchronization, release changelog entries and generated store
+metadata belong only to the release branch. Do not open a release reconciliation PR or add a
+fork `chore(release)` commit to `main`. A product fix made during release preparation returns to
+`main` as its own functional change, without the release metadata.
 
 ## ACP catalog updates
 
@@ -201,7 +204,7 @@ npm run release:patch
 npm run release:minor
 ```
 
-This bumps the version across all workspaces, runs checks, publishes to npm, and pushes the branch + tag. The tag push triggers `Desktop Release`, `Android APK Release`, `Docker`, and `Release Notes Sync` on GitHub Actions. The workflows create the GitHub Release as a draft while builds and release-note sync run. EAS picks up the same tag via the EAS GitHub app and starts the iOS + Android store builds in parallel (see "Mobile builds (EAS)" below) — there is no mobile-release workflow under `.github/workflows`.
+This bumps the version across all workspaces, runs checks, publishes to npm, and pushes the branch + tag. The tag push triggers the declared GitHub release workflows, including `iOS TestFlight`. Stable Android store publication remains in EAS; see [Mobile releases](#mobile-releases). Disabled GitHub workflows must be enabled separately if a release requires their artifacts.
 
 After the stable release succeeds, check `npm view @getpaseo/cli dist-tags`. When the new stable
 is newer than `beta`, move `beta` to it for every published package. This changes dist-tags only;
@@ -248,8 +251,8 @@ npm run release:promote          # Promote X.Y.Z-beta.N to stable X.Y.Z
 
 - Beta tags are published GitHub prereleases like `v0.1.41-beta.1`
 - Betas publish npm packages with `--tag beta`, so `npm install @getpaseo/cli@beta` opts in while plain `npm install @getpaseo/cli` stays on `latest`
-- The user-facing beta instructions, including the public TestFlight join link for the `Paseo Beta` group, live in `public-docs/updates.md` and its `zh-CN` pair. Update them when a beta path is added or removed.
-- Betas publish desktop assets and APKs for testing. They also build iOS, upload it to TestFlight, add it to the `Paseo Beta` external group, and submit it for Beta App Review. They do not submit mobile builds to the production stores.
+- Upstream's user-facing beta instructions, including the public TestFlight join link for the `Paseo Beta` group, live in `public-docs/updates.md` and its `zh-CN` pair. They do not describe this fork's Overkite internal distribution.
+- Betas publish desktop assets and APKs for testing. GitHub `iOS TestFlight` distributes Overkite to the internal tester group without external distribution or Apple review submission. Betas do not submit mobile builds to production stores.
 - `release:promote` creates a fresh stable tag like `v0.1.41`; the final release never reuses the beta tag
 - Desktop assets now come from the Electron package at `packages/desktop`
 - Require the Linux artifact CI checks with both restricted and usable user namespaces to pass before publication; see [packaged desktop smoke](testing.md#packaged-desktop-smoke). Keep the installed-package and AppImage checks together.
@@ -363,28 +366,64 @@ macOS 13 maps to Darwin 22. The two values use different version domains; do not
 - **Bootstrap caveat.** Clients running a build older than the rollout feature ignore `rolloutHours` and admit immediately. Rollout protection only applies to clients running the rollout-aware version or later.
 - **Up to ~30 min automatic admission latency.** Renderer polls every 30 minutes, so a stable user may take up to that long to be evaluated against the rollout window. Clicking **Check** is manual and bypasses rollout admission.
 
-## Mobile builds (EAS)
+## GitHub tarballs
 
-iOS and Android store builds are not in `.github/workflows`. They are triggered by the EAS GitHub app the moment the `v*` tag is pushed:
+`CLI Tarball Release` publishes seven packages: highlight, relay, protocol, client, plugin, server
+and CLI. Version tags use the matching release; pushes to `main` update `cli-latest`. Rolling
+dependency asset names and package versions include the source commit so Bun cannot reuse a
+previous rolling dependency. Dependencies upload before the CLI entry tarball. The workflow
+smoke-installs over the previous rolling CLI and checks the installed server's commit.
 
-- **Android (Play Store)** — EAS builds with profile `production` and auto-submits to the Play Store via `eas submit` (EAS-managed credentials). A Fastlane lane then replaces the store screenshots.
-- **iOS (TestFlight + App Store)** — EAS builds with profile `production`, uploads once through a `testflight` job, distributes the build to the `Paseo Beta` external group with Beta App Review submission, and a Fastlane lane uploads the store screenshots and submits that same build for App Store review.
-- **Android APK (GitHub Release asset)** — separate, via `.github/workflows/android-apk-release.yml`. This is the only Android-related workflow that lives in this repo.
+`Server Tarball Release` updates `server-latest` on `main` pushes or manual dispatch. It publishes
+only `paseo-server.tgz` and does not replace the CLI's dependency package set. Both workflows use
+the repository's existing package build/prepack scripts; committed npm dependency specifications
+and workspace versions remain upstream.
 
-EAS uses the local app version source. `packages/app/app.config.js` derives the native version from the package version. Android `versionCode` is `major * 1_000_000 + minor * 1_000 + patch`. iOS reserves 1,000 build slots per app version: beta `N` uses slot `N`, and stable uses slot `999`. For example, `0.2.6-beta.2` appears in App Store Connect as version `0.2.6` build `2006002`; stable uses build `2006999`. Rebuilding the same tag produces the same native build number; if a store has already accepted a binary and you need a different binary, cut the next beta or patch instead of relying on EAS remote auto-increment.
+## Mobile releases
 
-Stable tags run `Release Mobile`; beta tags run `Release iOS Beta`. Both distribute to the persistent `Paseo Beta` external group and submit for Beta App Review, so testers receive stable releases as well as betas. Testers, the group, and required TestFlight test information are managed once in App Store Connect.
+### iOS — Overkite internal TestFlight
 
-Stable iOS releases use one binary for two Apple review paths: Beta App Review for external TestFlight distribution and App Store review. [Apple says](https://developer.apple.com/help/app-store-connect/test-a-beta-version/invite-external-testers) the first submitted build requires a full TestFlight review; later builds for the same version might not. Do not assume a stable patch skips review.
+`.github/workflows/ios-release.yml` builds on non-RC `v*` tag pushes. Manual dispatch accepts an
+existing tag that matches the app package version. It runs on `xcode-27` with Xcode 27.1 and
+distributes the matching version/build to **Overkite Internal**. It does not distribute externally,
+submit Beta App Review, or submit App Store review.
 
-There is no mobile-release workflow under `.github/workflows`. The EAS GitHub app reads the workflows under `packages/app/.eas/workflows` and handles tag triggering directly.
+Create a new `release/vX.Y.Z-beta.N` branch from the approved `main` snapshot for each TestFlight
+release. Choose an unused version from the published tags and App Store Connect builds, not from
+`main`'s upstream package version. Set that explicit version across workspaces and the lockfile
+only on the release branch, using `npm version <approved-version> --include-workspace-root --message "chore(release): cut %s"`.
+Do not draft release contents, translate notes, or add a changelog entry for internal testing.
+TestFlight's test notes are exactly `Internal Test`; the upload lane sets this value directly.
+Atomically push the release branch and its annotated tag when authorized. Retain both references;
+no release metadata is copied back to `main`.
+
+Production iOS uses `me.elsanna.overkite` and display name Overkite. Android remains Paseo / `sh.paseo`;
+development remains Paseo Debug / `sh.paseo.debug`. The shared Expo name and generated production
+Xcode project, workspace, scheme and target remain Paseo. Expo uses owner `elsagranger`, slug
+`overkite`, and project `a84e29d0-dad8-4136-8d22-22333db92371`.
+
+Configure GitHub's `production` environment with `IOS_DISTRIBUTION_P12_BASE64`,
+`IOS_DISTRIBUTION_P12_PASSWORD`, `IOS_PROVISION_PROFILE_BASE64`, `ASC_PRIVATE_KEY`, `ASC_KEY_ID`,
+and `ASC_ISSUER_ID`. Use an unexpired App Store distribution profile for the production bundle and
+create the internal tester group in App Store Connect before publishing. The workflow cleans up
+its temporary signing credentials after the lane.
+
+Native versions derive from the package version. iOS reserves 1,000 build slots per app version:
+beta `N` uses slot `N`, stable uses slot `999`. For example, `0.2.6-beta.2` appears as version `0.2.6`
+build `2006002`; stable uses build `2006999`. Rebuilding the same tag preserves the native build
+number. Once Apple accepts a binary, different contents require a new authorized release version.
+
+### Android — EAS
+
+The EAS `Release Mobile` workflow keeps Android production build, Play Store submission and
+Google Play screenshot upload. Android identity and credentials are unchanged. iOS EAS release
+and review jobs and the old App Store app ID are removed; GitHub TestFlight owns iOS publishing.
+Android `versionCode` remains `major * 1_000_000 + minor * 1_000 + patch`.
 
 ### Store screenshots
 
 Each stable release publishes the screenshots committed under `assets/store-screenshots/output/` (see [its README](../assets/store-screenshots/README.md) for how they are made). To change the store screenshots, re-render and commit them before you tag.
 
-- **App Store:** `submit_review` uploads `output/apple/` and `output/apple-ipad/` to the version it submits, replacing that version's `en-US` screenshots. Apple ties screenshots to an app version, so a version that is already live keeps the ones it shipped with. `Resubmit iOS for App Store review` uploads them again.
-  - When `submit_review` fails with `appStoreVersions … is not in valid state`, the reason is in the API error's `meta.associatedErrors`, which fastlane does not print. Read it with a `POST /v1/reviewSubmissionItems` against the version. A required age-rating question that Apple added, such as `socialMedia`, fails this way; answer it under App Information > Age Rating in App Store Connect, then resubmit.
 - **Google Play:** `upload_android_screenshots` runs `fastlane android upload_screenshots` after `submit_android`. It replaces only the `en-US` phone and 10-inch tablet screenshots, never the listing text or changelogs, and skips images whose checksum already matches. The lane stages only `en-US`: supply uploads every locale folder in one edit, and Play rejects F-Droid locales such as `ja`, which fails the whole edit. `Upload Google Play screenshots` reruns the step for the current release without a rebuild.
 - **F-Droid:** reads the same files as Google Play. `fastlane/metadata/android/en-US/images/phoneScreenshots/` and `tenInchScreenshots/` hold symlinks to the Google renders. `render.mjs` rewrites them on every render, so added or renamed panels reach Google Play and F-Droid as well.
 
@@ -400,21 +439,19 @@ cd packages/app
 # Recent builds (newest first). Pipe to jq for status only.
 npx eas build:list --limit 8 --non-interactive --json | jq '.[] | {platform, status, appVersion, gitCommitHash}'
 
-# Recent EAS workflow runs. This is the source of truth for submit/review jobs.
+# Recent EAS workflow runs, including Android submission jobs.
 npx eas workflow:runs --json | jq '.[] | {status, workflowName, trigger, gitCommitHash, startedAt, finishedAt}'
 
 # Filter by platform.
-npx eas build:list --platform ios --limit 5 --non-interactive --json
 npx eas build:list --platform android --limit 5 --non-interactive --json
 
 # Inspect a specific build.
 npx eas build:view <build-id>
 
-# Inspect the full release workflow, including distribute_ios, submit_android,
-# and submit_ios_for_review.
+# Inspect the Android build, Play Store submission and screenshot jobs.
 npx eas workflow:view <workflow-run-id> --json
 
-# Read failed submit/review job logs.
+# Read failed Android submission job logs.
 npx eas workflow:logs <workflow-job-id> --all-steps --non-interactive
 
 # Stream logs for a build.
@@ -423,20 +460,12 @@ npx eas build:view <build-id> --json | jq '.logFiles[]'
 
 A build's `gitCommitHash` must match the release tag commit. `status` walks through `NEW` → `IN_QUEUE` → `IN_PROGRESS` → `FINISHED` (or `ERRORED`/`CANCELED`). The EAS workflow run's `gitCommitHash` and `trigger` must also match the release tag.
 
-Once a build is `FINISHED`, EAS still has release-critical work to do: Android must submit to the Play Store, and iOS must distribute to the external TestFlight group with Beta App Review submission **and** submit the same build for App Store review. The release is not done until all platforms are on their way through the stores.
+A finished EAS build still needs Play Store submission and screenshot upload. For `Release Mobile`,
+require `build_android`, `submit_android` and `upload_android_screenshots` to succeed for the release
+commit; confirm the submitted track in Play Console.
 
-For the `Release Mobile` EAS workflow, these jobs must pass:
-
-- `build_ios` — iOS binary built
-- `distribute_ios` — iOS binary uploaded once, added to `Paseo Beta`, and submitted for Beta App Review
-- `submit_ios_for_review` — iOS build submitted for App Store review via Fastlane
-- `build_android` — Android store binary built
-- `submit_android` — Android binary submitted to the Play Store
-- `upload_android_screenshots` — Google Play screenshots replaced from the repo
-
-Do not treat `build_ios: SUCCESS` or `distribute_ios: SUCCESS` as a completed iOS release. `submit_ios_for_review: FAILURE` means the iOS release is blocked even if the build is visible in TestFlight.
-
-To confirm the submission landed, inspect the EAS workflow with `npx eas workflow:view <workflow-run-id> --json`. App Store Connect (review state for the matching version/build) and the Play Console track are the final ground truth.
+For iOS, require GitHub `iOS TestFlight` to succeed for the exact tag and confirm the matching
+version/build is available to Overkite Internal. EAS build status is not iOS release evidence.
 
 ## Release completion and heartbeat
 
@@ -457,12 +486,9 @@ Windows, and Android APK assets are present along with the channel manifests
 (`latest-mac.yml`, `latest-linux.yml`, and `latest.yml` for stable;
 `beta-mac.yml`, `beta-linux.yml`, and `beta.yml` for beta).
 
-For stable releases, also confirm every required mobile build, external
-TestFlight distribution, Beta App Review submission, and store submission job
-for the release commit. For betas, confirm
-the beta EAS workflow completed its TestFlight distribution and Beta App Review
-path. Delete the heartbeat only after every applicable checklist item passes,
-then report the release as shipped.
+For stable releases, confirm Android EAS submission and the matching Overkite internal TestFlight
+build. Betas require the same GitHub iOS path without a production-store submission. Delete the
+heartbeat only after every applicable checklist item passes, then report the release as shipped.
 
 Pattern:
 
@@ -474,7 +500,7 @@ Pattern:
   "timezone": "UTC",
   "maxRuns": 120,
   "expiresIn": "24h",
-  "prompt": "Resume the vX.Y.Z release babysit for commit <sha>. Check npm tags; every GitHub Actions run for the release branch and tag; the published GitHub Release body, expected desktop/APK assets, and channel manifests; the Docker image; and the matching EAS workflow. Completion requires every applicable checklist item. For stable, require build_ios, distribute_ios (Paseo Beta external distribution and Beta App Review submission), submit_ios_for_review, build_android, and submit_android to succeed. For beta, require the beta TestFlight distribution and Beta App Review path. If work is pending, wait for the next heartbeat. If a failure can be retried safely for the same version, follow the failed-release procedure; otherwise report the blocker. When every applicable completion-checklist item passes, delete THIS heartbeat, report shipped, and stop.",
+  "prompt": "Resume the vX.Y.Z release babysit for commit <sha>. Check npm tags; every enabled GitHub Actions run for the release branch and tag; published release body, expected desktop/APK assets and channel manifests; Docker image; and Android EAS jobs where applicable. For stable, require Android build/submission/screenshots. For stable and beta, require GitHub iOS TestFlight success and the matching version/build available to Overkite Internal without external distribution or review submission. If pending, wait for the next heartbeat. Retry only under the existing failed-release procedure. Delete this heartbeat and report shipped only after every applicable checklist item passes.",
 }
 ```
 
@@ -491,7 +517,7 @@ The GitHub Release body is populated automatically by the `Release Notes Sync` w
 - A published beta prerelease is offered behind the Stable/Beta switch on `/download` (`?channel=beta`), never as the default. The switch only appears while the newest prerelease leads stable on its core version, so promoting `X.Y.Z-beta.N` to `X.Y.Z` retires the beta channel from the page until the next beta line opens.
 - Homebrew, the Play Store, and `app.paseo.sh` have no beta. The Beta view drops those rows, and the whole Web section, rather than showing an inert "stable only" placeholder. The iOS row swaps the App Store pill for the public TestFlight link (`testFlightBetaUrl` in `packages/website/src/downloads.tsx`). When another surface gains a beta path, add its row back in `packages/website/src/routes/{-$locale}/download.tsx`.
 - The default download target only moves when you publish the final stable release tag like `v0.1.41`.
-- The public `/changelog` page renders `CHANGELOG.md` as-is, so the in-flight `-beta.N` entry shows there once it lands on `main` — that's intended, it's where beta users check what's coming. Only the **default download target** stays pinned to the latest stable; the download links read GitHub's releases API, not the changelog, so a `-beta.N` heading on top never affects them.
+- The public `/changelog` page renders the changelog bundled with its deployment. This fork keeps `main`'s changelog aligned with upstream; Overkite release-specific notes stay on the release branch/tag and its GitHub Release. Do not merge a beta entry into `main` to populate this page. Download links still read GitHub's releases API.
 - The download page's "What's new" link deep-links the **minor group** anchor (`/changelog#release-0.3`), not the exact entry: the beta entry is renamed on each beta and on promotion, so the minor group remains the durable target. A version with no entry in the bundled changelog — a tag whose changelog commit hasn't redeployed the site yet — links the plain `/changelog` instead of a dead anchor.
 - The website itself is deployed by `Deploy Website` (Cloudflare Workers), which redeploys on the `release: published` event emitted when a stable draft is published and on pushes to `main` that touch `CHANGELOG.md` or `packages/website/**`. Its job condition excludes beta prereleases.
 
@@ -595,11 +621,11 @@ Release notes depend on the changelog heading format. The heading **must** be st
 
 No prefix (`v`), no extra text. `Release Notes Sync` matches the `## X.Y.Z` (or `## X.Y.Z-beta.N`) line for the pushed tag to extract the version. A malformed heading breaks the release-notes sync for that tag.
 
-`CHANGELOG.md` on `main` is also what the app's **What's new** sheet fetches and renders, so the file is a shipped product surface, not just a release input. `##` starts a release and `###` starts a section; the app reads section titles from the document, so renaming or adding one needs no app change. Content between the release heading and the first `###` is the release's [highlights](#changelog-highlights). The What's new sheet, the website changelog and the GitHub release body show the highlights and keep the sections collapsed behind one control: Show all changes in the app and on the website, and an All changes `<details>` block that `Release Notes Sync` writes into the release body, so the file itself never needs HTML. A release with nothing before its first `###` shows its sections. Older entries that open with summary paragraphs are treated as highlights. The app, the website and the release scripts each parse the file with their own code, and installed apps keep the parser they shipped with, so those two heading rules are fixed: new kinds of content go inside the highlights or a section as Markdown, never behind a new heading level or marker. `scripts/test-support/changelog-structure.json` holds the cases all three parsers are tested against; change a structure rule there first. Everything under a section is rendered as Markdown: prose, lists, links, inline code, fenced code, block quotes, tables, and images. Raw HTML does not render — the shared Markdown parser runs with `html: false`, so a `<video>`, `<iframe>` or `<embed>` tag reaches the reader as visible markup. Keep media out of the changelog, or link to it. A GitHub callout renders as a block quote with its `[!NOTE]` marker still in the text. A release entry is what a user reads on a phone the moment they are offered the update — write it for them.
+The app's **What's new** sheet fetches `CHANGELOG.md` from `main`; in this fork that contains upstream notes, not the Overkite release record. `##` starts a release and `###` starts a section; the app reads section titles from the document, so renaming or adding one needs no app change. Content between the release heading and the first `###` is the release's [highlights](#changelog-highlights). The What's new sheet, the website changelog and the GitHub release body show the highlights and keep the sections collapsed behind one control: Show all changes in the app and on the website, and an All changes `<details>` block that `Release Notes Sync` writes into the release body, so the file itself never needs HTML. A release with nothing before its first `###` shows its sections. Older entries that open with summary paragraphs are treated as highlights. The app, the website and the release scripts each parse the file with their own code, and installed apps keep the parser they shipped with, so those two heading rules are fixed: new kinds of content go inside the highlights or a section as Markdown, never behind a new heading level or marker. `scripts/test-support/changelog-structure.json` holds the cases all three parsers are tested against; change a structure rule there first. Everything under a section is rendered as Markdown: prose, lists, links, inline code, fenced code, block quotes, tables, and images. Raw HTML does not render — the shared Markdown parser runs with `html: false`, so a `<video>`, `<iframe>` or `<embed>` tag reaches the reader as visible markup. Keep media out of the changelog, or link to it. A GitHub callout renders as a block quote with its `[!NOTE]` marker still in the text. A release entry is what a user reads on a phone the moment they are offered the update — write it for them.
 
 ## Changelog policy
 
-- `CHANGELOG.md` holds stable releases and at most one entry for the current beta series.
+- On a release branch, `CHANGELOG.md` holds stable releases and at most one entry for the current beta series. `main` keeps the upstream changelog.
 - The first beta of a version inserts a top entry like `## 0.1.60-beta.1 - YYYY-MM-DD`.
 - Each subsequent beta rewrites that entry in place: the heading becomes the new beta number and date, and the body describes the full change from the previous stable release to this beta. Never add a second beta entry.
 - The entry is a list of changes, not of PRs. When a later beta reverts, reworks, or follows up on something an earlier beta added, rewrite the bullet to the current behavior or delete it. A stable user never saw the earlier beta behavior, so fixes to it are not "Fixed" bullets.
@@ -800,6 +826,15 @@ Every entry covers `previous stable release → release source`: first beta, lat
 
 ## Completion checklist
 
+### Internal TestFlight
+
+- [ ] Capture the approved `main` commit and create the version's release branch
+- [ ] Set an unused version and commit its metadata only on that branch; do not add release contents or changelog entries
+- [ ] Set test notes to exactly `Internal Test`
+- [ ] Push the release branch and annotated tag together after authorization
+- [ ] Confirm the dispatched build checks out that tag and the matching version/build reaches Overkite Internal without external distribution or review
+- [ ] Retain the branch and tag with their original history; do not reconcile release metadata into `main`
+
 ### Beta release
 
 - [ ] The release base and changes match the [release base table](#release-base-and-source) and any approved [inventory](#release-inventory), and CI for the release source is green
@@ -816,8 +851,8 @@ Every entry covers `previous stable release → release source`: first beta, lat
 - [ ] GitHub `Android APK Release` workflow for the same tag is green
 - [ ] GitHub `Docker` workflow is green and the versioned beta image is published without moving `latest`
 - [ ] GitHub `Release Notes Sync` mirrored the beta entry into the prerelease body
-- [ ] EAS `Release iOS Beta` completed its build, TestFlight distribution, external beta group, and Beta App Review path
-- [ ] The [reconcile PR](#reconcile-main) brought the shipped changelog entries and version into `main`
+- [ ] GitHub `iOS TestFlight` succeeds for the release tag and the matching version/build is available to Overkite Internal
+- [ ] The release branch and tag retain the shipped history; no release metadata was merged into `main`
 - [ ] The release heartbeat was created after the tag push and deleted only after every item above passed
 
 ### Stable release (or promotion)
@@ -843,10 +878,8 @@ Every entry covers `previous stable release → release source`: first beta, lat
 - [ ] GitHub `Docker` workflow is green and both the versioned and `latest` images are published
 - [ ] GitHub `Release Notes Sync` is green and the release body matches the stable changelog entry
 - [ ] EAS `Release Mobile` workflow for the same tag is green
-- [ ] EAS iOS `build_ios` completes for the same tag
-- [ ] EAS iOS `distribute_ios` succeeds, uploading the binary once, distributing it to `Paseo Beta`, and submitting it for Beta App Review
-- [ ] EAS iOS `submit_ios_for_review` succeeds, putting the build into App Store review
+- [ ] GitHub `iOS TestFlight` succeeds for the release tag and the matching version/build is available to Overkite Internal
 - [ ] EAS Android `build_android` completes for the same tag
 - [ ] EAS Android `submit_android` succeeds, putting the build on its Play Store track
-- [ ] The [reconcile PR](#reconcile-main) brought the shipped changelog entries and version into `main`
+- [ ] The release branch and tag retain the shipped history; no release metadata was merged into `main`
 - [ ] The release heartbeat was created after the tag push and deleted only after every item above passed

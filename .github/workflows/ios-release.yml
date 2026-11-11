@@ -1,0 +1,183 @@
+name: iOS TestFlight
+run-name: iOS TestFlight · ${{ inputs.tag || github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "!v*-rc.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build (e.g. v0.14.1-beta.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: ios-testflight-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      # Tag-scoped caches cannot be restored by another tag. Keep the build run
+      # on the default branch, while its checkout remains pinned to the tag.
+      - name: Dispatch shared-cache build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_TAG: ${{ github.ref_name }}
+        run: gh workflow run ios-release.yml --ref "$DEFAULT_BRANCH" -f tag="$SOURCE_TAG"
+
+  testflight:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: xcode-27
+    timeout-minutes: 120
+    environment: production
+    env:
+      APP_VARIANT: production
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      CI: "1"
+      ONNXRUNTIME_NODE_INSTALL: skip
+      FASTLANE_SKIP_UPDATE_CHECK: "1"
+      FASTLANE_HIDE_CHANGELOG: "1"
+      SOURCE_TAG: ${{ inputs.tag }}
+      USE_CCACHE: "1"
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 2G
+    steps:
+      - name: Require shared cache scope
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "Dispatch this workflow from $DEFAULT_BRANCH with the release tag as input." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@boudra"
+
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ios-npm-${{ runner.os }}-${{ runner.arch }}-node22-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ios-npm-${{ runner.os }}-${{ runner.arch }}-node22-
+
+      - name: Install JS dependencies
+        run: node scripts/npm-retry.mjs ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve iOS release version
+        run: |
+          node scripts/ios-release-env.mjs >> "$GITHUB_ENV"
+          echo "IOS_OUTPUT_DIRECTORY=$RUNNER_TEMP/ios-release" >> "$GITHUB_ENV"
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: packages/app
+
+      - name: Setup compiler cache
+        id: ccache
+        run: |
+          if ! command -v ccache; then
+            brew install ccache
+          fi
+          echo "xcode=$(xcodebuild -version | tr '\n ' '--')" >> "$GITHUB_OUTPUT"
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+          ccache --version
+
+      - name: Cache native compilation
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ios-ccache-${{ runner.os }}-${{ runner.arch }}-${{ steps.ccache.outputs.xcode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ios-ccache-${{ runner.os }}-${{ runner.arch }}-${{ steps.ccache.outputs.xcode }}-
+
+      - name: Reset compiler cache statistics
+        run: ccache --zero-stats
+
+      - name: Cache CocoaPods downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos
+          key: ios-pods-${{ runner.os }}-${{ runner.arch }}-${{ steps.ccache.outputs.xcode }}-${{ hashFiles('package-lock.json', 'packages/app/Gemfile.lock') }}
+          restore-keys: |
+            ios-pods-${{ runner.os }}-${{ runner.arch }}-${{ steps.ccache.outputs.xcode }}-
+
+      - name: Build workspace dependencies
+        run: npm run build:app-deps
+
+      - name: Generate iOS project
+        working-directory: packages/app
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Install CocoaPods dependencies
+        working-directory: packages/app
+        run: bundle exec pod install --project-directory=ios
+
+      - name: Install signing credentials
+        working-directory: packages/app
+        run: bundle exec ruby ../../scripts/ios-signing.rb setup
+        env:
+          IOS_DISTRIBUTION_P12_BASE64: ${{ secrets.IOS_DISTRIBUTION_P12_BASE64 }}
+          IOS_DISTRIBUTION_P12_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_P12_PASSWORD }}
+          IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+
+      - name: Build and distribute to Overkite Internal
+        working-directory: packages/app
+        run: bundle exec fastlane ios build_testflight
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+
+      - name: Remove signing credentials
+        if: ${{ always() }}
+        working-directory: packages/app
+        run: ruby ../../scripts/ios-signing.rb cleanup
+
+      - name: Report compiler cache usage
+        if: ${{ always() && steps.ccache.outcome == 'success' }}
+        run: ccache --show-stats
+
+      - name: Upload iOS artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: overkite-${{ env.SOURCE_TAG }}-ios
+          path: |
+            ${{ runner.temp }}/ios-release/*.ipa
+            ${{ runner.temp }}/ios-release/*.dSYM.zip
+            ${{ runner.temp }}/ios-release/logs/**
+          if-no-files-found: ignore
+          retention-days: 7

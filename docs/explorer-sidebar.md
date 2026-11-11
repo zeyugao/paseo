@@ -142,9 +142,10 @@ workspace tabs, launcher, and panel host. Below 600 points the shell is the swip
 overlay; at 600 points and above it reserves width beside the workspace. Native docking keeps its
 touch resize handle. Full workspace splits remain a separate web-only capability.
 
-The dock reserves at least 240 points and the workspace 360. App navigation yields when it cannot
-share the remaining width with both. Navigation buttons, shortcuts, and commands then toggle its
-overlay, not its saved dock preference. Widening restores that preference. A reserved display
+Explorer keeps its preferred width and reserves at least 240 points, leaving 360 for the workspace.
+App navigation yields when it cannot share that allocation without narrowing Explorer. Navigation
+buttons, shortcuts, and commands then toggle its overlay, not its saved dock preference. Widening
+restores that preference. A reserved display
 division keeps the workspace allocation fixed when navigation closes; it does not force navigation
 open.
 

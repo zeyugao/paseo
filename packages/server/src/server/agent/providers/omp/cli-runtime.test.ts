@@ -2,6 +2,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import pino from "pino";
+import type { Logger } from "pino";
 import { describe, expect, test, vi } from "vitest";
 
 import { OmpCliRuntime } from "./cli-runtime.js";
@@ -52,10 +53,10 @@ function createOmpChild(options?: {
 function createRuntime(
   child: OmpChild,
   launches: OmpRuntimeLaunch[] = [],
-  options?: { requestTimeoutMs?: number },
+  options?: { requestTimeoutMs?: number; logger?: Logger },
 ): OmpCliRuntime {
   return new OmpCliRuntime({
-    logger: pino({ level: "silent" }),
+    logger: options?.logger ?? pino({ level: "silent" }),
     command: ["omp"],
     commandsRpcName: "get_available_commands",
     requestTimeoutMs: options?.requestTimeoutMs,
@@ -115,6 +116,22 @@ function exitOnCommand(child: OmpChild, type: string): void {
   });
 }
 
+function writeResponse(
+  child: OmpChild,
+  command: Record<string, unknown>,
+  data: unknown = {},
+): void {
+  child.stdout.write(
+    `${JSON.stringify({
+      id: command.id,
+      type: "response",
+      command: command.type,
+      success: true,
+      data,
+    })}\n`,
+  );
+}
+
 function withoutRequestId(command: Record<string, unknown>): Record<string, unknown> {
   const { id: _id, ...rest } = command;
   return rest;
@@ -163,6 +180,70 @@ describe("OMP CLI runtime", () => {
     }
     await session.close();
   });
+  test("waits for the matching steer acknowledgement", async () => {
+    const child = createOmpChild();
+    const pendingCommand = capturePendingCommand(child, "steer");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+    try {
+      let settled = false;
+      const images = [{ type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" }];
+      const steer = session.steer("change course", images).then(() => {
+        settled = true;
+        return undefined;
+      });
+      const command = await pendingCommand;
+      expect(command).toEqual({
+        type: "steer",
+        id: expect.any(String),
+        message: "change course",
+        images,
+      });
+      writeResponse(child, { ...command, id: "unrelated-request" });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      writeResponse(child, command);
+      await steer;
+      expect(settled).toBe(true);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("surfaces a rejected steer acknowledgement", async () => {
+    const child = createOmpChild();
+    const pendingCommand = capturePendingCommand(child, "steer");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+    try {
+      const steer = session.steer("change course");
+      const command = await pendingCommand;
+      const rejection = expect(steer).rejects.toThrow("steer rejected");
+      child.stdout.write(
+        `${JSON.stringify({ id: command.id, type: "response", command: "steer", success: false, error: "steer rejected" })}\n`,
+      );
+      await rejection;
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("times out a steer with no acknowledgement", async () => {
+    vi.useFakeTimers();
+    const child = createOmpChild();
+    const session = await createRuntime(child, [], { requestTimeoutMs: 100 }).startSession({
+      cwd: "/workspace/project",
+    });
+    try {
+      const rejection = expect(session.steer("change course")).rejects.toThrow(
+        "OMP RPC request timed out phase=steer",
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+      await session.close();
+    }
+  });
+
   test("uses the configured RPC timeout and attributes the pending phase", async () => {
     vi.useFakeTimers();
     const child = createOmpChild();
@@ -336,6 +417,136 @@ describe("OMP CLI runtime", () => {
     expect(eventTypes).toEqual(["message_end", "agent_end"]);
   });
 
+  test("warns when an event frame fails schema validation", async () => {
+    const child = createOmpChild();
+    const warnings: Array<{ eventType: unknown; msg: string }> = [];
+    const logger = {
+      debug: () => undefined,
+      info: () => undefined,
+      error: () => undefined,
+      warn: (obj: Record<string, unknown>, msg: string) =>
+        warnings.push({ eventType: obj.eventType, msg }),
+    } as unknown as Logger;
+    const session = await createRuntime(child, [], { logger }).startSession({
+      cwd: "/workspace/project",
+    });
+    const eventTypes: string[] = [];
+    session.onEvent((event) => eventTypes.push(event.type));
+
+    // A known role with a malformed field fails its strict schema instead of
+    // being accepted as an unknown-role fallback.
+    child.stdout.write(
+      `${JSON.stringify({ type: "message_end", message: { role: "user", content: 42 } })}\n`,
+    );
+
+    expect(eventTypes).toEqual([]);
+    expect(warnings).toEqual([
+      {
+        eventType: "message_end",
+        msg: "Ignoring OMP RPC event that failed schema validation",
+      },
+    ]);
+  });
+
+  test("accepts the omp 18.8 event frames this build does not render", async () => {
+    const child = createOmpChild();
+    const warnings: unknown[] = [];
+    const logger = {
+      debug: () => undefined,
+      info: () => undefined,
+      error: () => undefined,
+      warn: (...args: unknown[]) => warnings.push(args),
+    } as unknown as Logger;
+    const session = await createRuntime(child, [], { logger }).startSession({
+      cwd: "/workspace/project",
+    });
+    const eventTypes: string[] = [];
+    const assistantEventTypes: string[] = [];
+    session.onEvent((event) => {
+      eventTypes.push(event.type);
+      if (event.type === "message_update") {
+        assistantEventTypes.push(event.assistantMessageEvent.type);
+      }
+    });
+
+    // One frame per event type omp 18.8 forwards that this build draws nothing
+    // from. turn_end closes each model cycle, the toolcall and image assistant
+    // events stream renderer input Paseo reads elsewhere, and the rest is
+    // session telemetry; a rejection here used to warn once per frame.
+    const frames: Record<string, unknown>[] = [
+      {
+        type: "turn_end",
+        message: { role: "assistant", content: [{ type: "text", text: "cycle done" }] },
+        toolResults: [{ role: "toolResult", content: [{ type: "text", text: "ok" }] }],
+      },
+      {
+        type: "message_update",
+        message: { role: "assistant", content: [] },
+        assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: '{"path"' },
+      },
+      {
+        type: "message_update",
+        message: { role: "assistant", content: [] },
+        assistantMessageEvent: {
+          type: "image_end",
+          contentIndex: 0,
+          content: { type: "image", data: "aGk=", mimeType: "image/png" },
+        },
+      },
+      { type: "tool_stream_update", toolCallId: "call-1", toolName: "hub", update: { chunk: 1 } },
+      { type: "cache_warming_start", phase: "idle", provider: "ai-harness-omp", model: "glm-5" },
+      {
+        type: "cache_warming_end",
+        phase: "idle",
+        provider: "ai-harness-omp",
+        model: "glm-5",
+        outcome: "hit",
+      },
+      { type: "thinking_level_changed", thinkingLevel: "high" },
+      { type: "queue_update", steering: ["do this instead"], followUp: [] },
+      { type: "ttsr_triggered", rules: [{ name: "no-primary-skill" }] },
+      { type: "todo_auto_clear" },
+      { type: "irc_message", message: { role: "custom", content: "hello from peer" } },
+      { type: "config_warnings_changed" },
+      { type: "advisor_cost_changed" },
+      { type: "advisor_yielded" },
+      {
+        type: "subagent_event",
+        payload: {
+          id: "child-1",
+          event: {
+            type: "turn_end",
+            message: { role: "assistant", content: [] },
+            toolResults: [],
+          },
+        },
+      },
+    ];
+    for (const frame of frames) {
+      child.stdout.write(`${JSON.stringify(frame)}\n`);
+    }
+
+    expect(warnings).toEqual([]);
+    expect(eventTypes).toEqual([
+      "turn_end",
+      "message_update",
+      "message_update",
+      "tool_stream_update",
+      "cache_warming_start",
+      "cache_warming_end",
+      "thinking_level_changed",
+      "queue_update",
+      "ttsr_triggered",
+      "todo_auto_clear",
+      "irc_message",
+      "config_warnings_changed",
+      "advisor_cost_changed",
+      "advisor_yielded",
+      "subagent_event",
+    ]);
+    expect(assistantEventTypes).toEqual(["toolcall_delta", "image_end"]);
+  });
+
   test("lists commands through get_available_commands", async () => {
     const child = createOmpChild();
     const commandTypes: string[] = [];
@@ -486,6 +697,93 @@ describe("OMP CLI runtime", () => {
     });
   });
 
+  test("prompt waits beyond the default control-plane timeout for a late response", async () => {
+    vi.useFakeTimers();
+    const child = createOmpChild();
+    const pendingPrompt = capturePendingCommand(child, "prompt");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+
+    try {
+      const promptPromise = session.prompt({ message: "continue" });
+      const promptCommand = await pendingPrompt;
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(promptCommand).toMatchObject({
+        type: "prompt",
+        message: "continue",
+        id: expect.any(String),
+      });
+
+      writeResponse(child, promptCommand, {});
+
+      await expect(promptPromise).resolves.toEqual({ requestId: "req_1" });
+    } finally {
+      vi.useRealTimers();
+      await session.close();
+    }
+  });
+
+  test("prompt without a wall-clock timeout rejects when the session closes", async () => {
+    const child = createOmpChild();
+    const pendingPrompt = capturePendingCommand(child, "prompt");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+
+    const promptPromise = session.prompt({ message: "hello" });
+    const promptCommand = await pendingPrompt;
+    expect(promptCommand).toMatchObject({ type: "prompt", id: expect.any(String) });
+
+    const rejection = expect(promptPromise).rejects.toThrow("OMP RPC session is closed");
+    await session.close();
+
+    await rejection;
+  });
+
+  test("compact waits beyond the default control-plane timeout for a late response", async () => {
+    vi.useFakeTimers();
+    const child = createOmpChild();
+    const pendingCompact = capturePendingCommand(child, "compact");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+
+    try {
+      const compactPromise = session.compact("focus on tests");
+      const compactCommand = await pendingCompact;
+      await vi.advanceTimersByTimeAsync(35_000);
+
+      expect(compactCommand).toMatchObject({
+        type: "compact",
+        customInstructions: "focus on tests",
+        id: expect.any(String),
+      });
+
+      writeResponse(child, compactCommand, {
+        summary: "done",
+        firstKeptEntryId: "entry-1",
+        tokensBefore: 120_000,
+        estimatedTokensAfter: 20_000,
+      });
+
+      await expect(compactPromise).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      await session.close();
+    }
+  });
+
+  test("compact without a wall-clock timeout rejects when the session closes", async () => {
+    const child = createOmpChild();
+    const pendingCompact = capturePendingCommand(child, "compact");
+    const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
+
+    const compactPromise = session.compact();
+    const compactCommand = await pendingCompact;
+    expect(compactCommand).toMatchObject({ type: "compact", id: expect.any(String) });
+
+    const rejection = expect(compactPromise).rejects.toThrow("OMP RPC session is closed");
+    await session.close();
+
+    await rejection;
+  });
+
   test("negotiates RPC protocol v2 when OMP advertises it", async () => {
     const child = createOmpChild({ supportedProtocolVersions: [1, 2] });
     const commands: Record<string, unknown>[] = [];
@@ -578,7 +876,6 @@ describe("OMP CLI runtime", () => {
               data: { protocolVersion: 2 },
             })}\n`,
           );
-          continue;
         }
         if (command.type === "get_available_models") {
           // Emit a logical response larger than the 1 MiB protocol-v1 cap as a

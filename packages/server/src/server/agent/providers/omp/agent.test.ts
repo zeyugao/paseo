@@ -1,8 +1,9 @@
-import { describe, expect, onTestFinished, test } from "vitest";
+import { describe, expect, onTestFinished, test, vi } from "vitest";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
+import { rmSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import path from "node:path";
+import path, { join } from "node:path";
 
 import type { AgentStreamEvent } from "../../agent-sdk-types.js";
 import type { PaseoToolCatalog } from "../../tools/types.js";
@@ -12,7 +13,7 @@ import type { OmpUsagePollScheduler } from "./usage-poller.js";
 import { resolveOmpProviderOptions } from "./provider-config.js";
 import { OmpRuntimeEventSchema, OmpSessionStateSchema } from "./rpc-types.js";
 import { OmpHarness } from "./test-utils/omp-harness.js";
-import { OmpAgentClient } from "./agent.js";
+import { OmpAgentClient, OmpAgentSession } from "./agent.js";
 import { FakeOmp } from "./test-utils/fake-omp.js";
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 
@@ -227,6 +228,19 @@ function createToolCatalog(): PaseoToolCatalog {
   };
 }
 
+const MANUAL_COMPACTION_EVENTS = [
+  {
+    type: "timeline",
+    provider: "omp",
+    item: { type: "compaction", status: "loading", trigger: "manual" },
+  },
+  {
+    type: "timeline",
+    provider: "omp",
+    item: { type: "compaction", status: "completed", trigger: "manual" },
+  },
+] as const satisfies readonly AgentStreamEvent[];
+
 describe("OMP agent client and session", () => {
   test("failed manual compact closes its progress row and shows the error", async () => {
     const omp = new OmpHarness();
@@ -247,6 +261,10 @@ describe("OMP agent client and session", () => {
           text: "[Error] Failed to compact context: compaction refused",
         },
       }),
+      // Session-stream events (the synthetic turn boundaries) are collected
+      // separately from the out-of-band emitter, so they trail the markers.
+      expect.objectContaining({ type: "turn_started", provider: "omp" }),
+      expect.objectContaining({ type: "turn_completed", provider: "omp" }),
     ]);
   });
 
@@ -267,6 +285,8 @@ describe("OMP agent client and session", () => {
         type: "timeline",
         item: { type: "compaction", status: "completed", trigger: "manual" },
       }),
+      expect.objectContaining({ type: "turn_started", provider: "omp" }),
+      expect.objectContaining({ type: "turn_completed", provider: "omp" }),
       expect.objectContaining({
         type: "usage_updated",
         usage: expect.objectContaining({
@@ -365,6 +385,27 @@ describe("OMP agent client and session", () => {
     expect(omp.completedTurnCount()).toBe(1);
   });
 
+  test("starts Paseo lifecycle on agent_start and ignores later model-cycle starts", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    await omp.startActiveTurn("inspect the project");
+    const runtime = omp.runtime();
+    runtime.emit({ type: "agent_start" });
+    runtime.emit({
+      type: "message_update",
+      message: { role: "assistant", content: [], responseId: "reasoning-1" },
+      assistantMessageEvent: { type: "thinking_delta", delta: "Checking files" },
+    });
+    runtime.beginTurn();
+
+    expect(omp.eventTypes().slice(0, 3)).toEqual(["turn_started", "thread_started", "timeline"]);
+    expect(omp.eventTypes().filter((type) => type === "turn_started")).toHaveLength(1);
+    expect(omp.timeline()).toEqual([{ type: "reasoning", text: "Checking files" }]);
+
+    runtime.finishTurn();
+  });
+
   test("streams OMP advisor messages as distinct tool-call blocks", async () => {
     const omp = new OmpHarness();
     await omp.start();
@@ -406,6 +447,95 @@ describe("OMP agent client and session", () => {
         error: null,
       },
       { type: "assistant_message", text: "fixed", messageId: "omp-assistant-1" },
+    ]);
+  });
+
+  test("streams OMP IRC messages as tool-call blocks instead of assistant text", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    await omp.runPromptWithCustomMessage(
+      "keep working",
+      {
+        role: "custom",
+        content: [
+          "<irc>",
+          "Incoming IRC message from agent `IrisModeMigration`:",
+          "",
+          "refineResolvedSpinMode hook exists.",
+          "</irc>",
+        ].join("\n"),
+        customType: "irc:incoming",
+        entryId: "irc-live-1",
+        display: true,
+      },
+      "continuing",
+    );
+
+    expect(omp.timeline()).toEqual([
+      { type: "user_message", text: "keep working", messageId: "user-1" },
+      {
+        type: "tool_call",
+        callId: "omp-irc:irc-live-1",
+        name: "irc",
+        status: "completed",
+        detail: {
+          type: "plain_text",
+          label: "From `IrisModeMigration`",
+          text: "refineResolvedSpinMode hook exists.",
+          icon: "bot",
+        },
+        metadata: { synthetic: true, source: "omp_irc", messageCount: 1 },
+        error: null,
+      },
+      { type: "assistant_message", text: "continuing", messageId: "omp-assistant-1" },
+    ]);
+  });
+
+  test("streams every job in a parallel notice payload as its own row", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    await omp.runPromptWithCustomMessage(
+      "keep working",
+      {
+        role: "custom",
+        content: [
+          "<system-notice>",
+          "2 background jobs have completed. Resume your work using the results below.",
+          "",
+          "── Job FixBuild (FixBuild) ──",
+          '<task-result id="FixBuild" status="completed">',
+          "<output>build ok</output>",
+          "</task-result>",
+          "── Job Sweep2161 (Sweep2161) ──",
+          '<task-result id="Sweep2161" status="failed">',
+          "<output>sweep blew up</output>",
+          "</task-result>",
+          "</system-notice>",
+        ].join("\n"),
+        customType: "async-result",
+        entryId: "notice-live-2",
+        display: true,
+      },
+      "continuing",
+    );
+
+    expect(omp.timeline()).toMatchObject([
+      { type: "user_message", text: "keep working", messageId: "user-1" },
+      {
+        type: "tool_call",
+        callId: "omp-notice:notice-live-2#0",
+        status: "completed",
+        error: null,
+      },
+      {
+        type: "tool_call",
+        callId: "omp-notice:notice-live-2#1",
+        status: "failed",
+        error: "sweep blew up",
+      },
+      { type: "assistant_message", text: "continuing", messageId: "omp-assistant-1" },
     ]);
   });
 
@@ -460,6 +590,60 @@ describe("OMP agent client and session", () => {
     expect(scheduler.activePollCount()).toBe(1);
     await omp.close();
     expect(scheduler.activePollCount()).toBe(0);
+  });
+
+  test("reads context usage on first subscribe after resume without a turn", async () => {
+    const runtime = new FakeOmp();
+    const client = new OmpAgentClient({ logger: createTestLogger(), runtime });
+    const directory = await mkdtemp(join(tmpdir(), "paseo-omp-initial-usage-"));
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      [
+        { type: "session", id: "root", parentId: null },
+        {
+          type: "message",
+          id: "user-1",
+          parentId: "root",
+          message: { role: "user", content: "resume me" },
+        },
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n"),
+    );
+    let session: OmpAgentSession | null = null;
+    try {
+      session = await client.resumeSession({
+        provider: "omp",
+        sessionId: "initial-usage-1",
+        nativeHandle: sessionFile,
+        metadata: { cwd: directory },
+      });
+      runtime.latestSession().stats = {
+        tokens: { input: 900, cacheRead: 10, output: 90, cacheWrite: 0, total: 1000 },
+        cost: 0.5,
+        contextUsage: { tokens: 130, contextWindow: 200_000 },
+      };
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+      await waitForImmediate();
+
+      expect(events).toContainEqual({
+        type: "usage_updated",
+        provider: "omp",
+        usage: {
+          inputTokens: 900,
+          cachedInputTokens: 10,
+          outputTokens: 90,
+          totalCostUsd: 0.5,
+          contextWindowMaxTokens: 200_000,
+          contextWindowUsedTokens: 130,
+        },
+      });
+    } finally {
+      await session?.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("does not accept a follow-up until OMP reports stable idle", async () => {
@@ -543,6 +727,49 @@ describe("OMP agent client and session", () => {
     expect(omp.runningToolCallIds()).toEqual([]);
   });
 
+  test("settles an active turn when OMP reports the session settled without a terminal agent_end", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const runtime = omp.runtime();
+    const promptStarted = runtime.nextPrompt();
+    const run = omp.requireSession().run("first");
+    await promptStarted;
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "user-1");
+    runtime.streamAssistantText("first done");
+    runtime.emit({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "first done" }] },
+    });
+    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+    // The terminal agent_end never arrived (e.g. the frame was dropped after a
+    // protocol drift); OMP's settle watcher still reports the session quiet.
+    runtime.emit({ type: "session_settled" });
+
+    await expect(run).resolves.toMatchObject({ finalText: "first done" });
+    expect(omp.completedTurnCount()).toBe(1);
+  });
+
+  test("ignores session_settled when no turn is active", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const runtime = omp.runtime();
+    const promptStarted = runtime.nextPrompt();
+    const run = omp.requireSession().run("first");
+    await promptStarted;
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "user-1");
+    runtime.streamAssistantText("first done");
+    runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+    runtime.finishTurn();
+    await expect(run).resolves.toMatchObject({ finalText: "first done" });
+    expect(omp.completedTurnCount()).toBe(1);
+
+    runtime.emit({ type: "session_settled" });
+    await waitForImmediate();
+    expect(omp.completedTurnCount()).toBe(1);
+  });
+
   test("steers a running turn and correlates a template-expanded echo exactly once", async () => {
     const omp = new OmpHarness();
     await omp.start();
@@ -588,6 +815,11 @@ describe("OMP agent client and session", () => {
     await expect(session.steerActiveTurn?.("second", { expectedTurnId: turnId })).rejects.toBe(
       timeout,
     );
+    await omp.interrupt();
+    await expect(omp.runPrompt("next", "next done")).resolves.toMatchObject({
+      finalText: "next done",
+    });
+    await omp.close();
   });
 
   test("shows OMP's fallback model without persisting it as the selected model", async () => {
@@ -909,36 +1141,52 @@ describe("OMP agent client and session", () => {
     ]);
   });
 
-  test("renders a live system-notice custom message as a notification", async () => {
+  test("streams a live system-notice custom message as a tool-call row", async () => {
     const omp = new OmpHarness();
     await omp.start();
 
-    await omp.runPrompt("hello OMP", "done");
-    omp
-      .runtime()
-      .acceptCustomMessage(
-        [
+    await omp.runPromptWithCustomMessage(
+      "hello OMP",
+      {
+        role: "custom",
+        content: [
           "<system-notice>",
-          "Background job DocsSmokeTwo has completed.",
+          "Background job DocsSmokeTwo has completed. Resume your work using the result below.",
           '<task-result id="DocsSmokeTwo" agent="explore" status="completed" duration="21.6s">',
           "<output>done</output>",
           "</task-result>",
           "</system-notice>",
         ].join("\n"),
-      );
+        customType: "async-result",
+        entryId: "notice-live-1",
+        display: true,
+      },
+      "continuing",
+    );
     omp.runtime().acceptCustomMessage("plain custom status text");
 
-    expect(omp.timeline().filter((item) => item.type === "notification")).toEqual([
+    expect(omp.timeline()).toEqual([
+      { type: "user_message", text: "hello OMP", messageId: "user-1" },
       {
-        type: "notification",
-        level: "info",
-        message: "Background job DocsSmokeTwo completed",
+        type: "tool_call",
+        callId: "omp-notice:notice-live-1",
+        name: "system_notice",
+        status: "completed",
+        detail: {
+          type: "plain_text",
+          label: "Background job DocsSmokeTwo completed",
+          text: [
+            "Background job DocsSmokeTwo has completed. Resume your work using the result below.",
+            '<task-result id="DocsSmokeTwo" agent="explore" status="completed" duration="21.6s">',
+            "<output>done</output>",
+            "</task-result>",
+          ].join("\n"),
+          icon: "bot",
+        },
+        metadata: { synthetic: true, source: "omp_system_notice" },
+        error: null,
       },
-    ]);
-    expect(
-      omp.timeline().filter((item) => item.type !== "notification" && item.type !== "user_message"),
-    ).toEqual([
-      { type: "assistant_message", text: "done", messageId: "omp-assistant-1" },
+      { type: "assistant_message", text: "continuing", messageId: "omp-assistant-1" },
       {
         type: "tool_call",
         callId: expect.stringMatching(/^omp-custom-/),
@@ -1382,6 +1630,70 @@ describe("OMP agent client and session", () => {
     ]);
   });
 
+  test("normalizes unknown OMP message roles so a terminal agent_end still parses", () => {
+    const parsed = OmpRuntimeEventSchema.safeParse({
+      type: "agent_end",
+      isTerminal: true,
+      messages: [
+        { role: "user", content: "fix the slides" },
+        {
+          role: "developer",
+          content: [
+            {
+              type: "text",
+              text: "<system-reminder>Rule: prefer arrays over Sets</system-reminder>",
+            },
+          ],
+        },
+        { role: "developer", content: "passive tool context follows" },
+        { role: "assistant", content: [{ type: "text", text: "done" }] },
+      ],
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw new Error("Expected unknown-role agent_end to parse");
+    if (parsed.data.type !== "agent_end") throw new Error("Expected an agent_end event");
+    expect(parsed.data.messages).toEqual([
+      { role: "user", content: "fix the slides" },
+      {
+        role: "custom",
+        content: "<system-reminder>Rule: prefer arrays over Sets</system-reminder>",
+        display: false,
+      },
+      { role: "custom", content: "[developer] passive tool context follows" },
+      { role: "assistant", content: [{ type: "text", text: "done" }] },
+    ]);
+  });
+
+  test("still rejects malformed known-role messages inside an agent_end", () => {
+    const parsed = OmpRuntimeEventSchema.safeParse({
+      type: "agent_end",
+      isTerminal: true,
+      messages: [{ role: "user", content: 42 }],
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  test("renders a live unknown-role message as a fallback row", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    await omp.startActiveTurn("first");
+    const parsed = OmpRuntimeEventSchema.safeParse({
+      type: "message_end",
+      message: { role: "developer", content: "prefer arrays over Sets" },
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw new Error("Expected unknown-role message_end to parse");
+
+    omp.emit(parsed.data);
+    expect(omp.timeline()).toContainEqual(
+      expect.objectContaining({
+        type: "tool_call",
+        name: "custom-message",
+        detail: { type: "plain_text", text: "[developer] prefer arrays over Sets" },
+      }),
+    );
+  });
+
   test("exposes OMP modes and commands through the domain session", async () => {
     const omp = new OmpHarness();
     omp.queueCommands([{ name: "review", description: "Review changes", source: "skill" }]);
@@ -1645,6 +1957,26 @@ describe("OMP agent client and session", () => {
     expect(omp.eventTypes().filter(isTurnLifecycle)).toEqual(["turn_started", "turn_canceled"]);
   });
 
+  test("a turn_end frame neither renders output nor settles the active turn", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    await omp.requireStartTurn("keep going");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.emit({
+      type: "turn_end",
+      message: { role: "assistant", content: [{ type: "text", text: "cycle done" }] },
+      toolResults: [],
+    });
+
+    // The cycle's message and tool results already reached the timeline through
+    // message_end and tool_execution_end; the frame must duplicate neither and
+    // must not end the run.
+    expect(omp.timeline()).toEqual([]);
+    expect(omp.eventTypes().filter(isTurnLifecycle)).toEqual(["turn_started"]);
+  });
+
   test("a resumed session does not re-emit replayed events as live timeline items", async () => {
     const omp = new OmpHarness();
     await omp.resume({
@@ -1680,6 +2012,720 @@ describe("OMP agent client and session", () => {
     expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
       { type: "user_message", text: "hello OMP", messageId: "user-1" },
     ]);
+  });
+
+  test("steers the active OMP turn and reconciles the echoed user message", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("first", "turn-client");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "user-1");
+
+    await expect(
+      omp.steerActiveTurn("change course", {
+        expectedTurnId: turnId,
+        clientMessageId: "steer-client",
+      }),
+    ).resolves.toEqual({ status: "accepted" });
+    expect(runtime.steerRequests).toEqual([{ message: "change course", imageCount: 0 }]);
+
+    // OMP echoes the steered message as a user message_end; it must reconcile against the
+    // steer's client message id, not the turn's original prompt.
+    runtime.acceptPrompt("change course", "steer-entry-1", true);
+    expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+      { type: "user_message", text: "first", messageId: "user-1", clientMessageId: "turn-client" },
+      {
+        type: "user_message",
+        text: "change course",
+        messageId: "steer-entry-1",
+        clientMessageId: "steer-client",
+      },
+    ]);
+  });
+  test.each([true, undefined])(
+    "keeps a steered turn alive across non-terminal idle cycles (final isTerminal=%s)",
+    async (isTerminal) => {
+      const omp = new OmpHarness();
+      await omp.start();
+      try {
+        const turnId = await omp.startActiveTurn("first", "turn-client");
+        const runtime = omp.runtime();
+        runtime.beginTurn();
+        runtime.acceptPrompt("first", "user-1");
+        runtime.streamAssistantText("before steer", "assistant-before");
+        await omp.steerActiveTurn("change course", {
+          expectedTurnId: turnId,
+          clientMessageId: "steer-client",
+        });
+        runtime.state = { ...runtime.state, isStreaming: false, isCompacting: false };
+        const messages = [{ role: "assistant" as const, content: [] }];
+        runtime.emit({ type: "agent_end", isTerminal: false, messages });
+        await waitForImmediate();
+        expect(omp.completedTurnCount()).toBe(0);
+
+        runtime.beginTurn();
+        runtime.acceptPrompt("change course", "steer-entry", true);
+        runtime.streamAssistantText("continued output", "assistant-after");
+        expect(omp.timeline()).toEqual([
+          {
+            type: "user_message",
+            text: "first",
+            messageId: "user-1",
+            clientMessageId: "turn-client",
+          },
+          { type: "assistant_message", text: "before steer", messageId: "assistant-before" },
+          {
+            type: "user_message",
+            text: "change course",
+            messageId: "steer-entry",
+            clientMessageId: "steer-client",
+          },
+          { type: "assistant_message", text: "continued output", messageId: "assistant-after" },
+        ]);
+        expect(omp.wasAborted()).toBe(false);
+        runtime.emit({
+          type: "agent_end",
+          messages,
+          ...(isTerminal === undefined ? {} : { isTerminal }),
+        });
+        await waitForImmediate();
+        expect(omp.completedTurnCount()).toBe(1);
+      } finally {
+        await omp.close();
+      }
+    },
+  );
+
+  test("correlates a synchronous steer echo with its client message", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("first", "turn-client");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "user-1");
+    const originalSteer = runtime.steer.bind(runtime);
+    runtime.steer = (message, images) => {
+      const ack = originalSteer(message, images);
+      runtime.acceptPrompt(message, "steer-entry-sync", true);
+      runtime.acceptPrompt(message, "steer-entry-sync", true);
+      return ack;
+    };
+
+    await expect(
+      omp.steerActiveTurn("change course", {
+        expectedTurnId: turnId,
+        clientMessageId: "steer-client",
+      }),
+    ).resolves.toEqual({ status: "accepted" });
+
+    expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+      { type: "user_message", text: "first", messageId: "user-1", clientMessageId: "turn-client" },
+      {
+        type: "user_message",
+        text: "change course",
+        messageId: "steer-entry-sync",
+        clientMessageId: "steer-client",
+      },
+    ]);
+    await omp.interrupt();
+    await expect(omp.runPrompt("next", "next done")).resolves.toMatchObject({
+      finalText: "next done",
+    });
+    await omp.close();
+  });
+
+  test("does not let a replayed duplicate user entry consume a steer", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("same text", "turn-client");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("same text", "user-1");
+    await omp.steerActiveTurn("same text", {
+      expectedTurnId: turnId,
+      clientMessageId: "steer-client",
+    });
+
+    // OMP can replay the original entry after a steer. Native-id dedupe must happen before
+    // matching pending steer submissions.
+    runtime.acceptPrompt("same text", "user-1");
+    runtime.acceptPrompt("same text", "steer-entry-1", true);
+
+    expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+      {
+        type: "user_message",
+        text: "same text",
+        messageId: "user-1",
+        clientMessageId: "turn-client",
+      },
+      {
+        type: "user_message",
+        text: "same text",
+        messageId: "steer-entry-1",
+        clientMessageId: "steer-client",
+      },
+    ]);
+  });
+
+  test.each([
+    { echo: "message_end", isTerminal: undefined },
+    { echo: "agent_end", isTerminal: true },
+    { echo: "agent_end", isTerminal: undefined },
+  ])(
+    "waits for unread steer draining with $echo (isTerminal=$isTerminal)",
+    async ({ echo, isTerminal }) => {
+      const omp = new OmpHarness();
+      await omp.start();
+      onTestFinished(() => omp.close());
+
+      const turnId = await omp.startActiveTurn("long work");
+      const runtime = omp.runtime();
+      runtime.beginTurn();
+      await omp.steerActiveTurn("unread steer", {
+        expectedTurnId: turnId,
+        clientMessageId: "steer-client",
+      });
+      await omp.interrupt();
+
+      const replacement = omp.startActiveTurn("replacement");
+      await waitForImmediate();
+      expect(runtime.prompts).toEqual([{ message: "long work", imageCount: 0 }]);
+
+      runtime.emit({ type: "agent_start" });
+      runtime.streamAssistantText("phantom output");
+      if (echo === "message_end") {
+        runtime.acceptPrompt("unread steer", "steer-entry-1", true);
+      }
+      runtime.emit({
+        type: "agent_end",
+        ...(isTerminal === undefined ? {} : { isTerminal }),
+        messages: [
+          { role: "user", content: "unread steer", entryId: "steer-entry-1" },
+          ABORTED_TERMINAL_RESPONSE,
+        ],
+      });
+
+      await expect(replacement).resolves.toEqual(expect.any(String));
+      expect(runtime.prompts).toEqual([
+        { message: "long work", imageCount: 0 },
+        { message: "replacement", imageCount: 0 },
+      ]);
+      expect(omp.timeline()).toEqual([]);
+      runtime.beginTurn();
+      runtime.acceptPrompt("replacement", "replacement-entry");
+      runtime.finishTurn();
+      await waitForImmediate();
+      expect(omp.completedTurnCount()).toBe(1);
+    },
+  );
+
+  test("a rejected steer rolls back only its own same-text submission", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    onTestFinished(() => omp.close());
+    const turnId = await omp.startActiveTurn("first");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "first-entry");
+    const originalSteer = runtime.steer.bind(runtime);
+    const { promise: ack, reject: rejectAck } = Promise.withResolvers<void>();
+    runtime.steer = () => ack;
+    const rejected = omp.steerActiveTurn("same text", {
+      expectedTurnId: turnId,
+      clientMessageId: "rejected-client",
+    });
+    await waitForImmediate();
+    runtime.steer = originalSteer;
+    await expect(
+      omp.steerActiveTurn("same text", {
+        expectedTurnId: turnId,
+        clientMessageId: "accepted-client",
+      }),
+    ).resolves.toEqual({ status: "accepted" });
+
+    rejectAck(new Error("steer rejected"));
+    await expect(rejected).resolves.toEqual({ status: "unavailable" });
+    runtime.acceptPrompt("same text", "accepted-entry", true);
+    expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+      { type: "user_message", text: "first", messageId: "first-entry" },
+      {
+        type: "user_message",
+        text: "same text",
+        messageId: "accepted-entry",
+        clientMessageId: "accepted-client",
+      },
+    ]);
+    await omp.interrupt();
+    await expect(omp.runPrompt("next", "next done")).resolves.toMatchObject({
+      finalText: "next done",
+    });
+  });
+
+  test("a steer acknowledged after turn end leaves a newer same-text steer queued", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    onTestFinished(() => omp.close());
+    const firstTurnId = await omp.startActiveTurn("first");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("first", "first-entry");
+    const originalSteer = runtime.steer.bind(runtime);
+    const { promise: ack, resolve: resolveAck } = Promise.withResolvers<void>();
+    runtime.steer = () => ack;
+    const lateSteer = omp.steerActiveTurn("same text", {
+      expectedTurnId: firstTurnId,
+      clientMessageId: "old-client",
+      clearPendingPermissions: true,
+    });
+    await waitForImmediate();
+    runtime.finishTurn();
+    await waitForImmediate();
+    expect(omp.completedTurnCount()).toBe(1);
+
+    runtime.steer = originalSteer;
+    const nextTurnId = await omp.startActiveTurn("second");
+    runtime.beginTurn();
+    runtime.acceptPrompt("second", "second-entry");
+    await omp.steerActiveTurn("same text", {
+      expectedTurnId: nextTurnId,
+      clientMessageId: "new-client",
+    });
+    omp.requestToolApproval({ id: "new-approval", tool: "bash", detail: "git status" });
+    resolveAck();
+    await expect(lateSteer).resolves.toEqual({ status: "unavailable" });
+    expect(omp.pendingPermissions()).toHaveLength(1);
+    expect(omp.extensionUiResponses()).toEqual([]);
+
+    await omp.interrupt();
+    const replacement = omp.startActiveTurn("replacement");
+    await waitForImmediate();
+    expect(runtime.prompts.map((prompt) => prompt.message)).toEqual(["first", "second"]);
+    runtime.emit({ type: "agent_start" });
+    runtime.acceptPrompt("same text", "new-steer-entry", true);
+    runtime.finishTurn();
+    await expect(replacement).resolves.toEqual(expect.any(String));
+    expect(runtime.prompts.map((prompt) => prompt.message)).toEqual([
+      "first",
+      "second",
+      "replacement",
+    ]);
+  });
+
+  test.each(["agent_end", "session_settled"] as const)(
+    "a steer acknowledged after interrupt releases a drain settled by %s during abort",
+    async (terminalEvent) => {
+      const omp = new OmpHarness();
+      await omp.start();
+      onTestFinished(() => omp.close());
+      const turnId = await omp.startActiveTurn("first");
+      const runtime = omp.runtime();
+      runtime.beginTurn();
+      const { promise: ack, resolve: resolveAck } = Promise.withResolvers<void>();
+      runtime.steer = () => ack;
+      const steer = omp.steerActiveTurn("pending steer", { expectedTurnId: turnId });
+      await waitForImmediate();
+      runtime.onAbort = () => runtime.emit({ type: terminalEvent });
+      await omp.interrupt();
+      resolveAck();
+      await expect(steer).resolves.toEqual({ status: "unavailable" });
+      await expect(omp.runPrompt("next", "next done")).resolves.toMatchObject({
+        finalText: "next done",
+      });
+    },
+  );
+
+  test.each(["agent_end", "session_settled"] as const)(
+    "recovers a timed-out drain after its input and late %s arrive",
+    async (terminalEvent) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const omp = new OmpHarness({ usagePollScheduler: new ManualUsagePollScheduler() });
+      await omp.start();
+      try {
+        const turnId = await omp.startActiveTurn("long work");
+        const runtime = omp.runtime();
+        runtime.beginTurn();
+        await omp.steerActiveTurn("unread steer", { expectedTurnId: turnId });
+        await omp.interrupt();
+        const refused = expect(omp.startTurnDetached("too early")).rejects.toThrow(
+          "OMP queued steer did not drain; refusing to start a replacement turn",
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        await refused;
+
+        // A settle signal cannot discard input that OMP still has not read.
+        runtime.emit({ type: "session_settled" });
+        await expect(omp.startTurnDetached("still unread")).rejects.toThrow(
+          "OMP queued steer did not drain",
+        );
+        runtime.emit({ type: "agent_start" });
+        runtime.acceptPrompt("unread steer", "steer-entry", true);
+        runtime.emit({ type: "agent_end", isTerminal: false, messages: [] });
+        await expect(omp.startTurnDetached("not terminal")).rejects.toThrow(
+          "OMP queued steer did not drain",
+        );
+        runtime.emit({ type: terminalEvent });
+        await expect(omp.runPrompt("next", "next done")).resolves.toMatchObject({
+          finalText: "next done",
+        });
+        expect(runtime.prompts.map((prompt) => prompt.message)).toEqual(["long work", "next"]);
+        expect(omp.timeline().filter((item) => item.text === "unread steer")).toEqual([]);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        await omp.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  test("deduplicates terminal user entries while draining identical queued steers", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    onTestFinished(() => omp.close());
+    const turnId = await omp.startActiveTurn("same text");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    runtime.acceptPrompt("same text", "original-entry");
+    await omp.steerActiveTurn("same text", { expectedTurnId: turnId });
+    await omp.steerActiveTurn("same text", { expectedTurnId: turnId });
+    await omp.interrupt();
+    runtime.emit({ type: "agent_start" });
+    runtime.acceptPrompt("same text", "first-steer-entry", true);
+    runtime.emit({
+      type: "agent_end",
+      isTerminal: true,
+      messages: [
+        { role: "user", content: "same text", entryId: "original-entry" },
+        { role: "user", content: "same text", entryId: "first-steer-entry" },
+      ],
+    });
+    const replacement = omp.startActiveTurn("next");
+    await waitForImmediate();
+    expect(runtime.prompts.map((prompt) => prompt.message)).toEqual(["same text"]);
+    runtime.emit({
+      type: "agent_end",
+      isTerminal: true,
+      messages: [{ role: "user", content: "same text", entryId: "second-steer-entry" }],
+    });
+    await expect(replacement).resolves.toEqual(expect.any(String));
+    expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+      { type: "user_message", text: "same text", messageId: "original-entry" },
+    ]);
+  });
+
+  test("a failed interrupt clears its new drain timer and keeps the turn usable", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const omp = new OmpHarness({ usagePollScheduler: new ManualUsagePollScheduler() });
+    await omp.start();
+    try {
+      const turnId = await omp.startActiveTurn("first");
+      const runtime = omp.runtime();
+      runtime.beginTurn();
+      runtime.acceptPrompt("first", "first-entry");
+      await omp.steerActiveTurn("steer", { expectedTurnId: turnId });
+      runtime.abortError = new Error("abort unavailable");
+      await expect(omp.interrupt()).rejects.toThrow("abort unavailable");
+      expect(vi.getTimerCount()).toBe(0);
+      expect(omp.canceledTurnCount()).toBe(0);
+      runtime.acceptPrompt("steer", "steer-entry", true);
+      runtime.abortError = null;
+      await omp.interrupt();
+      await expect(omp.runPrompt("next", "next done")).resolves.toMatchObject({
+        finalText: "next done",
+      });
+    } finally {
+      await omp.close();
+      vi.useRealTimers();
+    }
+  });
+
+  test("close cancels an unread-steer drain before waiting for runtime shutdown", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const omp = new OmpHarness({ usagePollScheduler: new ManualUsagePollScheduler() });
+    await omp.start();
+    const { promise: closed, resolve: finishClose } = Promise.withResolvers<void>();
+    try {
+      const turnId = await omp.startActiveTurn("first");
+      const runtime = omp.runtime();
+      runtime.beginTurn();
+      await omp.steerActiveTurn("unread steer", { expectedTurnId: turnId });
+      await omp.interrupt();
+      const refused = expect(omp.startTurnDetached("replacement")).rejects.toThrow(
+        "OMP queued steer did not drain",
+      );
+      runtime.close = () => closed;
+      const closing = omp.close();
+      await refused;
+      expect(vi.getTimerCount()).toBe(0);
+      finishClose();
+      await closing;
+      expect(runtime.prompts.map((prompt) => prompt.message)).toEqual(["first"]);
+    } finally {
+      finishClose();
+      await omp.close();
+      vi.useRealTimers();
+    }
+  });
+
+  test("refuses to steer without the active turn or for a slash command", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    await expect(omp.steerActiveTurn("no turn", { expectedTurnId: "missing" })).resolves.toEqual({
+      status: "unavailable",
+    });
+
+    const turnId = await omp.startActiveTurn("first");
+    await expect(
+      omp.steerActiveTurn("wrong turn", { expectedTurnId: "other-turn" }),
+    ).resolves.toEqual({ status: "unavailable" });
+    await expect(omp.steerActiveTurn("/compact", { expectedTurnId: turnId })).resolves.toEqual({
+      status: "unavailable",
+    });
+    expect(omp.runtime().steerRequests).toEqual([]);
+  });
+
+  test("drives manual compaction markers from the /compact RPC call", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const events: AgentStreamEvent[] = [];
+
+    await omp.runOutOfBandCommand("/compact focus on tests", (event) => events.push(event));
+
+    expect(omp.runtime().compactRequests).toEqual([{ customInstructions: "focus on tests" }]);
+    expect(events).toEqual([...MANUAL_COMPACTION_EVENTS]);
+  });
+
+  test("closes the manual compaction marker when /compact rejects", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    omp.runtime().compactError = new Error("summarizer failed");
+    const events: AgentStreamEvent[] = [];
+
+    await omp.runOutOfBandCommand("/compact", (event) => events.push(event));
+
+    expect(events).toEqual([
+      ...MANUAL_COMPACTION_EVENTS,
+      {
+        type: "timeline",
+        provider: "omp",
+        item: {
+          type: "assistant_message",
+          text: "[Error] Failed to compact context: summarizer failed",
+        },
+      },
+    ]);
+  });
+
+  test("closes the loading row when the emitter fails after recording it", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const recorded: AgentStreamEvent[] = [];
+    const emitterThatFailsAfterRecording = (event: AgentStreamEvent): void => {
+      recorded.push(event);
+      throw new Error("subscriber failed");
+    };
+
+    await omp.runOutOfBandCommand("/compact", emitterThatFailsAfterRecording);
+
+    // The row is durable even though its broadcast failed, so the completed
+    // marker must still be attempted and the guard released for the next call.
+    expect(recorded).toEqual([...MANUAL_COMPACTION_EVENTS]);
+    const events: AgentStreamEvent[] = [];
+    await omp.runOutOfBandCommand("/compact focus", (event) => events.push(event));
+    expect(events).toEqual([...MANUAL_COMPACTION_EVENTS]);
+    expect(omp.runtime().compactRequests).toEqual([{}, { customInstructions: "focus" }]);
+  });
+
+  test("does not report compaction failure when the completed marker cannot be delivered", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    const recorded: AgentStreamEvent[] = [];
+    let emissions = 0;
+    const emit = (event: AgentStreamEvent): void => {
+      emissions += 1;
+      if (emissions > 1) {
+        throw new Error("subscriber failed");
+      }
+      recorded.push(event);
+    };
+
+    await omp.runOutOfBandCommand("/compact", emit);
+
+    expect(recorded).toEqual([MANUAL_COMPACTION_EVENTS[0]]);
+    expect(
+      recorded.some(
+        (event) => event.type === "timeline" && event.item.type === "assistant_message",
+      ),
+    ).toBe(false);
+  });
+
+  test("rejects a second /compact while the first RPC is still in flight", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    omp.runtime().holdNextCompaction();
+    const firstEvents: AgentStreamEvent[] = [];
+    const first = omp.runOutOfBandCommand("/compact", (event) => firstEvents.push(event));
+    const secondEvents: AgentStreamEvent[] = [];
+
+    await expect(
+      omp.runOutOfBandCommand("/compact again", (event) => secondEvents.push(event)),
+    ).rejects.toThrow("An OMP compact command is already running");
+
+    await omp.runtime().releaseHeldCompaction();
+    await first;
+
+    expect(firstEvents).toEqual([...MANUAL_COMPACTION_EVENTS]);
+    expect(secondEvents).toEqual([]);
+    expect(omp.runtime().compactRequests).toEqual([{}]);
+  });
+
+  test("waits for a steer acknowledgement before releasing permissions", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    let resolveAck!: () => void;
+    const ack = new Promise<void>((resolve) => {
+      resolveAck = resolve;
+    });
+    try {
+      const turnId = await omp.startActiveTurn("first");
+      const runtime = omp.runtime();
+      runtime.beginTurn();
+      omp.requestToolApproval({ id: "approval-1", tool: "bash", detail: "git status" });
+      runtime.steer = () => ack;
+      let settled = false;
+      const steer = omp.steerActiveTurn("change course", {
+        expectedTurnId: turnId,
+        clientMessageId: "steer-client",
+        clearPendingPermissions: true,
+      });
+      void steer.then(() => {
+        settled = true;
+        return undefined;
+      });
+      await waitForImmediate();
+      expect(settled).toBe(false);
+      expect(omp.pendingPermissions()).toHaveLength(1);
+      // The echo may precede the acknowledgement.
+      runtime.acceptPrompt("change course", "steer-native", true);
+      runtime.acceptPrompt("change course", "steer-native", true);
+      resolveAck();
+      await expect(steer).resolves.toEqual({ status: "accepted" });
+      expect(omp.pendingPermissions()).toEqual([]);
+      expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+        {
+          type: "user_message",
+          text: "change course",
+          messageId: "steer-native",
+          clientMessageId: "steer-client",
+        },
+      ]);
+      expect(omp.wasAborted()).toBe(false);
+      expect(omp.completedTurnCount()).toBe(0);
+      await omp.interrupt();
+      await expect(omp.runPrompt("next", "next done")).resolves.toMatchObject({
+        finalText: "next done",
+      });
+    } finally {
+      resolveAck();
+      await omp.close();
+    }
+  });
+
+  test("a rejected steer leaves permissions and the active turn intact", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    try {
+      const turnId = await omp.startActiveTurn("first");
+      const runtime = omp.runtime();
+      runtime.beginTurn();
+      omp.requestToolApproval({ id: "approval-1", tool: "bash", detail: "git status" });
+      runtime.steer = async () => {
+        throw new Error("steer rejected");
+      };
+      await expect(
+        omp.steerActiveTurn("change course", {
+          expectedTurnId: turnId,
+          clientMessageId: "steer-client",
+          clearPendingPermissions: true,
+        }),
+      ).resolves.toEqual({ status: "unavailable" });
+      expect(omp.pendingPermissions()).toHaveLength(1);
+      expect(omp.extensionUiResponses()).toEqual([]);
+      expect(omp.wasAborted()).toBe(false);
+      expect(omp.completedTurnCount()).toBe(0);
+      runtime.acceptPrompt("change course", "external-entry", true);
+      expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+        { type: "user_message", text: "change course", messageId: "external-entry" },
+      ]);
+      await omp.interrupt();
+      await expect(omp.runPrompt("next", "next done")).resolves.toMatchObject({
+        finalText: "next done",
+      });
+    } finally {
+      await omp.close();
+    }
+  });
+
+  test("a clearing steer denies pending OMP permissions", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("run something slow");
+    omp.runtime().beginTurn();
+    omp.requestToolApproval({ id: "approval-1", tool: "bash", detail: "git status" });
+    expect(omp.pendingPermissions()).toHaveLength(1);
+
+    await expect(
+      omp.steerActiveTurn("review this instead", {
+        expectedTurnId: turnId,
+        clearPendingPermissions: true,
+      }),
+    ).resolves.toEqual({ status: "accepted" });
+
+    expect(omp.pendingPermissions()).toEqual([]);
+    expect(omp.extensionUiResponses()).toEqual([{ id: "approval-1", response: { value: "Deny" } }]);
+  });
+
+  test("interrupt suppresses the phantom run an unread steer starts after abort", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+
+    const turnId = await omp.startActiveTurn("long work");
+    const runtime = omp.runtime();
+    runtime.beginTurn();
+    await omp.steerActiveTurn("unread steer", {
+      expectedTurnId: turnId,
+      clientMessageId: "steer-client",
+    });
+
+    await omp.interrupt();
+    expect(omp.canceledTurnCount()).toBe(1);
+    const abortsBeforePhantom = runtime.abortCount;
+
+    // OMP has no clear_queue RPC: the unread steer survives abort and starts a new run.
+    runtime.emit({ type: "agent_start" });
+    expect(runtime.abortCount).toBe(abortsBeforePhantom + 1);
+    runtime.acceptPrompt("unread steer", "steer-entry-1");
+    runtime.emit({ type: "agent_end", isTerminal: false, messages: [] });
+    // Consuming the echo does not release suppression before the provider settles.
+    runtime.emit({ type: "agent_start" });
+    expect(runtime.abortCount).toBe(abortsBeforePhantom + 2);
+    runtime.streamAssistantText("phantom output");
+    runtime.finishTurn();
+
+    expect(omp.timeline().filter((item) => item.text === "unread steer")).toEqual([]);
+    expect(omp.timeline().filter((item) => item.text === "phantom output")).toEqual([]);
+    expect(omp.completedTurnCount()).toBe(0);
+    expect(omp.eventTypes().filter((type) => type === "thread_started")).toHaveLength(0);
+
+    // The next user turn proceeds normally once every queued steer surfaced.
+    await expect(omp.runPrompt("next", "next done")).resolves.toMatchObject({
+      finalText: "next done",
+    });
   });
 });
 

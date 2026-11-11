@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { setImmediate as waitForImmediate } from "node:timers/promises";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import {
@@ -28,6 +29,8 @@ import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import { startAgentRun } from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
+import { OmpAgentClient } from "./providers/omp/agent.js";
+import { FakeOmp } from "./providers/omp/test-utils/fake-omp.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
 import type {
@@ -1173,6 +1176,112 @@ test("starts its own turn when the previous turn fails to start under a steer se
   } finally {
     startHeld.resolve();
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("OMP steering preserves the foreground run and canonical rows across a non-terminal cycle", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-omp-steer-"));
+  const runtime = new FakeOmp();
+  const manager = new AgentManager({
+    clients: { omp: new OmpAgentClient({ logger, runtime }) },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "omp", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    const session = runtime.latestSession();
+    const promptStarted = session.nextPrompt();
+    const consume = drainAsyncGenerator(
+      manager.streamAgent(agent.id, "first", { clientMessageId: "first-client" }),
+    );
+    await promptStarted;
+    await manager.waitForAgentRunStart(agent.id);
+    const turnId = manager.getAgent(agent.id)?.activeForegroundTurnId;
+    expect(turnId).toEqual(expect.any(String));
+    session.beginTurn();
+    session.acceptPrompt("first", "first-native");
+    session.streamAssistantText("before steer", "assistant-before");
+    await expect(
+      manager.steerAgentRun(agent.id, "change course", { clientMessageId: "steer-client" }),
+    ).resolves.toEqual({ status: "accepted" });
+
+    const lifecycles: ManagedAgent["lifecycle"][] = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state") lifecycles.push(event.agent.lifecycle);
+      },
+      { agentId: agent.id, replayState: false },
+    );
+    try {
+      session.state = { ...session.state, isStreaming: false, isCompacting: false };
+      session.emit({
+        type: "agent_end",
+        isTerminal: false,
+        messages: [{ role: "assistant", content: [] }],
+      });
+      await waitForImmediate();
+      expect(manager.getAgent(agent.id)).toMatchObject({
+        lifecycle: "running",
+        activeForegroundTurnId: turnId,
+      });
+      expect(lifecycles).not.toContain("idle");
+
+      session.beginTurn();
+      session.acceptPrompt("change course", "steer-native", true);
+      session.streamAssistantText("continued output", "assistant-after");
+      session.emit({
+        type: "agent_end",
+        isTerminal: true,
+        messages: [{ role: "assistant", content: [] }],
+      });
+      await consume;
+      expect(manager.getAgent(agent.id)).toMatchObject({
+        lifecycle: "idle",
+        activeForegroundTurnId: null,
+      });
+      expect(session.abortRequested).toBe(false);
+      const rows = manager.fetchTimeline(agent.id, { limit: 0 }).rows;
+      expect(rows.map((row) => ({ item: row.item, turnId: row.turnId }))).toEqual([
+        {
+          turnId,
+          item: {
+            type: "user_message",
+            text: "first",
+            messageId: "first-client",
+            clientMessageId: "first-client",
+          },
+        },
+        {
+          turnId,
+          item: { type: "assistant_message", text: "before steer", messageId: "assistant-before" },
+        },
+        {
+          turnId,
+          item: {
+            type: "user_message",
+            text: "change course",
+            messageId: "steer-client",
+            clientMessageId: "steer-client",
+          },
+        },
+        {
+          turnId,
+          item: {
+            type: "assistant_message",
+            text: "continued output",
+            messageId: "assistant-after",
+          },
+        },
+      ]);
+    } finally {
+      unsubscribe();
+    }
+  } finally {
+    if (agentId) await manager.closeAgent(agentId);
     rmSync(workdir, { recursive: true, force: true });
   }
 });
@@ -12507,6 +12616,110 @@ test("tryRunOutOfBand gives providers the command another agent sent, not its en
     expect(seenPrompts.at(-1)).toBe(pasted.prompt);
   } finally {
     await manager.closeAgent(agent.id);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("OMP /compact keeps ordered durable markers when a subscriber throws mid-broadcast", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-omp-compact-"));
+  const runtime = new FakeOmp();
+  const manager = new AgentManager({
+    clients: { omp: new OmpAgentClient({ logger, runtime }) },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "omp", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    const compactionCompleted = deferred<void>();
+    manager.subscribe(
+      (event) => {
+        if (
+          event.type === "agent_stream" &&
+          event.event.type === "timeline" &&
+          event.event.item.type === "compaction" &&
+          event.event.item.status === "completed"
+        ) {
+          compactionCompleted.resolve();
+        }
+      },
+      { agentId, replayState: false },
+    );
+    // Timeline persistence precedes the broadcast, and subscriber exceptions
+    // must neither strip the durable rows nor fail the compaction.
+    manager.subscribe(
+      (event) => {
+        if (
+          event.type === "agent_stream" &&
+          event.event.type === "timeline" &&
+          event.event.item.type === "compaction"
+        ) {
+          throw new Error("subscriber failed");
+        }
+      },
+      { agentId, replayState: false },
+    );
+
+    const dispatch = await startAgentRun(manager, agent.id, "/compact focus on tests", logger, {
+      runOptions: { clientMessageId: "compact-client" },
+    });
+    await compactionCompleted.promise;
+
+    expect(dispatch.disposition).toBe("out_of_band");
+    expect(manager.getTimeline(agent.id)).toEqual([
+      {
+        type: "user_message",
+        text: "/compact focus on tests",
+        clientMessageId: "compact-client",
+      },
+      { type: "compaction", status: "loading", trigger: "manual" },
+      { type: "compaction", status: "completed", trigger: "manual" },
+    ]);
+  } finally {
+    if (agentId) {
+      await manager.closeAgent(agentId).catch(() => undefined);
+    }
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("OMP /compact marks the agent running until compaction settles", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-omp-compact-busy-"));
+  const runtime = new FakeOmp();
+  const manager = new AgentManager({
+    clients: { omp: new OmpAgentClient({ logger, runtime }) },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "omp", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    const session = runtime.latestSession();
+    session.holdNextCompaction();
+
+    const dispatch = await startAgentRun(manager, agent.id, "/compact", logger);
+    expect(dispatch.disposition).toBe("out_of_band");
+    await vi.waitFor(() => {
+      const snapshot = manager.getAgent(agent.id);
+      expect(snapshot?.lifecycle).toBe("running");
+      // The client maps a running lifecycle with no open turn back to idle.
+      expect(snapshot?.activeTurnId).toEqual(expect.any(String));
+    });
+
+    await session.releaseHeldCompaction();
+    await vi.waitFor(() => {
+      const snapshot = manager.getAgent(agent.id);
+      expect(snapshot?.lifecycle).toBe("idle");
+      expect(snapshot?.activeTurnId).toBeNull();
+    });
+  } finally {
+    if (agentId) {
+      await manager.closeAgent(agentId).catch(() => undefined);
+    }
     rmSync(workdir, { recursive: true, force: true });
   }
 });

@@ -4,7 +4,7 @@ import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSyn
 import { open, readFile, stat, unlink, utimes } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { ensurePrivateDirectory, PRIVATE_FILE_MODE } from "./private-files.js";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import { uptime } from "node:os";
 import { getHostName } from "./host-name.js";
 import { z } from "zod";
@@ -65,7 +65,7 @@ const RECLAIM_LOCK_HOLDER = 'printf "\\001"; cat >/dev/null';
 // The lock path is base64-encoded to survive PowerShell's -Command argument
 // parsing, which breaks on paths containing spaces.
 const WINDOWS_RECLAIM_LOCK_HOLDER =
-  "$path = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($args[0])); $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); [Console]::Out.Write([char]1); [Console]::Out.Flush(); [Console]::In.ReadToEnd() | Out-Null; $stream.Dispose()";
+  "$ErrorActionPreference = 'Stop'; try { $path = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($args[0])); $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); try { [Console]::Out.Write([char]1); [Console]::Out.Flush(); [Console]::In.ReadToEnd() | Out-Null } finally { $stream.Dispose() } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }";
 const SYNC_RECLAIM_LOCK_HOLDER =
   'printf "\\001" > "$1"; while [ ! -e "$3" ]; do sleep 0.01; done; printf "\\001" > "$2"';
 const SYNC_RECLAIM_LOCK_TIMEOUT_MS = 30_000;
@@ -139,13 +139,192 @@ export function withReclaimLockSync<T>(lockPath: string, action: () => T): T {
   }
 }
 
-export async function withReclaimLock<T>(lockPath: string, action: () => Promise<T>): Promise<T> {
+export interface ReclaimLockOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+export class ReclaimLockQueueFullError extends Error {
+  readonly lockPath: string;
+  readonly maxPending = 64;
+
+  constructor(lockPath: string) {
+    super(`Reclaim lock queue for ${lockPath} already has 64 pending acquisitions`);
+    this.name = "ReclaimLockQueueFullError";
+    this.lockPath = lockPath;
+  }
+}
+
+export class ReclaimLockTimeoutError extends Error {
+  readonly lockPath: string;
+  readonly timeoutMs: number;
+
+  constructor(lockPath: string, timeoutMs: number) {
+    super(`Timed out acquiring reclaim lock ${lockPath} after ${timeoutMs}ms`);
+    this.name = "ReclaimLockTimeoutError";
+    this.lockPath = lockPath;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T | PromiseLike<T>): void;
+  reject(reason?: unknown): void;
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: Deferred<T>["resolve"];
+  let reject!: Deferred<T>["reject"];
+  // The server targets ES2023, before Promise.withResolvers became available.
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+interface ReclaimLockWaiter {
+  run(): Promise<void>;
+}
+
+interface ReclaimLockQueue {
+  pending: ReclaimLockWaiter[];
+}
+
+const reclaimLockQueues = new Map<string, ReclaimLockQueue>();
+const RECLAIM_LOCK_ACQUISITION_TIMEOUT_MS = 30_000;
+const RECLAIM_LOCK_MAX_PENDING = 64;
+const RECLAIM_LOCK_RELEASE_GRACE_MS = 1_000;
+
+async function runReclaimLockWaiter(
+  lockPath: string,
+  queue: ReclaimLockQueue,
+  waiter: ReclaimLockWaiter,
+): Promise<void> {
+  await waiter.run();
+  const next = queue.pending.shift();
+  if (next) {
+    void runReclaimLockWaiter(lockPath, queue, next);
+  } else {
+    reclaimLockQueues.delete(lockPath);
+  }
+}
+
+export function withReclaimLock<T>(
+  lockPath: string,
+  action: () => Promise<T>,
+  options: ReclaimLockOptions = {},
+): Promise<T> {
+  const absolutePath = resolvePath(lockPath);
+  const timeoutMs = options.timeoutMs ?? RECLAIM_LOCK_ACQUISITION_TIMEOUT_MS;
+  const deadline = performance.now() + timeoutMs;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 2_147_483_647) {
+    return Promise.reject(
+      new RangeError("Reclaim lock timeoutMs must be between 0 and 2147483647"),
+    );
+  }
+  if (options.signal?.aborted) return Promise.reject(options.signal.reason);
+  if (timeoutMs === 0) return Promise.reject(new ReclaimLockTimeoutError(absolutePath, timeoutMs));
+  const existingQueue = reclaimLockQueues.get(absolutePath);
+  if (existingQueue && existingQueue.pending.length >= RECLAIM_LOCK_MAX_PENDING) {
+    return Promise.reject(new ReclaimLockQueueFullError(absolutePath));
+  }
+
+  const queue: ReclaimLockQueue = existingQueue ?? { pending: [] };
+  const cancellation = new AbortController();
+  const result = createDeferred<T>();
+  function finishAcquisition(): void {
+    clearTimeout(timer);
+    options.signal?.removeEventListener("abort", abort);
+  }
+  function cancel(reason: unknown): void {
+    finishAcquisition();
+    cancellation.abort(reason);
+    const index = queue.pending.indexOf(waiter);
+    if (index !== -1) queue.pending.splice(index, 1);
+    result.reject(reason);
+  }
+  function abort(): void {
+    cancel(options.signal?.reason);
+  }
+  function check(): void {
+    cancellation.signal.throwIfAborted();
+    if (performance.now() >= deadline) {
+      throw new ReclaimLockTimeoutError(absolutePath, timeoutMs);
+    }
+  }
+  function acquired(): void {
+    check();
+    finishAcquisition();
+  }
+  const timer = setTimeout(
+    () => cancel(new ReclaimLockTimeoutError(absolutePath, timeoutMs)),
+    timeoutMs,
+  );
+  const waiter: ReclaimLockWaiter = {
+    async run() {
+      try {
+        result.resolve(
+          await runWithReclaimLock(absolutePath, action, {
+            signal: cancellation.signal,
+            check,
+            acquired,
+            deadline,
+            timeoutMs,
+          }),
+        );
+      } catch (error) {
+        result.reject(error);
+      } finally {
+        finishAcquisition();
+      }
+    },
+  };
+  options.signal?.addEventListener("abort", abort, { once: true });
+  if (existingQueue) {
+    queue.pending.push(waiter);
+  } else {
+    reclaimLockQueues.set(absolutePath, queue);
+    void runReclaimLockWaiter(absolutePath, queue, waiter);
+  }
+  return result.promise;
+}
+
+interface ReclaimLockAcquisition {
+  signal: AbortSignal;
+  deadline: number;
+  timeoutMs: number;
+  check(): void;
+  acquired(): void;
+}
+
+async function runWithReclaimLock<T>(
+  lockPath: string,
+  action: () => Promise<T>,
+  acquisition: ReclaimLockAcquisition,
+): Promise<T> {
+  const { signal } = acquisition;
+  acquisition.check();
   ensurePrivateDirectory(dirname(lockPath));
+  acquisition.check();
   const lockFile = await open(lockPath, "a", PRIVATE_FILE_MODE);
   await lockFile.close();
+  acquisition.check();
 
   let command = "flock";
-  let args: string[] = ["--exclusive", lockPath, "/bin/sh", "-c", RECLAIM_LOCK_HOLDER];
+  const remainingSeconds = Math.max((acquisition.deadline - performance.now()) / 1_000, 0.001);
+  let args: string[] = [
+    "--exclusive",
+    "--timeout",
+    String(remainingSeconds),
+    "--conflict-exit-code",
+    "75",
+    lockPath,
+    "/bin/sh",
+    "-c",
+    RECLAIM_LOCK_HOLDER,
+  ];
   if (process.platform === "win32") {
     command = "powershell.exe";
     const encodedLockPath = Buffer.from(lockPath, "utf8").toString("base64");
@@ -158,68 +337,100 @@ export async function withReclaimLock<T>(lockPath: string, action: () => Promise
     ];
   } else if (process.platform === "darwin") {
     command = "lockf";
-    args = [lockPath, "/bin/sh", "-c", RECLAIM_LOCK_HOLDER];
+    args = [
+      "-t",
+      String(Math.ceil(remainingSeconds)),
+      lockPath,
+      "/bin/sh",
+      "-c",
+      RECLAIM_LOCK_HOLDER,
+    ];
   }
-  const holder = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
-  type HolderTermination =
-    | { kind: "error"; error: Error }
-    | { kind: "close"; code: number | null; signal: NodeJS.Signals | null };
-  let settleHolderTermination!: (termination: HolderTermination) => void;
-  const holderTermination = new Promise<HolderTermination>((resolve) => {
-    settleHolderTermination = resolve;
+  // Each POSIX helper owns a new process group, including lockf/flock's shell and cat.
+  // Killing only the direct child can leave a descendant holding the lock or its pipes.
+  const holder = spawn(command, args, {
+    detached: process.platform !== "win32",
+    stdio: ["pipe", "pipe", "pipe"],
   });
-  holder.once("error", (error) => settleHolderTermination({ kind: "error", error }));
-  holder.once("close", (code, signal) => settleHolderTermination({ kind: "close", code, signal }));
-  let stderr = "";
-  holder.stderr.setEncoding("utf8");
-  holder.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    let acquired = false;
-    void holderTermination.then((termination) => {
-      if (acquired) return;
-      if (termination.kind === "error") {
-        reject(termination.error);
-        return;
-      }
-      reject(
-        new Error(
-          `${command} exited before acquiring ${lockPath} (${termination.code ?? termination.signal}): ${stderr.trim()}`,
-        ),
-      );
-      return;
-    });
-    holder.stdout.once("data", () => {
-      acquired = true;
-      resolve();
-    });
-  });
-
+  let spawnError: Error | undefined;
   let releasing = false;
+  let actionStarted = false;
   let criticalSectionInvalidated = false;
-  void holderTermination.then((termination) => {
-    if (releasing) return;
+  let cleanupError: Error | undefined;
+  let stderr = "";
+  const closeResult = createDeferred<void>();
+  const closed = closeResult.promise;
+  holder.once("close", () => closeResult.resolve());
+
+  function terminateOwnedHolder(): void {
+    if (holder.pid === undefined) return;
+    try {
+      if (process.platform === "win32") holder.kill("SIGKILL");
+      else process.kill(-holder.pid, "SIGKILL");
+    } catch (error) {
+      if (!isErrnoException(error) || error.code !== "ESRCH") {
+        cleanupError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+  }
+
+  function invalidate(reason: string): void {
+    if (releasing || !actionStarted || criticalSectionInvalidated) return;
     criticalSectionInvalidated = true;
-    const reason =
-      termination.kind === "error"
-        ? termination.error.message
-        : String(termination.code ?? termination.signal);
     console.warn(
       `Reclaim lock holder for ${lockPath} exited during the action (${reason}); the critical section is no longer protected`,
     );
-    return;
+  }
+
+  holder.on("error", (error) => {
+    spawnError = error;
+    invalidate(error.message);
+  });
+  holder.once("exit", (code, exitSignal) => {
+    invalidate(String(code ?? exitSignal));
+    terminateOwnedHolder();
+  });
+  // A terminated reader can close stdin while release is being written.
+  holder.stdin.on("error", () => {});
+  holder.stderr.setEncoding("utf8");
+  holder.stderr.on("data", (chunk: string) => {
+    stderr = (stderr + chunk).slice(-8_192);
   });
 
-  let releaseError: Error | undefined;
+  const acquisitionResult = createDeferred<void>();
+  function abortAcquisition(): void {
+    terminateOwnedHolder();
+    acquisitionResult.reject(signal.reason);
+  }
+  function marker(chunk: Buffer): void {
+    if (chunk.includes(1)) acquisitionResult.resolve();
+  }
+  signal.addEventListener("abort", abortAcquisition, { once: true });
+  holder.stdout.on("data", marker);
+  void closed.then(() => {
+    if (holder.exitCode === 75 && process.platform !== "win32") {
+      return acquisitionResult.reject(new ReclaimLockTimeoutError(lockPath, acquisition.timeoutMs));
+    }
+    return acquisitionResult.reject(
+      spawnError ??
+        new Error(
+          `${command} exited before acquiring ${lockPath} (${holder.exitCode ?? holder.signalCode}): ${stderr.trim()}`,
+        ),
+    );
+  });
+  if (signal.aborted) abortAcquisition();
   let result!: T;
   try {
-    if (criticalSectionInvalidated || holder.exitCode !== null || holder.signalCode !== null) {
+    await acquisitionResult.promise;
+    signal.removeEventListener("abort", abortAcquisition);
+    holder.stdout.removeListener("data", marker);
+    acquisition.acquired();
+    if (spawnError || holder.exitCode !== null || holder.signalCode !== null) {
       throw new Error(
         `Reclaim lock holder for ${lockPath} exited before the action began; critical section is no longer protected`,
       );
     }
+    actionStarted = true;
     result = await action();
     if (criticalSectionInvalidated || holder.exitCode !== null || holder.signalCode !== null) {
       throw new Error(
@@ -227,20 +438,28 @@ export async function withReclaimLock<T>(lockPath: string, action: () => Promise
       );
     }
   } finally {
+    signal.removeEventListener("abort", abortAcquisition);
+    holder.stdout.removeListener("data", marker);
     releasing = true;
+    if (!actionStarted || signal.aborted) terminateOwnedHolder();
     if (!holder.stdin.destroyed) holder.stdin.end();
-    const termination = await holderTermination;
-    if (!criticalSectionInvalidated) {
-      if (termination.kind === "error") {
-        releaseError = termination.error;
-      } else if (termination.code !== 0) {
-        releaseError = new Error(
-          `${command} failed releasing ${lockPath} (${termination.code ?? termination.signal}): ${stderr.trim()}`,
+    const releaseTimer = setTimeout(terminateOwnedHolder, RECLAIM_LOCK_RELEASE_GRACE_MS);
+    await closed;
+    clearTimeout(releaseTimer);
+    if (
+      actionStarted &&
+      !criticalSectionInvalidated &&
+      holder.exitCode !== 0 &&
+      holder.signalCode !== "SIGKILL"
+    ) {
+      cleanupError =
+        spawnError ??
+        new Error(
+          `${command} failed releasing ${lockPath} (${holder.exitCode ?? holder.signalCode}): ${stderr.trim()}`,
         );
-      }
     }
   }
-  if (releaseError) throw releaseError;
+  if (cleanupError) throw cleanupError;
   return result;
 }
 

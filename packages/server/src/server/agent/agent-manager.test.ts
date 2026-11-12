@@ -11872,6 +11872,77 @@ test("provider close failure retains the runtime for cleanup instead of allowing
   }
 });
 
+test("confirmed provider shutdown cancels runs without waiting for a stuck session close", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-shutdown-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const closeStarted = deferred<void>();
+  const closeAllowed = deferred<void>();
+  const client = new (class extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new (class extends TestAgentSession {
+        override async startTurn(): Promise<{ turnId: string }> {
+          this.pushEvent({ type: "turn_started", provider: this.provider, turnId: "held-turn" });
+          return { turnId: "held-turn" };
+        }
+
+        override async close(): Promise<void> {
+          closeStarted.resolve();
+          await closeAllowed.promise;
+        }
+      })(config);
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {});
+  const closedIds: string[] = [];
+  manager.subscribe((event) => {
+    if (event.type === "agent_state" && event.agent.lifecycle === "closed") {
+      closedIds.push(event.agent.id);
+    }
+  });
+  const run = (async () => {
+    const events: AgentStreamEvent[] = [];
+    for await (const event of manager.streamAgent(agent.id, "remain active until shutdown")) {
+      events.push(event);
+    }
+    return events;
+  })();
+  let closing: Promise<void> | undefined;
+  try {
+    await manager.waitForAgentRunStart(agent.id);
+    await manager.flush();
+    closing = manager.closeAgent(agent.id);
+    await closeStarted.promise;
+    manager.prepareForShutdown();
+
+    await manager.finishProviderShutdown(new Set());
+    expect(manager.getAgent(agent.id)?.lifecycle).toBe("running");
+    expect((await storage.get(agent.id))?.lastStatus).toBe("running");
+
+    await manager.finishProviderShutdown(new Set(["codex"]));
+    await expect(run).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "turn_canceled", reason: "agent closed" }),
+      ]),
+    );
+    expect(manager.getAgent(agent.id)).toBeNull();
+    expect((await storage.get(agent.id))?.lastStatus).toBe("closed");
+
+    closeAllowed.resolve();
+    await closing;
+    await manager.flush();
+    expect(closedIds).toEqual([agent.id]);
+  } finally {
+    closeAllowed.resolve();
+    await closing;
+    await manager.closeAgent(agent.id);
+    await run;
+    await manager.flush();
+    await storage.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("hydrateTimeline keeps provider user_message items when no canonical user history exists", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-history-keep-user-"));
   const storagePath = join(workdir, "agents");

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import type { Query } from "@anthropic-ai/claude-agent-sdk";
+import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { ClaudeAgentClient } from "./agent/providers/claude/agent.js";
 import http from "node:http";
 import path from "node:path";
@@ -23,6 +24,7 @@ import {
 import { AgentStorage, type StoredAgentRecord } from "./agent/agent-storage.js";
 import { ensureAgentLoaded } from "./agent/agent-loading.js";
 import { AgentManagerShuttingDownError } from "./agent/agent-manager.js";
+import { PluginAgentClientRegistry } from "./agent/plugin-provider.js";
 import { hashDaemonPassword } from "./auth.js";
 import { generateLocalPairingOffer } from "./pairing-offer.js";
 import { createTestPaseoDaemon } from "./test-utils/paseo-daemon.js";
@@ -622,6 +624,166 @@ describe("paseo daemon bootstrap", () => {
       await shutdown.finish();
     }
   });
+
+  test("fails and releases a scheduled run before daemon shutdown returns", async () => {
+    const { promise: turnStarted, resolve: markStarted } = Promise.withResolvers<void>();
+    const { promise: turnFinished, resolve: finishTurn } = Promise.withResolvers<void>();
+    const agentCwd = await mkdtemp(path.join(os.tmpdir(), "paseo-scheduled-shutdown-"));
+    const handle = await createTestPaseoDaemon({
+      agentClients: createTestAgentClients({
+        onStartTurn: () => markStarted(),
+        beforeTurnComplete: () => turnFinished,
+        closeSession: async () => finishTurn(),
+      }),
+    });
+    const client = new DaemonClient({ url: `ws://127.0.0.1:${handle.port}/ws` });
+    try {
+      await client.connect();
+      const created = await client.scheduleCreate({
+        prompt: "Run until the daemon closes the session.",
+        cadence: { type: "every", everyMs: 60_000 },
+        target: {
+          type: "new-agent",
+          config: { provider: "codex", cwd: agentCwd, archiveOnFinish: false, isolation: "local" },
+        },
+        runOnCreate: true,
+      });
+      if (created.error || !created.schedule) {
+        throw new Error(created.error ?? "Schedule creation failed");
+      }
+      await turnStarted;
+      await handle.daemon.stop();
+      const schedulePath = path.join(handle.paseoHome, "schedules", `${created.schedule.id}.json`);
+      expect(JSON.parse(await readFile(schedulePath, "utf8"))).toMatchObject({
+        runs: [{ status: "failed" }],
+      });
+      const claimPath = path.join(handle.paseoHome, "schedules", `${created.schedule.id}.claim`);
+      await expect(access(claimPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      finishTurn();
+      await client.close();
+      await handle.close();
+      await rm(agentCwd, { recursive: true, force: true });
+    }
+  });
+
+  test("drains a scheduled run after plugin session close rejects and its provider stops", async () => {
+    const started = Promise.withResolvers<void>();
+    const providerClosing = Promise.withResolvers<void>();
+    const providerMayStop = Promise.withResolvers<void>();
+    let listener: ((event: ProviderEvent) => void) | undefined;
+    const emit = (event: ProviderEvent) => listener?.(event);
+    const connection: ProviderConnection = {
+      version: 1,
+      capabilities: ["prompt.message", "session.persistence"],
+      async send(input) {
+        if (input.type === "catalog") {
+          emit({ type: "catalog", requestId: input.requestId, catalog: { models: [], modes: [] } });
+        } else if (input.type === "session.open") {
+          emit({
+            type: "session.opened",
+            requestId: input.requestId,
+            sessionId: input.sessionId,
+            capabilities: connection.capabilities,
+            restoration: "core",
+            persistence: { version: 1, data: { token: "scheduled" } },
+            cwd: input.config.cwd,
+          });
+          emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
+        } else if (input.type === "session.prompt") {
+          emit({
+            type: "session.prompt_result",
+            sessionId: input.sessionId,
+            clientMessageId: input.prompt.clientMessageId,
+            result: { type: "turn", turnId: "scheduled-turn" },
+          });
+          emit({
+            type: "session.turn",
+            sessionId: input.sessionId,
+            turnId: "scheduled-turn",
+            state: "started",
+          });
+          started.resolve();
+        } else if (input.type === "session.close") {
+          emit({
+            type: "request.failed",
+            requestId: input.requestId,
+            error: { message: "native session close rejected" },
+          });
+        } else if ("requestId" in input) {
+          emit({ type: "request.completed", requestId: input.requestId });
+        }
+      },
+      onEvent(nextListener) {
+        listener = nextListener;
+        return () => {
+          listener = undefined;
+        };
+      },
+      async close() {
+        providerClosing.resolve();
+        await providerMayStop.promise;
+      },
+    };
+    const providers = new PluginAgentClientRegistry(pino({ level: "silent" }));
+    providers.replace([
+      { id: "codex", label: "Scheduled plugin", connect: async () => connection },
+    ]);
+    const handle = await createTestPaseoDaemon({
+      agentClients: { ...createTestAgentClients(), ...providers.clients() },
+    });
+    const client = new DaemonClient({ url: `ws://127.0.0.1:${handle.port}/ws` });
+    let stopping: Promise<void> | undefined;
+    try {
+      await client.connect();
+      const created = await client.scheduleCreate({
+        prompt: "Remain active until the provider stops.",
+        cadence: { type: "every", everyMs: 60_000 },
+        target: {
+          type: "new-agent",
+          config: {
+            provider: "codex",
+            cwd: handle.paseoHome,
+            archiveOnFinish: false,
+            isolation: "local",
+          },
+        },
+        runOnCreate: true,
+      });
+      if (created.error || !created.schedule) {
+        throw new Error(created.error ?? "Schedule creation failed");
+      }
+      await started.promise;
+      await handle.daemon.agentManager.flush();
+      const agent = handle.daemon.agentManager.listAgents()[0]!;
+      const schedulePath = path.join(handle.paseoHome, "schedules", `${created.schedule.id}.json`);
+      const claimPath = path.join(handle.paseoHome, "schedules", `${created.schedule.id}.claim`);
+
+      stopping = handle.daemon.stop();
+      await providerClosing.promise;
+      expect(handle.daemon.agentManager.getAgent(agent.id)?.lifecycle).toBe("running");
+      expect((await handle.daemon.agentStorage.get(agent.id))?.lastStatus).toBe("running");
+      await access(claimPath);
+      expect(JSON.parse(await readFile(schedulePath, "utf8"))).toMatchObject({
+        runs: [{ status: "running" }],
+      });
+
+      providerMayStop.resolve();
+      await stopping;
+      expect(handle.daemon.agentManager.getAgent(agent.id)).toBeNull();
+      expect((await handle.daemon.agentStorage.get(agent.id))?.lastStatus).toBe("closed");
+      expect(JSON.parse(await readFile(schedulePath, "utf8"))).toMatchObject({
+        runs: [{ status: "failed" }],
+      });
+      await expect(access(claimPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      providerMayStop.resolve();
+      await stopping;
+      await client.close();
+      await handle.close();
+      await providers.shutdown();
+    }
+  }, 30_000);
 
   test("standalone listener exposes services only", async () => {
     const standalonePort = await findFreePort();

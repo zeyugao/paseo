@@ -140,11 +140,11 @@ describe("toolbar glyphs and spacing", () => {
     expect(TOOLBAR_DISC_GLYPH_SIZES).toEqual({ touch: 20, pointer: 16 });
   });
 
-  it("keeps a touch glyph beside a label at the label's 20pt scale", () => {
+  it("keeps a touch glyph beside a label at the label's 20pt scale and mutes it", () => {
     expect(toolbarGlyphsFor("touch").label).toEqual({
       size: 20,
       strokeWidth: 1.5,
-      tone: "foreground",
+      tone: "muted",
     });
     expect(TOOLBAR_GLYPH_SIZES.label).toEqual({ xs: 20, md: 16 });
   });
@@ -156,12 +156,15 @@ describe("toolbar glyphs and spacing", () => {
     });
   });
 
-  it("brightens a muted toolbar glyph under a hovering pointer", () => {
+  it("returns the resting tone and supports explicit hover brightening", () => {
     const pointer = toolbarGlyphsFor("pointer").icon;
     const touch = toolbarGlyphsFor("touch").icon;
+    const touchLabel = toolbarGlyphsFor("touch").label;
     expect(toolbarGlyphTone(pointer, false)).toBe("muted");
     expect(toolbarGlyphTone(pointer, true)).toBe("foreground");
     expect(toolbarGlyphTone(touch, false)).toBe("foreground");
+    expect(toolbarGlyphTone(touchLabel, false)).toBe("muted");
+    expect(toolbarGlyphTone(touchLabel, true)).toBe("foreground");
     const colors = { foreground: "#fafafa", foregroundMuted: "#a1a5a4" };
     const palette = { colors } as unknown as Theme;
     expect(toolbarGlyphColor(palette, "foreground")).toBe("#fafafa");

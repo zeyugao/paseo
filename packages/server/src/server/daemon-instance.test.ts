@@ -11,6 +11,7 @@ import {
   readDaemonInstance,
   startDaemonInstance,
   stopDaemonInstance,
+  waitForDaemonReady,
 } from "./daemon-instance.js";
 import {
   acquirePidLock,
@@ -57,12 +58,14 @@ describe("daemon instance identity across a reboot", () => {
   let bystander: ChildProcess | undefined;
 
   beforeEach(async () => {
+    vi.stubEnv("PASEO_SERVER_ID", "");
     paseoHome = await mkdtemp(join(tmpdir(), "paseo-daemon-instance-"));
   });
 
   afterEach(async () => {
     bystander?.kill("SIGKILL");
     bystander = undefined;
+    vi.unstubAllEnvs();
     await rm(paseoHome, { recursive: true, force: true });
   });
 
@@ -169,6 +172,116 @@ describe("selected daemon discovery on a shared home", () => {
     child.send!("ping");
     expect((await response)[0]).toBe("alive");
   }
+
+  test("keeps a running pre-registry daemon controllable during upgrade", async () => {
+    await writeFile(join(home, "server-id"), serverId);
+    await writeLock(home, { ...lockFor(child.pid!, new Date()), serverId });
+    expect(await readDaemonInstance(home)).toMatchObject({ pid: child.pid, serverId });
+    expect(await readDaemonInstance(home, { PASEO_SERVER_ID: "srv_other" })).toBeNull();
+    expect(
+      await startDaemonInstance({
+        home,
+        command: "must-not-spawn-a-duplicate",
+        args: [],
+        env: { ...process.env },
+        mode: "managed",
+      }),
+    ).toMatchObject({ spawned: false, instance: { pid: child.pid } });
+    expect(await stopDaemonInstance(home)).toMatchObject({ action: "stopped", pid: child.pid });
+    expect(await getPidLockInfo(home)).toBeNull();
+  });
+
+  test("preserves a legacy supervisor identity across a worker registration gap", async () => {
+    const pointer = { ...lockFor(child.pid!, new Date()), serverId };
+    await writeLock(home, pointer);
+    registration = await registerDaemonInstance(home, serverId, {
+      ownerPid: child.pid,
+      listen: pointer.listen!,
+    });
+    const before = await readDaemonInstance(home);
+    expect(before).toMatchObject({ pid: child.pid, startedAt: pointer.startedAt });
+    await registration.release();
+    registration = undefined;
+    expect(await waitForDaemonReady(home, { instance: before!, timeoutMs: 1000 })).toMatchObject({
+      pid: child.pid,
+      startedAt: pointer.startedAt,
+      listen: pointer.listen,
+    });
+  });
+
+  test("keeps a live supervisor discoverable after its registered worker exits", async () => {
+    const worker = spawn(process.execPath, ["-e", "process.stdin.resume()"], {
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    await once(worker, "spawn");
+    try {
+      const pidLockHome = dirname(getDaemonInstancePath(home, serverId));
+      await acquirePidLock(pidLockHome, null, { ownerPid: child.pid });
+      registration = await registerDaemonInstance(home, serverId, {
+        ownerPid: worker.pid,
+        listen: "127.0.0.1:6779",
+      });
+      const exited = once(worker, "exit");
+      worker.kill("SIGTERM");
+      await exited;
+      expect(await readDaemonInstance(home)).toMatchObject({ pid: child.pid, listen: null });
+      await expect(waitForDaemonReady(home, { timeoutMs: 0 })).rejects.toMatchObject({
+        code: "DAEMON_NOT_READY",
+      });
+    } finally {
+      worker.kill("SIGKILL");
+    }
+  });
+
+  test("does not weaken registered birth evidence with a legacy root pointer", async () => {
+    await writeLock(home, { ...lockFor(child.pid!, new Date()), serverId });
+    registration = await registerDaemonInstance(home, serverId, {
+      ownerPid: child.pid,
+      listen: "127.0.0.1:6779",
+    });
+    await writeFile(
+      getDaemonInstancePath(home, serverId),
+      JSON.stringify({
+        ...registration.info,
+        processStartedAt: "a previous process with this PID",
+      }),
+    );
+    expect(await readDaemonInstance(home)).toBeNull();
+    expect(await stopDaemonInstance(home)).toMatchObject({ action: "not_running" });
+    await expectChildAlive();
+  });
+
+  test("carries a registered supervisor birth into a legacy fallback receipt", async () => {
+    await writeLock(home, { ...lockFor(child.pid!, new Date()), serverId });
+    registration = await registerDaemonInstance(home, serverId, { ownerPid: child.pid });
+    const birth = registration.info.processStartedAt!;
+    await writeFile(
+      getDaemonInstancePath(home, serverId),
+      JSON.stringify({
+        ...registration.info,
+        pid: process.pid,
+        processStartedAt: "the exited worker's birth",
+        supervisor: { pid: child.pid, startedAt: birth },
+      }),
+    );
+    expect(await readDaemonInstance(home)).toMatchObject({
+      pid: child.pid,
+      processStartedAt: birth,
+    });
+    await expectChildAlive();
+  });
+
+  test("discovers and stops the selected supervisor before worker registration", async () => {
+    const rootPointer = { ...lockFor(process.pid, new Date()), serverId: "srv_other" };
+    await writeLock(home, rootPointer);
+    const pidLockHome = dirname(getDaemonInstancePath(home, serverId));
+    expect(await acquirePidLock(pidLockHome, null, { ownerPid: child.pid })).toBe(true);
+    expect(await readDaemonInstance(home)).toMatchObject({ pid: child.pid, listen: null });
+    expect(await readDaemonInstance(home, { PASEO_SERVER_ID: "srv_missing" })).toBeNull();
+    expect(await stopDaemonInstance(home)).toMatchObject({ action: "stopped", pid: child.pid });
+    expect(await getPidLockInfo(pidLockHome)).toBeNull();
+    expect(await getPidLockInfo(home)).toEqual(rootPointer);
+  });
 
   test("discovers and stops the local registered daemon without changing a foreign root pointer", async () => {
     const pointer = {
@@ -286,11 +399,13 @@ describe.runIf(process.platform === "linux")("daemon instance identity on Linux"
   let paseoHome: string;
 
   beforeEach(async () => {
+    vi.stubEnv("PASEO_SERVER_ID", "");
     paseoHome = await mkdtemp(join(tmpdir(), "paseo-daemon-instance-linux-"));
   });
 
   afterEach(async () => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
     await rm(paseoHome, { recursive: true, force: true });
   });
 

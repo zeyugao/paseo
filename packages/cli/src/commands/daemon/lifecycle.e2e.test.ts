@@ -7,11 +7,19 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { hashDaemonPassword } from "@getpaseo/server/auth";
 import { startDaemonInstance, readDaemonInstance } from "@getpaseo/server/daemon-control";
-import { expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { connectToDaemon } from "../../utils/client.js";
+import { getMachineId } from "../../../../server/src/server/machine-id.js";
 
 const repo = fileURLToPath(new URL("../../../../..", import.meta.url));
 const cli = path.join(repo, "packages/cli/dist/index.js");
+
+beforeEach(() => {
+  vi.stubEnv("PASEO_SERVER_ID", "");
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 async function port() {
   const server = net.createServer();
@@ -24,13 +32,15 @@ async function port() {
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "paseo lifecycle "));
+  // Keep subprocess discovery on the parent's machine identity when HOME is isolated.
+  await writeFile(path.join(root, ".paseo-machine-id"), `${await getMachineId()}\n`);
   const env = {
     ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("PASEO_"))),
     HOME: root,
     USERPROFILE: root,
   };
   const homes = [path.join(root, "a"), path.join(root, "b")];
-  const owned = new Map<string, { pid: number; startedAt: string }>();
+  const owned = new Map<string, { pid: number; startedAt: string; serverId?: string | null }>();
   async function run(args: string[], overrides: NodeJS.ProcessEnv = {}) {
     const child = spawn(process.execPath, [cli, ...args], {
       cwd: root,
@@ -58,8 +68,8 @@ async function fixture() {
     });
     for (const home of homes) {
       try {
-        const lock = JSON.parse(await readFile(path.join(home, "paseo.pid"), "utf8"));
-        owned.set(home, lock);
+        const instance = await readDaemonInstance(home, { ...env, ...overrides });
+        if (instance) owned.set(home, instance);
       } catch {
         /* No acquired launch. */
       }
@@ -99,9 +109,10 @@ async function fixture() {
   async function close() {
     for (const [home, captured] of owned) {
       try {
-        const lock = JSON.parse(await readFile(path.join(home, "paseo.pid"), "utf8"));
-        if (lock.pid === captured.pid && lock.startedAt === captured.startedAt) {
-          await run(["daemon", "stop", "--home", home, "--force", "--timeout", "2"]);
+        const overrides = { PASEO_SERVER_ID: captured.serverId ?? "" };
+        const instance = await readDaemonInstance(home, { ...env, ...overrides });
+        if (instance?.pid === captured.pid && instance.startedAt === captured.startedAt) {
+          await run(["daemon", "stop", "--home", home, "--force", "--timeout", "2"], overrides);
         }
       } catch {
         /* Already exited. */
@@ -150,6 +161,9 @@ test("managed two-home restart retains its supervisor and never routes ordinary 
     const restart = await f.ok(["restart", "--home", b, "--timeout", "30"], poisoned);
     expect(restart.supervisorPid).toBe(launchB.pid);
     expect(restart.workerPid).not.toBe(beforeB.workerPid);
+    expect(await readFile(path.join(b, "daemon.log"), "utf8")).toContain(
+      '"msg":"Lifecycle intent dispatched"',
+    );
     const saved = await f.ok(
       ["daemon", "config", "set", "daemon.listen", `127.0.0.1:${movedPort}`, "--home", b],
       poisoned,
@@ -324,11 +338,9 @@ test.skipIf(process.platform === "win32")(
       const beforeA = await f.liveStatus(a);
       expect((await f.liveStatus(b, { PASEO_SERVER_ID: "live-b" })).serverId).toBe("live-b");
       await f.ok(["restart", "--home", b, "--timeout", "30"], { PASEO_SERVER_ID: "live-b" });
-      const bLock = JSON.parse(await readFile(path.join(b, "paseo.pid"), "utf8"));
-      await writeFile(
-        path.join(b, "paseo.pid"),
-        JSON.stringify({ ...bLock, listen: beforeA.listen }),
-      );
+      const bPidPath = path.join(b, "daemons", "live-b", "paseo.pid");
+      const bLock = JSON.parse(await readFile(bPidPath, "utf8"));
+      await writeFile(bPidPath, JSON.stringify({ ...bLock, listen: beforeA.listen }));
       await writeFile(path.join(b, "server-id"), beforeA.serverId);
       await f.ok(["daemon", "stop", "--home", b]);
       expect((await f.liveStatus(a)).workerPid).toBe(beforeA.workerPid);
@@ -364,7 +376,7 @@ test.skipIf(process.platform === "win32").each([["start"], ["daemon", "run"]])(
       await expect
         .poll(
           async () => {
-            supervisorPid = (await readDaemonInstance(home))?.pid;
+            supervisorPid = (await readDaemonInstance(home, f.env))?.pid;
             return supervisorPid;
           },
           { timeout: 10_000 },
@@ -547,7 +559,7 @@ test("a connection pinned to an earlier supervisor refuses its replacement", asy
   try {
     await f.configure(home, `127.0.0.1:${await port()}`);
     await f.ok(["start", "--home", home]);
-    const captured = (await readDaemonInstance(home))!;
+    const captured = (await readDaemonInstance(home, f.env))!;
     await f.ok(["daemon", "stop", "--home", home]);
     await f.ok(["start", "--home", home]);
     const before = await f.liveStatus(home);
@@ -575,7 +587,7 @@ test("foreground deployment retains environment until its owner ends the launch;
       stdio: "ignore",
     });
     await expect
-      .poll(async () => (await readDaemonInstance(home))?.listen, { timeout: 30_000 })
+      .poll(async () => (await readDaemonInstance(home, f.env))?.listen, { timeout: 30_000 })
       .toBe(deploymentEndpoint);
     const before = await f.liveStatus(home);
     expect(before.configuredListen).toBe(fileEndpoint);
@@ -634,9 +646,9 @@ test("malformed configuration cannot turn a readiness timeout into launch cancel
     });
     const exited = new Promise((resolve) => starter!.once("exit", resolve));
     await expect
-      .poll(async () => (await readDaemonInstance(home))?.pid, { timeout: 10_000 })
+      .poll(async () => (await readDaemonInstance(home, f.env))?.pid, { timeout: 10_000 })
       .toBeTruthy();
-    const captured = (await readDaemonInstance(home))!;
+    const captured = (await readDaemonInstance(home, f.env))!;
     await f.ok(["status", "--home", home]);
     await writeFile(configPath, "{");
     await exited;

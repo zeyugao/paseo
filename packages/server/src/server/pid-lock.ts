@@ -600,9 +600,9 @@ async function clearExistingPidLock(
   lockOwnerPid: number,
 ): Promise<"already_owned" | "occupied" | "cleared"> {
   const localHostname = getHostName();
-  const sameHost = existingLock.machineId
-    ? existingLock.machineId === (await readMachineId())
-    : existingLock.hostname === localHostname;
+  const sameHost =
+    existingLock.hostname === localHostname &&
+    (!existingLock.machineId || existingLock.machineId === (await readMachineId()));
   const lockOwnerRunning = await isLocalPidLockOwnerRunning(existingLock);
   if (sameHost && existingLock.pid === lockOwnerPid && lockOwnerRunning) {
     await touchPidLockFile(pidPath);
@@ -621,9 +621,8 @@ async function clearExistingPidLock(
   if (
     (await isLocalPidLockOwnerRunning(confirmedLock)) ||
     (!confirmedStale &&
-      (confirmedLock.machineId
-        ? confirmedLock.machineId !== (await readMachineId())
-        : confirmedLock.hostname !== localHostname))
+      (confirmedLock.hostname !== localHostname ||
+        (confirmedLock.machineId && confirmedLock.machineId !== (await readMachineId()))))
   ) {
     return "occupied";
   }

@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
-  getPidLockInfo,
   isPidLockOwnerRunning,
   isLocked,
   isSamePidLock,
@@ -17,6 +16,7 @@ import { reapTerminalWorkers } from "../terminal/terminal-worker-reaper.js";
 import { terminalWorkerHome } from "../terminal/terminal-worker-record.js";
 import { retryUnconfirmedTerminalCleanup as retryTerminalCleanup } from "../terminal/terminal-worker-reaper.js";
 import {
+  getDaemonInstancePath,
   isRegisteredDaemonOwnerRunning,
   readRegisteredDaemonInstance,
   type DaemonInstanceInfo,
@@ -58,25 +58,66 @@ export class DaemonInstanceError extends Error {
   }
 }
 
+async function readSupervisorState(home: string, serverId: string | null) {
+  const pidLockHome = serverId ? path.dirname(getDaemonInstancePath(home, serverId)) : home;
+  const state = await isLocked(pidLockHome);
+  if (!serverId || state.info) return { pidLockHome, state };
+
+  // COMPAT(supervisor-pid-scope): added in v0.16.0, remove after 2027-02-12.
+  // Pre-registry supervisors publish only the root pointer, including during upgrades.
+  const legacy = await isLocked(home);
+  const selectedLegacy =
+    legacy.info &&
+    (legacy.info.serverId === serverId ||
+      (!legacy.info.serverId && readServerId(home, {}) === serverId));
+  if (selectedLegacy) return { pidLockHome: home, state: legacy };
+  return { pidLockHome, state };
+}
+
 export async function readDaemonInstance(
   home: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<PidLockInfo | null> {
   const serverId = readServerId(home, env);
-  if (serverId) {
-    const registered = await readRegisteredDaemonInstance(home, serverId);
-    if (registered) {
-      if (registered.serverId !== serverId) return null;
-      return readRegisteredInstance(home, registered);
-    }
+  const registered = serverId ? await readRegisteredDaemonInstance(home, serverId) : null;
+  if (registered) {
+    if (registered.serverId !== serverId) return null;
+    const instance = await readRegisteredInstance(home, registered);
+    if (instance) return instance;
   }
-  const state = await isLocked(home);
+  const { state } = await readSupervisorState(home, serverId);
   if (
     !state.locked ||
     !state.info ||
     (serverId && state.info.serverId && state.info.serverId !== serverId)
   )
     return null;
+  if (registered) {
+    const owner = registered.supervisor ?? {
+      pid: registered.pid,
+      startedAt: registered.processStartedAt,
+    };
+    if (owner.pid === state.info.pid) {
+      const machineId = await readMachineId();
+      if (!machineId) return null;
+      const ownerRunning = await isRegisteredDaemonOwnerRunning(
+        {
+          ...registered,
+          pid: owner.pid,
+          processStartedAt: owner.startedAt,
+          supervisor: undefined,
+        },
+        machineId,
+      );
+      if (!ownerRunning) return null;
+      return {
+        ...state.info,
+        machineId,
+        processStartedAt: owner.startedAt,
+        ...(registered.machineBootId ? { bootId: registered.machineBootId } : {}),
+      };
+    }
+  }
   return state.info;
 }
 
@@ -117,10 +158,12 @@ async function readMatchingPointer(
   machineId: string,
   owner: { pid: number; startedAt: string },
 ): Promise<PidLockInfo | null> {
-  const pointer = await getPidLockInfo(home).catch((error: unknown) => {
-    if (error instanceof PidLockError) return null;
-    throw error;
-  });
+  const pointer = await readSupervisorState(home, serverId)
+    .then(({ state }) => state.info)
+    .catch((error: unknown) => {
+      if (error instanceof PidLockError) return null;
+      throw error;
+    });
   if (
     pointer?.pid === owner.pid &&
     (!pointer.serverId || pointer.serverId === serverId) &&
@@ -313,7 +356,9 @@ export async function stopDaemonInstance(
       "STOP_NOT_CONFIRMED",
       `Timed out waiting for supervisor PID ${instance.pid} in ${home} to exit${options.force ? "" : "; use --force to permit forced cleanup"}.`,
     );
-  await releasePidLock(home, { ownerPid: instance.pid, startedAt: instance.startedAt });
+  const serverId = instance.serverId ?? readServerId(home, env);
+  const { pidLockHome } = await readSupervisorState(home, serverId);
+  await releasePidLock(pidLockHome, { ownerPid: instance.pid, startedAt: instance.startedAt });
   // The supervisor already closed the terminals unless it was killed; this confirms it, and
   // after --force (no graceful shutdown happened) does it at once.
   await closeLeftoverTerminals(home, instance.serverId ?? readServerId(home, env), {
@@ -343,14 +388,15 @@ async function cleanIdleInstance(
   keepTerminals: boolean | undefined,
   env: NodeJS.ProcessEnv | undefined,
 ): Promise<void> {
-  const pointer = await getPidLockInfo(home);
   const serverId = readServerId(home, env);
+  const { pidLockHome, state } = await readSupervisorState(home, serverId);
+  const pointer = state.info;
   if (
     pointer &&
     (!serverId || !pointer.serverId || pointer.serverId === serverId) &&
     !isPidLockOwnerRunning(pointer)
   ) {
-    await releasePidLock(home, { ownerPid: pointer.pid, startedAt: pointer.startedAt });
+    await releasePidLock(pidLockHome, { ownerPid: pointer.pid, startedAt: pointer.startedAt });
   }
   // A plain stop also closes this selected instance's previously retained terminals.
   const registered = serverId ? await readRegisteredDaemonInstance(home, serverId) : null;

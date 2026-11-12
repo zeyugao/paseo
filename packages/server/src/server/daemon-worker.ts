@@ -53,7 +53,10 @@ function writeWorkerLifecycleLog(
   fields: Record<string, unknown> = {},
 ): void {
   try {
-    const logPath = daemonLogPath(paseoHome);
+    const configuredPath = process.env.PASEO_LOG_FILE_PATH?.trim();
+    const logPath = configuredPath
+      ? path.resolve(paseoHome, configuredPath)
+      : daemonLogPath(paseoHome);
     mkdirSync(path.dirname(logPath), { recursive: true });
     appendFileSync(
       logPath,

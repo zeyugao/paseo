@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, test, vi } from "vitest";
 
 import { getHostName } from "./host-name.js";
+import { getMachineId } from "./machine-id.js";
 
 import {
   acquirePidLock,
@@ -393,6 +394,28 @@ describe("pid-lock ownership", () => {
       expect(await getPidLockInfo(paseoHome)).toEqual(foreignLock);
     } finally {
       await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves a fresh foreign hostname with a cloned machine id", async () => {
+    const home = await mkdtemp(join(tmpdir(), "paseo-cloned-machine-"));
+    const foreignLock = {
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      hostname: `${getHostName()}-foreign`,
+      machineId: await getMachineId(),
+      uid: process.getuid?.() ?? 0,
+      listen: "127.0.0.1:6767",
+      heartbeat: true as const,
+    };
+    try {
+      await writeFile(join(home, "paseo.pid"), JSON.stringify(foreignLock));
+      expect(await acquirePidLock(home, null)).toBe(false);
+      await expect(refreshPidLock(home)).rejects.toBeInstanceOf(PidLockError);
+      await releasePidLock(home);
+      expect(await getPidLockInfo(home)).toEqual(foreignLock);
+    } finally {
+      await rm(home, { recursive: true, force: true });
     }
   });
 

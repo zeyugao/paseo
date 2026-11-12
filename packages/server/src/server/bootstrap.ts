@@ -2141,6 +2141,7 @@ export async function createPaseoDaemon(
       scriptHealthMonitor.start();
       await registration.updateListen(formatListenTarget(boundListenTarget)!);
     } catch (error) {
+      scheduleService.stopScheduling();
       const credentialToDelete = localCredential;
       localCredential = null;
       if (credentialToDelete !== null) {
@@ -2154,9 +2155,17 @@ export async function createPaseoDaemon(
       }
       unsubscribePluginProviders();
       unsubscribePluginSessionChanges();
-      await pluginRuntime.stopAllPlugins().catch(() => undefined);
+      agentManager.prepareForShutdown();
+      await closeAllAgents(logger, agentManager);
       await serviceProxy.stopStandalone().catch(() => undefined);
-      await agentProviderRuntime.shutdown().catch(() => undefined);
+      await agentProviderRuntime
+        .shutdown()
+        .then((closedProviders) => agentManager.finishProviderShutdown(closedProviders))
+        .catch((shutdownError) => {
+          logger.warn({ err: shutdownError }, "Failed to shut down agent provider runtime");
+        });
+      await scheduleService.stop();
+      await pluginRuntime.stopAllPlugins().catch(() => undefined);
       if (mainStarted) {
         httpServer.closeAllConnections();
         // Promise.withResolvers is unavailable under the ES2023 lib target.
@@ -2173,6 +2182,7 @@ export async function createPaseoDaemon(
   };
 
   const stop = async (options?: { keepTerminals?: boolean }) => {
+    scheduleService.stopScheduling();
     const keepTerminals = options?.keepTerminals === true;
     let terminalShutdownError: unknown = null;
     const credentialToDelete = localCredential;
@@ -2210,10 +2220,12 @@ export async function createPaseoDaemon(
         timeoutMs: AGENT_CLOSE_TIMEOUT_MS,
         label: "drain plugin lifecycle events",
       }).catch((error) => logger.warn({ err: error }, "Plugin lifecycle events did not finish"));
+      const closedProviders = await agentProviderRuntime.shutdown();
+      await agentManager.finishProviderShutdown(closedProviders);
+      await scheduleService.stop();
       await agentManager.flushForShutdown().catch(() => undefined);
       detachAgentStoragePersistence();
       await agentStorage.flush().catch(() => undefined);
-      await agentProviderRuntime.shutdown();
       await pluginRuntime.stopAllPlugins();
       try {
         if (keepTerminals) {
@@ -2229,7 +2241,6 @@ export async function createPaseoDaemon(
         logger.error({ err: error }, "Terminal shutdown failed");
       }
       await speechService.stop();
-      await scheduleService.stop().catch(() => undefined);
       await relayRuntime?.stop().catch(() => undefined);
       if (wsServer) {
         await wsServer.close();
@@ -2283,8 +2294,8 @@ export async function createPaseoDaemon(
 /**
  * Closing an agent asks its provider to close the session and waits for the
  * answer. A provider that never answers must not hold the daemon open, so a
- * close that outlives this deadline is abandoned; `agentProviderRuntime`
- * shutdown runs next and rejects the request that was still pending.
+ * close that outlives this deadline is abandoned. Provider runtime shutdown
+ * confirms which sessions can be finalized before draining scheduled runs.
  */
 const AGENT_CLOSE_TIMEOUT_MS = 5_000;
 

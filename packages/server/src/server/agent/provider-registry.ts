@@ -1012,17 +1012,27 @@ export async function shutdownProviders(
 export async function shutdownAgentClients(
   clients: Iterable<AgentClient>,
   logger: Logger,
-): Promise<void> {
+): Promise<ReadonlySet<AgentProvider>> {
+  const closedProviders = new Set<AgentProvider>();
+  const unconfirmedProviders = new Set<AgentProvider>();
   await Promise.all(
     Array.from(clients).map(async (client) => {
-      if (!client.shutdown) return;
+      if (!client.shutdown) {
+        unconfirmedProviders.add(client.provider);
+        return;
+      }
       try {
         await client.shutdown();
+        closedProviders.add(client.provider);
       } catch (error) {
+        unconfirmedProviders.add(client.provider);
         logger.warn({ err: error, provider: client.provider }, "Provider client shutdown failed");
       }
     }),
   );
+  // Every owned generation must stop before its provider's sessions can be released.
+  for (const provider of unconfirmedProviders) closedProviders.delete(provider);
+  return closedProviders;
 }
 
 function configuredProviderOptions(

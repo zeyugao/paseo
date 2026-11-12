@@ -686,14 +686,14 @@ export class ProviderSnapshotManager {
     return this;
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(): Promise<ReadonlySet<AgentProvider>> {
     this.destroyed = true;
     for (const state of this.generation.providerStates.values()) state.discoveryLimit.clearQueue();
     // Materialize a client per enabled provider so provider-owned resources
     // (background processes, sockets, etc.) get a chance to release even when
     // a given provider hasn't been touched yet during this daemon's lifetime.
     this.getAgentManagerProviderState();
-    await shutdownAgentClients(this.ownedClients, this.logger);
+    return await shutdownAgentClients(this.ownedClients, this.logger);
   }
 
   destroy(): void {

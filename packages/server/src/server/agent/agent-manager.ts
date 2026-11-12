@@ -993,6 +993,22 @@ export class AgentManager {
     this.acceptingAgentRegistrations = false;
   }
 
+  async finishProviderShutdown(closedProviders: ReadonlySet<AgentProvider>): Promise<void> {
+    if (this.acceptingAgentRegistrations) {
+      throw new Error("Agent registrations must stop before finalizing provider shutdown");
+    }
+    // A timed-out session close may still occupy its lifecycle lane. Once every
+    // provider client has stopped, finalize directly rather than waiting on it.
+    await Promise.all(
+      [...this.agents.values()]
+        .filter((agent) => closedProviders.has(agent.provider))
+        .map(async (agent) => {
+          await this.drainSessionEvents(agent.id);
+          return await this.finalizeAgentClosure(agent);
+        }),
+    );
+  }
+
   setPaseoToolsEnabled(enabled: boolean): void {
     this.paseoToolsEnabled = enabled;
   }
@@ -2267,6 +2283,16 @@ export class AgentManager {
     // native writer, so publishing a resumable closed snapshot would orphan it.
     await agent.session.close();
     await this.drainSessionEvents(agentId);
+    return await this.finalizeAgentClosure(agent, options);
+  }
+
+  private async finalizeAgentClosure(
+    agent: LiveManagedAgent,
+    options?: { emit?: boolean },
+  ): Promise<ManagedAgentClosed | null> {
+    // A late session-close acknowledgment must not persist or emit a second closure.
+    if (this.agents.get(agent.id) !== agent) return null;
+    const agentId = agent.id;
     this.cancelRunningProviderSubagents(agentId);
     // close() drops the session's subscribers before the provider could report an empty list.
     this.clearBackgroundWork(agentId);

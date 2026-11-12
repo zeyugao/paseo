@@ -46,6 +46,12 @@ Reload releases the old runtime before resuming its durable session: an idle pro
 still own an exclusive writer. A close failure retains that runtime for cleanup and blocks the
 replacement. Once closure succeeds, a failed resume leaves the durable agent closed and retryable.
 
+During daemon shutdown, a failed session close retains ownership until every owned client generation
+for that provider has stopped. Confirmed provider shutdown retires any remaining runtimes and
+cancels their run waiters before scheduled runs drain. A client without a shutdown method, or one
+whose shutdown fails, does not confirm release. Persist the final closed state before detaching
+storage subscriptions.
+
 Idle resumable runtimes are collected after one hour without activity, checked once a minute.
 Collection releases the process and preserves the agent record, conversation, relationships, and
 provider session. The next prompt resumes that session. Set `agents.idleRuntimeCleanup: false` in

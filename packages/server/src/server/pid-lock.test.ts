@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { getEventListeners } from "node:events";
 import { mkdtemp, open, readFile, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, test, vi } from "vitest";
 
@@ -12,6 +14,8 @@ import {
   getPidLockInfo,
   isLocked,
   PidLockError,
+  ReclaimLockQueueFullError,
+  ReclaimLockTimeoutError,
   refreshPidLock,
   releasePidLock,
   updatePidLock,
@@ -26,13 +30,53 @@ async function linuxChildPids(pid: number): Promise<number[]> {
   }
 }
 
-async function killLinuxProcessTree(pid: number): Promise<void> {
-  for (const childPid of await linuxChildPids(pid)) await killLinuxProcessTree(childPid);
+async function startExternalReclaimHolder(lockPath: string) {
+  const command = process.platform === "darwin" ? "lockf" : "flock";
+  const args = [lockPath, "/bin/sh", "-c", 'printf "\\001"; cat >/dev/null'];
+  const holder = spawn(command, args, { detached: true, stdio: ["pipe", "pipe", "pipe"] });
+  const acquired = Promise.withResolvers<void>();
+  const closed = Promise.withResolvers<void>();
+  let closeStarted = false;
+  holder.once("error", acquired.reject);
+  holder.stdout.once("data", () => acquired.resolve());
+  holder.once("close", () => {
+    acquired.reject(new Error("External lock holder exited before acquiring"));
+    closed.resolve();
+  });
+  await acquired.promise;
+  return {
+    holder,
+    async close() {
+      if (closeStarted) return closed.promise;
+      closeStarted = true;
+      if (holder.pid !== undefined) {
+        try {
+          process.kill(-holder.pid, "SIGKILL");
+        } catch (error) {
+          if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+        }
+      }
+      await closed.promise;
+    },
+  };
+}
+
+function isProcessRunning(pid: number): boolean {
   try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    // The process may exit between discovery and signaling.
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ESRCH") return false;
+    throw error;
   }
+}
+
+async function runProcess(command: string, args: string[]): Promise<number | null> {
+  const child = spawn(command, args, { stdio: "ignore" });
+  const completion = Promise.withResolvers<number | null>();
+  child.once("error", completion.reject);
+  child.once("close", (code) => completion.resolve(code));
+  return completion.promise;
 }
 
 describe("pid-lock ownership", () => {
@@ -475,6 +519,184 @@ describe("pid-lock ownership", () => {
     }
   });
 
+  test("bounds normalized-path admission to 64 pending and removes aborted waiters", async () => {
+    const paseoHome = await mkdtemp(join(tmpdir(), "paseo-reclaim-admission-"));
+    const lockPath = join(paseoHome, ".reclaim.lock");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const ran: number[] = [];
+    const controllers = Array.from({ length: 64 }, () => new AbortController());
+    const active = withReclaimLock(lockPath, async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    const pending: Promise<number>[] = [];
+    const aborted = new Error("queued acquisition cancelled");
+    try {
+      await entered.promise;
+      for (let index = 0; index < 64; index += 1) {
+        pending.push(
+          withReclaimLock(
+            relative(process.cwd(), lockPath),
+            async () => {
+              ran.push(index);
+              return index;
+            },
+            { signal: controllers[index]!.signal },
+          ),
+        );
+      }
+      const settled = Promise.allSettled(pending);
+      await expect(
+        withReclaimLock(`${paseoHome}/unused/../.reclaim.lock`, async () => -1),
+      ).rejects.toMatchObject({
+        name: "ReclaimLockQueueFullError",
+        lockPath,
+        maxPending: 64,
+      });
+      await expect(withReclaimLock(lockPath, async () => -1)).rejects.toBeInstanceOf(
+        ReclaimLockQueueFullError,
+      );
+      for (const controller of controllers.slice(0, 63)) controller.abort(aborted);
+      for (const controller of controllers.slice(0, 63)) {
+        expect(getEventListeners(controller.signal, "abort")).toEqual([]);
+      }
+      const replacement = withReclaimLock(lockPath, async () => {
+        ran.push(64);
+        return 64;
+      });
+      release.resolve();
+      await active;
+      expect(await settled).toEqual([
+        ...Array.from({ length: 63 }, () => ({ status: "rejected", reason: aborted })),
+        { status: "fulfilled", value: 63 },
+      ]);
+      await expect(replacement).resolves.toBe(64);
+      expect(ran).toEqual([63, 64]);
+      await expect(stat(join(paseoHome, "unused"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      for (const controller of controllers) controller.abort(aborted);
+      release.resolve();
+      await Promise.allSettled([active, ...pending]);
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("expires queued acquisition from enqueue without running it and recovers admission", async () => {
+    const paseoHome = await mkdtemp(join(tmpdir(), "paseo-reclaim-queued-timeout-"));
+    const lockPath = join(paseoHome, ".reclaim.lock");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let expiredActionRan = false;
+    const active = withReclaimLock(lockPath, async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    try {
+      await entered.promise;
+      const expired = withReclaimLock(
+        lockPath,
+        async () => {
+          expiredActionRan = true;
+        },
+        { timeoutMs: 25 },
+      );
+      await expect(expired).rejects.toBeInstanceOf(ReclaimLockTimeoutError);
+      await expect(expired).rejects.toMatchObject({ lockPath, timeoutMs: 25 });
+      release.resolve();
+      await active;
+      await expect(withReclaimLock(lockPath, async () => "recovered")).resolves.toBe("recovered");
+      expect(expiredActionRan).toBe(false);
+    } finally {
+      release.resolve();
+      await active;
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps an action protected after its acquisition deadline and subsequent abort", async () => {
+    const paseoHome = await mkdtemp(join(tmpdir(), "paseo-reclaim-action-deadline-"));
+    const lockPath = join(paseoHome, ".reclaim.lock");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const cancellation = new AbortController();
+    const events: string[] = [];
+    const active = withReclaimLock(
+      lockPath,
+      async () => {
+        entered.resolve();
+        await release.promise;
+        events.push("active finished");
+        return "completed";
+      },
+      { signal: cancellation.signal, timeoutMs: 2_000 },
+    );
+    let next: Promise<void> | undefined;
+    try {
+      await entered.promise;
+      expect(getEventListeners(cancellation.signal, "abort")).toEqual([]);
+      await delay(2_050);
+      cancellation.abort();
+      next = withReclaimLock(lockPath, async () => {
+        events.push("next began");
+      });
+      expect(events).toEqual([]);
+      release.resolve();
+      await expect(active).resolves.toBe("completed");
+      await next;
+      expect(events).toEqual(["active finished", "next began"]);
+    } finally {
+      release.resolve();
+      await Promise.allSettled([active, next]);
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  test("rejects pre-aborted and zero-deadline acquisitions before filesystem preparation", async () => {
+    const paseoHome = await mkdtemp(join(tmpdir(), "paseo-reclaim-preparation-"));
+    const parent = join(paseoHome, "not-created");
+    const lockPath = join(parent, ".reclaim.lock");
+    const controller = new AbortController();
+    const reason = new Error("already stopped");
+    controller.abort(reason);
+    let ran = false;
+    async function action(): Promise<void> {
+      ran = true;
+    }
+    try {
+      await expect(withReclaimLock(lockPath, action, { signal: controller.signal })).rejects.toBe(
+        reason,
+      );
+      await expect(withReclaimLock(lockPath, action, { timeoutMs: 0 })).rejects.toBeInstanceOf(
+        ReclaimLockTimeoutError,
+      );
+      await expect(stat(parent)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(ran).toBe(false);
+    } finally {
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
+  test("recovers an idle queue after filesystem preparation fails", async () => {
+    const paseoHome = await mkdtemp(join(tmpdir(), "paseo-reclaim-preparation-failure-"));
+    const parent = join(paseoHome, "parent");
+    const lockPath = join(parent, ".reclaim.lock");
+    let ran = false;
+    try {
+      await writeFile(parent, "not a directory");
+      await expect(
+        withReclaimLock(lockPath, async () => {
+          ran = true;
+        }),
+      ).rejects.toThrow();
+      expect(ran).toBe(false);
+      await unlink(parent);
+      await expect(withReclaimLock(lockPath, async () => "recovered")).resolves.toBe("recovered");
+    } finally {
+      await rm(paseoHome, { recursive: true, force: true });
+    }
+  });
+
   async function findFlockHolderPid(childrenBefore: Set<number>): Promise<number | undefined> {
     const spawnedChildren = (await linuxChildPids(process.pid)).filter(
       (pid) => !childrenBefore.has(pid),
@@ -489,19 +711,208 @@ describe("pid-lock ownership", () => {
   }
 
   test.skipIf(process.platform !== "linux")(
+    "expires the native acquisition helper while the Node event loop cannot run cleanup",
+    async () => {
+      const paseoHome = await mkdtemp(join(tmpdir(), "paseo-reclaim-native-timeout-"));
+      const lockPath = join(paseoHome, ".reclaim.lock");
+      const external = await startExternalReclaimHolder(lockPath);
+      const childrenBefore = new Set(await linuxChildPids(process.pid));
+      const blocked = withReclaimLock(
+        lockPath,
+        async () => {
+          throw new Error("Native timeout must prevent the action");
+        },
+        { timeoutMs: 2_000 },
+      );
+      const outcome = blocked.catch((error: unknown) => error);
+      try {
+        await expect.poll(() => findFlockHolderPid(childrenBefore)).not.toBeUndefined();
+        const helperPid = await findFlockHolderPid(childrenBefore);
+        if (helperPid === undefined) throw new Error("Missing native timeout helper");
+        const waitWord = new Int32Array(new SharedArrayBuffer(4));
+        const deadline = Date.now() + 5_000;
+        let nativeExited = false;
+        // Deliberately prevent the JavaScript timeout from firing: only the helper's
+        // own acquisition deadline can make it exit during this synchronous wait.
+        while (!nativeExited && Date.now() < deadline) {
+          try {
+            const state = readFileSync(`/proc/${helperPid}/stat`, "utf8");
+            nativeExited = /^\d+ \(.*\) Z /.test(state);
+          } catch (error) {
+            if (!(error instanceof Error && "code" in error && error.code === "ENOENT"))
+              throw error;
+            nativeExited = true;
+          }
+          if (!nativeExited) Atomics.wait(waitWord, 0, 0, 10);
+        }
+        expect(nativeExited).toBe(true);
+        expect(await outcome).toBeInstanceOf(ReclaimLockTimeoutError);
+        expect(isProcessRunning(external.holder.pid!)).toBe(true);
+      } finally {
+        await external.close();
+        await outcome;
+        await rm(paseoHome, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "times out blocked filesystem preparation without admitting a successor early",
+    async () => {
+      const paseoHome = await mkdtemp(join(tmpdir(), "paseo-reclaim-preparation-timeout-"));
+      const lockPath = join(paseoHome, ".reclaim.lock");
+      expect(await runProcess("mkfifo", [lockPath])).toBe(0);
+      let ran = false;
+      const preparing = withReclaimLock(
+        lockPath,
+        async () => {
+          ran = true;
+        },
+        { timeoutMs: 25 },
+      );
+      try {
+        await expect(preparing).rejects.toBeInstanceOf(ReclaimLockTimeoutError);
+        const queued = withReclaimLock(
+          lockPath,
+          async () => {
+            ran = true;
+          },
+          { timeoutMs: 25 },
+        );
+        await expect(queued).rejects.toBeInstanceOf(ReclaimLockTimeoutError);
+        expect(ran).toBe(false);
+      } finally {
+        // Opening the read side releases the original real, blocked open() operation.
+        const reader = await open(lockPath, "r");
+        await reader.close();
+        await unlink(lockPath);
+        await expect(withReclaimLock(lockPath, async () => "recovered")).resolves.toBe("recovered");
+        await rm(paseoHome, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "retains the cross-process lock while an action outlives acquisition timeout",
+    async () => {
+      const paseoHome = await mkdtemp(join(tmpdir(), "paseo-reclaim-long-action-"));
+      const lockPath = join(paseoHome, ".reclaim.lock");
+      try {
+        await withReclaimLock(
+          lockPath,
+          async () => {
+            await delay(2_050);
+            const command = process.platform === "darwin" ? "lockf" : "flock";
+            const args =
+              process.platform === "darwin"
+                ? ["-t", "0", lockPath, "true"]
+                : ["--nonblock", lockPath, "true"];
+            expect(await runProcess(command, args)).not.toBe(0);
+          },
+          { timeoutMs: 2_000 },
+        );
+        const external = await startExternalReclaimHolder(lockPath);
+        await external.close();
+      } finally {
+        await rm(paseoHome, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  test.skipIf(process.platform !== "linux").each(["abort", "timeout"] as const)(
+    "cleans a stopped acquisition helper after %s before admitting its successor",
+    async (cancellationKind) => {
+      const paseoHome = await mkdtemp(join(tmpdir(), "paseo-reclaim-helper-cancel-"));
+      const lockPath = join(paseoHome, ".reclaim.lock");
+      const external = await startExternalReclaimHolder(lockPath);
+      const childrenBefore = new Set(await linuxChildPids(process.pid));
+      const cancellation = new AbortController();
+      const reason = new Error("acquisition stopped");
+      let cancelledActionRan = false;
+      const blocked = withReclaimLock(
+        lockPath,
+        async () => {
+          cancelledActionRan = true;
+        },
+        { signal: cancellation.signal, timeoutMs: 2_000 },
+      );
+      const outcome = blocked.then(
+        () => "unexpected acquisition",
+        (error: unknown) => error,
+      );
+      let successor: Promise<string> | undefined;
+      try {
+        await expect.poll(() => findFlockHolderPid(childrenBefore)).not.toBeUndefined();
+        const helperPid = await findFlockHolderPid(childrenBefore);
+        if (helperPid === undefined) throw new Error("Missing blocked lock helper");
+        process.kill(-helperPid, "SIGSTOP");
+        successor = withReclaimLock(lockPath, async () => {
+          expect(isProcessRunning(helperPid)).toBe(false);
+          return "successor";
+        });
+        if (cancellationKind === "abort") {
+          cancellation.abort(reason);
+          expect(await outcome).toBe(reason);
+        } else {
+          expect(await outcome).toBeInstanceOf(ReclaimLockTimeoutError);
+        }
+        expect(isProcessRunning(external.holder.pid!)).toBe(true);
+        await external.close();
+        await expect(successor).resolves.toBe("successor");
+        expect(cancelledActionRan).toBe(false);
+        await expect(withReclaimLock(lockPath, async () => "recovered")).resolves.toBe("recovered");
+      } finally {
+        cancellation.abort(reason);
+        await external.close();
+        await Promise.allSettled([blocked, successor]);
+        await rm(paseoHome, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  test.skipIf(process.platform !== "linux")(
+    "terminates a lingering owned process group only after its action returns",
+    async () => {
+      const paseoHome = await mkdtemp(join(tmpdir(), "paseo-reclaim-lingering-release-"));
+      const lockPath = join(paseoHome, ".reclaim.lock");
+      const childrenBefore = new Set(await linuxChildPids(process.pid));
+      try {
+        await expect(
+          withReclaimLock(lockPath, async () => {
+            const holderPid = await findFlockHolderPid(childrenBefore);
+            if (holderPid === undefined) throw new Error("Missing acquired lock helper");
+            process.kill(-holderPid, "SIGSTOP");
+            return "action completed";
+          }),
+        ).resolves.toBe("action completed");
+        const external = await startExternalReclaimHolder(lockPath);
+        await external.close();
+      } finally {
+        await rm(paseoHome, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform !== "linux")(
     "fails the action when the reclaim lock holder exits without deadlocking",
     async () => {
       const paseoHome = await mkdtemp(join(tmpdir(), "paseo-reclaim-holder-exit-"));
       const lockPath = join(paseoHome, ".reclaim.lock");
       const childrenBefore = new Set(await linuxChildPids(process.pid));
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const warned = Promise.withResolvers<void>();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => warned.resolve());
 
       try {
         const action = withReclaimLock(lockPath, async () => {
           const holderPid = await findFlockHolderPid(childrenBefore);
-          expect(holderPid).toBeDefined();
-          await killLinuxProcessTree(holderPid!);
-          await delay(50);
+          if (holderPid === undefined) throw new Error("Missing acquired lock helper");
+          process.kill(holderPid, "SIGKILL");
+          await warned.promise;
+          const external = await startExternalReclaimHolder(lockPath);
+          await external.close();
           return "completed";
         });
         const timeout = delay(2_000).then(() => {

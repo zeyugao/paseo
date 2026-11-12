@@ -80,6 +80,34 @@ describe("window chrome", () => {
     ).toEqual({ paddingLeft: 0, paddingRight: 48 });
   });
 
+  it("keeps rounded-corner clearance on the physical edge without reserving another row", () => {
+    const obstruction = { topLeft: null, topRight: { width: 144, height: 44 } };
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        corners: "top-left",
+        placement: "inline",
+        leadingInset: 56,
+      }),
+    ).toEqual({ paddingLeft: 56, paddingRight: 0 });
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        corners: "top-right",
+        placement: "inline",
+        leadingInset: 56,
+      }),
+    ).toEqual({ paddingLeft: 0, paddingRight: 144 });
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        corners: "top-left",
+        placement: "below",
+        leadingInset: 56,
+      }),
+    ).toEqual({ height: 0 });
+  });
+
   it("intersects identical and empty corner claims", () => {
     expect(intersectWindowChromeCorners("both", "both")).toBe("both");
     expect(intersectWindowChromeCorners("top-left", "top-left")).toBe("top-left");

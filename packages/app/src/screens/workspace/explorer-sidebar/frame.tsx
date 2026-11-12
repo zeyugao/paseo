@@ -13,7 +13,11 @@ import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import { useExplorerGeometry } from "./geometry";
 import type { ExplorerFrameProps } from "./frame-props";
 import { HEADER_TOP_PADDING_MOBILE } from "@/constants/layout";
-import { WindowLayoutTopInset } from "@/window-layout";
+import {
+  useWindowLayoutHasTopChrome,
+  WindowLayoutStatusBar,
+  WindowLayoutTopInset,
+} from "@/window-layout";
 
 function ExplorerFrameBase({
   children,
@@ -28,6 +32,8 @@ function ExplorerFrameBase({
   const settledOpen = useIsMobilePanelActive("file-explorer");
   const active = isWorkspaceActive && (overlay ? settledOpen : isOpen);
   const resizeEnabled = isWorkspaceActive && !overlay && isOpen;
+  const hasTopChrome = useWindowLayoutHasTopChrome();
+  const hidesSystemStatusBar = isOpen && !overlay && hasTopChrome;
   const { gesture, gestureRef } = useCloseFileExplorerGesture(isWorkspaceActive && overlay);
   const storedWidth = useWorkspaceLayoutStore(
     (state) => state.explorerSidebarWidthByWorkspace[persistenceKey],
@@ -48,6 +54,7 @@ function ExplorerFrameBase({
   });
   return (
     <RetainedPanelActivity active={active}>
+      {isWorkspaceActive ? <WindowLayoutStatusBar hidden={hidesSystemStatusBar} /> : null}
       <FileExplorerCloseGestureContext value={gestureRef}>
         <MobilePanelOverlay
           panel="file-explorer"
@@ -57,9 +64,9 @@ function ExplorerFrameBase({
           frameStyle={geometry.frameStyle}
           panelStyle={[{ backgroundColor: surfaceColor }, geometry.panelStyle]}
         >
-          <WindowLayoutTopInset additionalPadding={overlay ? HEADER_TOP_PADDING_MOBILE : 0} />
+          {resizeEnabled ? geometry.resizeHandle : null}
           <View style={styles.content}>
-            {resizeEnabled ? geometry.resizeHandle : null}
+            <WindowLayoutTopInset additionalPadding={overlay ? HEADER_TOP_PADDING_MOBILE : 0} />
             {children}
           </View>
         </MobilePanelOverlay>

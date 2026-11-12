@@ -1222,6 +1222,13 @@ function ResolvedWorkspaceDesktopTabsRow({
 }: ResolvedWorkspaceDesktopTabsRowProps) {
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
+  const { naturalExplorerTrack, outsideNewTabButton } = useMemo(() => {
+    const nativeExplorer = isNative && host === "explorer";
+    return {
+      naturalExplorerTrack: nativeExplorer,
+      outsideNewTabButton: embedded || nativeExplorer,
+    };
+  }, [embedded, host]);
   const newTabKeys = useShortcutKeys("workspace-tab-new");
   const [tabsContainerWidth, setTabsContainerWidth] = useState<number>(0);
   const tabsScrollRef = useRef<ScrollView>(null);
@@ -1242,10 +1249,6 @@ function ResolvedWorkspaceDesktopTabsRow({
   );
   const tabScrollBoundary = useHorizontalScrollBoundary();
 
-  const handleTabsContainerLayout = useCallback((event: LayoutChangeEvent) => {
-    updateMeasuredWidth(setTabsContainerWidth, event);
-  }, []);
-
   const handleExitFocusModeLayout = useCallback((event: LayoutChangeEvent) => {
     updateMeasuredWidth(setExitFocusModeWidth, event);
   }, []);
@@ -1253,10 +1256,10 @@ function ResolvedWorkspaceDesktopTabsRow({
   const layoutMetrics = useMemo(
     () => ({
       // Each sortable slot contributes a half-gap at both outboard edges too.
-      rowHorizontalInset: embedded && tabs.length > 0 ? TAB_CHIP_GAP / 2 : 0,
+      rowHorizontalInset: outsideNewTabButton && tabs.length > 0 ? TAB_CHIP_GAP / 2 : 0,
       actionsReservedWidth: Math.max(
         0,
-        (embedded && inlineAddButtonWidth > 0
+        (outsideNewTabButton && inlineAddButtonWidth > 0
           ? inlineAddButtonWidth
           : DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH) +
           (focusModeEnabled ? exitFocusModeWidth : 0) +
@@ -1273,7 +1276,7 @@ function ResolvedWorkspaceDesktopTabsRow({
       closeButtonWidth: TAB_CLOSE_BUTTON_RESERVED_WIDTH,
     }),
     [
-      embedded,
+      outsideNewTabButton,
       tabs.length,
       inlineAddButtonWidth,
       exitFocusModeWidth,
@@ -1405,7 +1408,7 @@ function ResolvedWorkspaceDesktopTabsRow({
     viewportWidthOverride: tabsContainerWidth > 0 ? tabsContainerWidth : null,
     metrics: layoutMetrics,
     compact: isCompact,
-    preserveNaturalWidths: embedded,
+    preserveNaturalWidths: outsideNewTabButton,
   });
   useWorkspaceTabNaturalWidth({
     enabled: embedded,
@@ -1416,6 +1419,35 @@ function ResolvedWorkspaceDesktopTabsRow({
     metrics: layoutMetrics,
     onChange: onNaturalWidthChange,
   });
+  const { scrollContainerStyle, scrollEnabled } = useMemo(
+    () => ({
+      scrollContainerStyle: naturalExplorerTrack
+        ? [
+            styles.tabsScrollContainer,
+            styles.tabsScrollContainerNatural,
+            {
+              width:
+                workspaceTabNaturalWidth(layout, layoutMetrics) -
+                layoutMetrics.actionsReservedWidth,
+            },
+          ]
+        : styles.tabsScrollContainer,
+      scrollEnabled: naturalExplorerTrack || layout.requiresHorizontalScrollFallback,
+    }),
+    [layout, layoutMetrics, naturalExplorerTrack],
+  );
+  const handleTabsContainerLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      if (naturalExplorerTrack) {
+        if (event.nativeEvent.layout.width >= workspaceTabNaturalWidth(layout, layoutMetrics)) {
+          tabsScrollRef.current?.scrollTo({ x: 0, animated: false });
+        }
+        return;
+      }
+      updateMeasuredWidth(setTabsContainerWidth, event);
+    },
+    [layout, layoutMetrics, naturalExplorerTrack],
+  );
   // A scroll view keeps its offset when its content shrinks under the viewport, so a row that
   // stops scrolling would leave the tabs it had panned past out of view with no way back.
   useEffect(() => {
@@ -1540,7 +1572,7 @@ function ResolvedWorkspaceDesktopTabsRow({
     [layout.requiresHorizontalScrollFallback],
   );
   const newTabPlacement = resolveWorkspaceNewTabPlacement(
-    embedded,
+    outsideNewTabButton,
     layout.requiresHorizontalScrollFallback,
   );
 
@@ -1560,7 +1592,10 @@ function ResolvedWorkspaceDesktopTabsRow({
         accessibilityElementsHidden
         importantForAccessibility="no-hide-descendants"
       >
-        <InlineAddButtonMeasurement enabled={embedded} onLayout={measureInlineAddButton} />
+        <InlineAddButtonMeasurement
+          enabled={outsideNewTabButton}
+          onLayout={measureInlineAddButton}
+        />
         {tabLabels.map(({ key, label }) => (
           <TabLabelMeasurement
             key={`${key}:${label}`}
@@ -1575,11 +1610,11 @@ function ResolvedWorkspaceDesktopTabsRow({
         onPress={onExitFocusMode}
         onLayout={handleExitFocusModeLayout}
       />
-      <View style={styles.tabsScrollContainer}>
+      <View style={scrollContainerStyle}>
         <Animated.ScrollView
           ref={tabsScrollRef}
           horizontal
-          scrollEnabled={layout.requiresHorizontalScrollFallback}
+          scrollEnabled={scrollEnabled}
           testID="workspace-tabs-scroll"
           style={tabsScrollStyle}
           contentContainerStyle={styles.tabsContent}
@@ -1612,15 +1647,15 @@ function ResolvedWorkspaceDesktopTabsRow({
           />
         </Animated.ScrollView>
         <HorizontalScrollBoundaryShades
-          visible={layout.requiresHorizontalScrollFallback}
+          visible={scrollEnabled}
           backdrop={rail}
           testIDPrefix="workspace-tabs-scroll-shade"
           leftStyle={tabScrollBoundary.leftShadeStyle}
           rightStyle={tabScrollBoundary.rightShadeStyle}
         />
       </View>
-      {/* Embedded rails already hug their track: keep + outside the scroller in both fit
-          and overflow states, rather than reparenting it after a viewport measurement. */}
+      {/* Natural rails keep + outside the scroller; native Explorer also bounds that scroller
+          to its content width, so a late viewport measurement cannot move the button. */}
       <WorkspaceNewTabButton
         visible={newTabPlacement === "inline"}
         panePanelKinds={panePanelKinds}
@@ -1817,6 +1852,12 @@ const styles = StyleSheet.create((theme) => ({
     minWidth: 0,
     flex: 1,
     alignSelf: "stretch",
+  },
+  tabsScrollContainerNatural: {
+    flex: 0,
+    flexGrow: 0,
+    flexShrink: 1,
+    flexBasis: "auto",
   },
   tabsScrollFitContent: {
     flex: 1,

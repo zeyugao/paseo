@@ -144,6 +144,66 @@ function duoLayout(occlusions: WindowLayoutRect[]): WindowLayout {
 }
 
 describe("resolveTopBand", () => {
+  it("reclaims the window edge instead of the inset bar while preserving corner clearance", () => {
+    const portrait = layout({
+      ...duoLayout([duo.statusRegion]),
+      insets: { top: 82, left: 0, right: 0, bottom: 34 },
+      topChrome: { x: 56, y: 0, width: 469, height: 44, cornerLeft: 56, cornerRight: 56 },
+    });
+    expect(resolveSafeAreaInsets(systemInsets, portrait).top).toBe(0);
+    expect(resolveTopBand(82, portrait)).toEqual({
+      top: 0,
+      leadingInset: 56,
+      trailingObstruction: { width: 144, height: 44 },
+    });
+  });
+
+  it("reclaims a hidden status region but keeps its clearance ready for immediate restoration", () => {
+    const hidden = layout({
+      bounds: { x: 0, y: 0, width: 700, height: 951 },
+      insets: { top: 0, left: 0, right: 0, bottom: 34 },
+      topChrome: { x: 60, y: 0, width: 496, height: 44, cornerLeft: 60, cornerRight: 60 },
+      statusBarHidden: true,
+      occlusions: [],
+    });
+    expect(resolveTopBand(0, hidden, true)).toEqual({
+      top: 0,
+      leadingInset: 60,
+      trailingObstruction: { width: 60, height: 44 },
+    });
+    expect(resolveTopBand(0, hidden)).toEqual({
+      top: 0,
+      leadingInset: 60,
+      trailingObstruction: { width: 144, height: 44 },
+    });
+  });
+
+  it("keeps status-region clearance until native hiding finishes, even after insets collapse", () => {
+    const hiding = layout({
+      bounds: { x: 0, y: 0, width: 669, height: 951 },
+      insets: { top: 0, left: 0, right: 0, bottom: 34 },
+      topChrome: { x: 6, y: 0, width: 519, height: 44, cornerLeft: 6, cornerRight: 6 },
+      statusBarHidden: false,
+      occlusions: [],
+    });
+    expect(resolveTopBand(0, hiding, true)?.trailingObstruction).toEqual({
+      width: 144,
+      height: 44,
+    });
+    expect(
+      resolveTopBand(0, { ...hiding, statusBarHidden: true }, true)?.trailingObstruction,
+    ).toEqual({
+      width: 6,
+      height: 44,
+    });
+    expect(
+      resolveTopBand(0, { ...hiding, statusBarHidden: true }, false)?.trailingObstruction,
+    ).toEqual({
+      width: 144,
+      height: 44,
+    });
+  });
+
   it("publishes the top bar's start and the status region past its trailing end", () => {
     expect(resolveTopBand(duo.systemTop, duoLayout([duo.statusRegion]))).toEqual({
       top: 26,

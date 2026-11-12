@@ -107,6 +107,9 @@ function createTestEmailSender() {
 
 When a test is labeled end-to-end, it calls the real service. No environment variable gates, no conditional skipping, no mocking the external dependency.
 
+Lifecycle E2E tests assert public CLI status and both supervisor and worker process lifetimes.
+Log wording and PID file layout are not lifecycle contracts; see [shared-home ownership](shared-home.md#identity-and-per-instance-state).
+
 ### Packaged desktop smoke
 
 The packaged desktop smoke is an external observer of the production launch path. It must not add a smoke-only branch to Electron main or start the daemon itself.

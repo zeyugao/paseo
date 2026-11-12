@@ -48,18 +48,24 @@ ambiguous records stay unclaimed; a missing path alone never proves ownership.
 
 ## Identity and per-instance state
 
-`$PASEO_HOME/daemons/{serverId}/` holds per-daemon state: `instance.json` (O_EXCL lock
-with hostname, PID, bootId, and a 30s mtime heartbeat), `daemon-keypair.json`, and
-`local-credential`. A daemon adopting a legacy single-machine home keeps the legacy
+`$PASEO_HOME/daemons/{serverId}/` holds per-daemon state: the supervisor's `paseo.pid`,
+the worker's `instance.json` lease, `daemon-keypair.json`, and `local-credential`.
+Supervisor and worker ownership both use a 30s mtime heartbeat. A daemon adopting a legacy single-machine home keeps the legacy
 keypair only when its serverId matches the legacy `server-id` file; every other serverId
 generates a fresh keypair, so relay identities and pairing stays per-machine.
 The reverse also holds: a pairing offer generated after the first daemon boot mirrors
 that daemon's keypair to the legacy root `daemon-keypair.json`, so the CLI keeps reading
 the home root and offers always carry the live daemon's public key.
 
-`paseo.pid` remains a legacy discovery pointer, not mutual exclusion. Local discovery
-selects the requested serverId's registration, verifies machine and process birth
-identities, and reads that daemon's credential. Another host's root pointer is left alone.
+Supervisors acquire, renew and release only their own directory's PID lock. Different
+serverIds never contend for the root `paseo.pid`, even when cloned machines share a
+system machine ID. A duplicate serverId is rejected before spawning its worker.
+Local discovery reads the selected instance's supervisor pointer during startup, then
+its worker registration, verifying machine and process birth identities and using its
+own credential. During upgrades, discovery also accepts a legacy root pointer when no
+scoped pointer exists and its identity matches the selected serverId; normal local-owner
+checks still apply. Isolated supervisors never acquire or renew the root PID lock or
+mirror credentials to the root.
 Registrations publish their listen address only after startup succeeds. Status reads do
 not create server or machine identities.
 

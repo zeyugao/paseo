@@ -7,7 +7,7 @@
 
 import assert from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "zx";
@@ -39,54 +39,40 @@ function isProcessRunning(pid: number): boolean {
   }
 }
 
-interface PidLockState {
-  pid: number | null;
-}
-
-async function readPidLockState(paseoHome: string): Promise<PidLockState> {
-  const pidPath = join(paseoHome, "paseo.pid");
-
-  try {
-    const content = await readFile(pidPath, "utf-8");
-    const parsed = JSON.parse(content) as { pid?: unknown };
-    const pid =
-      typeof parsed.pid === "number" && Number.isInteger(parsed.pid) && parsed.pid > 0
-        ? parsed.pid
-        : null;
-    return { pid };
-  } catch {
-    return { pid: null };
-  }
-}
-
 interface DaemonStatus {
   localDaemon: string | null;
   pid: number | null;
+  workerPid: number | null;
 }
 
 async function readDaemonStatus(paseoHome: string): Promise<DaemonStatus> {
   const result =
     await $`PASEO_HOME=${paseoHome} PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD=${testEnv.PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD} PASEO_DICTATION_ENABLED=${testEnv.PASEO_DICTATION_ENABLED} PASEO_VOICE_MODE_ENABLED=${testEnv.PASEO_VOICE_MODE_ENABLED} npx paseo daemon status --home ${paseoHome} --json`.nothrow();
   if (result.exitCode !== 0) {
-    return { localDaemon: null, pid: null };
+    return { localDaemon: null, pid: null, workerPid: null };
   }
 
   try {
-    const parsed = JSON.parse(result.stdout) as { localDaemon?: unknown; pid?: unknown };
+    const parsed = JSON.parse(result.stdout) as {
+      localDaemon?: unknown;
+      pid?: unknown;
+      workerPid?: unknown;
+    };
     const localDaemon = typeof parsed.localDaemon === "string" ? parsed.localDaemon : null;
     const pid =
       typeof parsed.pid === "number" && Number.isInteger(parsed.pid) && parsed.pid > 0
         ? parsed.pid
         : null;
-    return { localDaemon, pid };
+    const workerPid =
+      typeof parsed.workerPid === "number" &&
+      Number.isInteger(parsed.workerPid) &&
+      parsed.workerPid > 0
+        ? parsed.workerPid
+        : null;
+    return { localDaemon, pid, workerPid };
   } catch {
-    return { localDaemon: null, pid: null };
+    return { localDaemon: null, pid: null, workerPid: null };
   }
-}
-
-async function readCapturedSupervisorLogs(paseoHome: string, recentLogs: string): Promise<string> {
-  const durableLogs = await readFile(join(paseoHome, "daemon.log"), "utf8").catch(() => "");
-  return `${recentLogs}\n${durableLogs}`;
 }
 
 async function waitFor(
@@ -146,7 +132,11 @@ try {
     async () => {
       const status = await readDaemonStatus(paseoHome);
       return (
-        status.localDaemon === "running" && status.pid !== null && isProcessRunning(status.pid)
+        status.localDaemon === "running" &&
+        status.pid !== null &&
+        isProcessRunning(status.pid) &&
+        status.workerPid !== null &&
+        isProcessRunning(status.workerPid)
       );
     },
     120000,
@@ -155,6 +145,7 @@ try {
 
   const statusBeforeStop = await readDaemonStatus(paseoHome);
   const daemonPid = statusBeforeStop.pid;
+  const workerPid = statusBeforeStop.workerPid;
   assert.strictEqual(
     statusBeforeStop.localDaemon,
     "running",
@@ -162,12 +153,12 @@ try {
   );
   assert(daemonPid !== null, "daemon pid should exist once daemon starts");
   assert(isProcessRunning(daemonPid), "daemon process should be running");
-  const pidLockBeforeStop = await readPidLockState(paseoHome);
-  assert.strictEqual(pidLockBeforeStop.pid, daemonPid, "pid lock should match status pid");
+  assert(workerPid !== null, "worker pid should exist once daemon starts");
+  assert(isProcessRunning(workerPid), "worker process should be running");
   assert.strictEqual(
     daemonPid,
     supervisorProcess.pid,
-    "pid lock pid should be the supervisor-entrypoint process",
+    "status pid should be the supervisor-entrypoint process",
   );
   console.log(`✓ dev daemon started with daemon pid ${daemonPid}\n`);
 
@@ -187,23 +178,16 @@ try {
     "daemon status did not transition to stopped after stop",
   );
 
-  if (supervisorProcess.pid) {
-    await waitFor(
-      () => !isProcessRunning(supervisorProcess!.pid ?? -1),
-      15000,
-      "supervisor-entrypoint process remained running after stop",
-    );
-  }
+  await waitFor(
+    () => !isProcessRunning(daemonPid) && !isProcessRunning(workerPid),
+    15000,
+    "supervisor or worker process remained running after stop",
+  );
 
   await sleep(1000);
 
-  const pidAfterStop = await readPidLockState(paseoHome);
-  const respawned = pidAfterStop.pid !== null && isProcessRunning(pidAfterStop.pid);
-  assert.strictEqual(
-    respawned,
-    false,
-    `daemon respawned after stop (pid: ${pidAfterStop.pid ?? "unknown"})`,
-  );
+  assert.strictEqual(isProcessRunning(daemonPid), false, "supervisor should remain stopped");
+  assert.strictEqual(isProcessRunning(workerPid), false, "worker should remain stopped");
 
   const statusAfterStop = await readDaemonStatus(paseoHome);
   assert.strictEqual(
@@ -211,26 +195,10 @@ try {
     "stopped",
     "daemon should remain stopped after stop command",
   );
-  const capturedSupervisorLogs = await readCapturedSupervisorLogs(paseoHome, recentSupervisorLogs);
-  assert(
-    process.platform === "win32"
-      ? capturedSupervisorLogs.includes('"reason":"client_shutdown_rpc"')
-      : capturedSupervisorLogs.includes("supervisor_received_SIGTERM"),
-    `stop should log lifecycle shutdown reason from daemon worker, logs:\n${capturedSupervisorLogs}`,
-  );
-  assert(
-    capturedSupervisorLogs.includes('"msg":"Supervisor requesting graceful worker shutdown"'),
-    `stop should log the graceful worker shutdown request, logs:\n${capturedSupervisorLogs}`,
-  );
-  assert(
-    capturedSupervisorLogs.includes("Server closed"),
-    `stop should run daemon cleanup before the worker exits, logs:\n${capturedSupervisorLogs}`,
-  );
-  assert(
-    !capturedSupervisorLogs.includes("cli_shutdown"),
-    `supervisor logs should not route shutdown by reason string:\n${capturedSupervisorLogs}`,
-  );
   console.log("✓ stop leaves supervised daemon stopped (no respawn)\n");
+} catch (error) {
+  console.error(recentSupervisorLogs);
+  throw error;
 } finally {
   if (supervisorProcess?.pid && isProcessRunning(supervisorProcess.pid)) {
     supervisorProcess.kill("SIGTERM");
@@ -245,11 +213,6 @@ try {
 
   await $`PASEO_HOME=${paseoHome} PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD=${testEnv.PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD} PASEO_DICTATION_ENABLED=${testEnv.PASEO_DICTATION_ENABLED} PASEO_VOICE_MODE_ENABLED=${testEnv.PASEO_VOICE_MODE_ENABLED} npx paseo daemon stop --home ${paseoHome} --force`.nothrow();
   await rm(paseoHome, { recursive: true, force: true });
-}
-
-if (recentSupervisorLogs.trim().length === 0) {
-  // Keep output stable while still surfacing that logs were captured when needed.
-  console.log("(no supervisor logs captured)");
 }
 
 console.log("=== Supervisor stop regression test passed ===");

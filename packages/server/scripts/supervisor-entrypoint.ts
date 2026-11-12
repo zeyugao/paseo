@@ -10,12 +10,15 @@ import {
 } from "../src/server/pid-lock.js";
 import { resolvePaseoHome } from "../src/server/paseo-home.js";
 import { daemonLogPath } from "../src/server/daemon-instance.js";
-import { releaseDaemonInstanceForExitedWorker } from "../src/server/daemon-instance-registry.js";
+import {
+  getDaemonInstancePath,
+  releaseDaemonInstanceForExitedWorker,
+} from "../src/server/daemon-instance-registry.js";
 import { PRIVATE_FILE_MODE } from "../src/server/private-files.js";
 import { loadPersistedConfig } from "../src/server/persisted-config.js";
 import { reapTerminalWorkers } from "../src/terminal/terminal-worker-reaper.js";
 import { terminalWorkerHome } from "../src/terminal/terminal-worker-record.js";
-import { readServerId } from "../src/server/server-id.js";
+import { getOrCreateServerId } from "../src/server/server-id.js";
 import { runSupervisor } from "./supervisor.js";
 import { resolveSupervisorLogFile } from "./supervisor-log-config.js";
 
@@ -145,25 +148,27 @@ async function main(): Promise<void> {
   const paseoHome = resolvePaseoHome(workerEnv);
   const persistedConfig = loadPersistedConfig(paseoHome);
   const supervisorLogFile = resolveSupervisorLogFile(paseoHome, persistedConfig, workerEnv);
-  const selectedServerId = readServerId(paseoHome, workerEnv);
-
-  let ownsPidLock: boolean;
+  const selectedServerId = getOrCreateServerId(paseoHome, { env: workerEnv });
+  workerEnv.PASEO_SERVER_ID = selectedServerId;
+  workerEnv.PASEO_LOG_FILE_PATH = supervisorLogFile.path;
+  const pidLockHome = path.dirname(getDaemonInstancePath(paseoHome, selectedServerId));
   try {
-    ownsPidLock = await acquirePidLock(paseoHome, null, {
+    const ownsPidLock = await acquirePidLock(pidLockHome, null, {
       ownerPid: process.pid,
     });
+    if (!ownsPidLock) {
+      throw new PidLockError(
+        `Another Paseo daemon is already running for serverId ${selectedServerId}`,
+      );
+    }
   } catch (error) {
     if (error instanceof PidLockError) {
       failStartup(error.message, error.message);
     }
     throw error;
   }
-  workerEnv.PASEO_PID_LOCK_OWNER = ownsPidLock ? "1" : "0";
-  if (!ownsPidLock) {
-    process.stderr.write(
-      "Another daemon owns paseo.pid; continuing without CLI discovery ownership\n",
-    );
-  }
+  // Credentials and discovery are instance-scoped; this supervisor never owns the root pointer.
+  workerEnv.PASEO_PID_LOCK_OWNER = "0";
 
   let lockReleased = false;
   let requestSupervisorShutdown: ((reason: string) => void) | null = null;
@@ -173,23 +178,19 @@ async function main(): Promise<void> {
     },
     requestShutdown: (reason) => requestSupervisorShutdown?.(reason),
   });
-  const stopLockHeartbeat = ownsPidLock
-    ? startPidLockHeartbeat(paseoHome, {
-        ownerPid: process.pid,
-        ...heartbeatCallbacks,
-      })
-    : () => {};
+  const stopLockHeartbeat = startPidLockHeartbeat(pidLockHome, {
+    ownerPid: process.pid,
+    ...heartbeatCallbacks,
+  });
   const releaseLock = async (): Promise<void> => {
     if (lockReleased) {
       return;
     }
     lockReleased = true;
     stopLockHeartbeat();
-    if (ownsPidLock) {
-      await releasePidLock(paseoHome, {
-        ownerPid: process.pid,
-      });
-    }
+    await releasePidLock(pidLockHome, {
+      ownerPid: process.pid,
+    });
   };
 
   // Keep the selected/ready identity after worker exit clears the discovery pointer, including
@@ -221,17 +222,13 @@ async function main(): Promise<void> {
     logFile: supervisorLogFile,
     onWorkerReady: async ({ listen, serverId }) => {
       terminalServerId = serverId;
-      if (ownsPidLock) {
-        await updatePidLock(paseoHome, { listen, serverId }, { ownerPid: process.pid });
-      }
+      await updatePidLock(pidLockHome, { listen, serverId }, { ownerPid: process.pid });
     },
     onWorkerExit: async ({ pid, serverId }) => {
       if (pid !== null && serverId !== null) {
         await releaseDaemonInstanceForExitedWorker(paseoHome, serverId, pid);
       }
-      if (ownsPidLock) {
-        await updatePidLock(paseoHome, { listen: null, serverId: null }, { ownerPid: process.pid });
-      }
+      await updatePidLock(pidLockHome, { listen: null, serverId: null }, { ownerPid: process.pid });
     },
     onSupervisorExit: releaseLock,
     cleanupTerminals: async (log) => {

@@ -205,20 +205,6 @@ function reserveLocalTcpPort() {
   });
 }
 
-async function waitForFile(filePath, label) {
-  const deadline = Date.now() + SMOKE_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(filePath)) {
-      const contents = fs.readFileSync(filePath, "utf8");
-      if (contents.trim().length > 0) {
-        return contents;
-      }
-    }
-    await delay(250);
-  }
-  throw new Error(`Timed out waiting for ${label}: ${filePath}`);
-}
-
 async function waitForChildPids(parentPid) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
@@ -642,7 +628,6 @@ async function smokeCliShim({ appPath, env }) {
 
 async function smokeColdCliDaemonStart({ appPath }) {
   const home = createTempDir("paseo-smoke-cli-daemon-home-");
-  const pidPath = path.join(home, "paseo.pid");
   const port = await reserveLocalTcpPort();
   const listen = `127.0.0.1:${port}`;
   const env = createDefaultDaemonEnv({ HOME: home, USERPROFILE: home });
@@ -657,9 +642,14 @@ async function smokeColdCliDaemonStart({ appPath }) {
       label: "Bundled CLI shim cold daemon start",
     });
 
-    const pidInfo = JSON.parse(await waitForFile(pidPath, "cold CLI daemon pid file"));
+    const pidInfo = await runCliShimJsonCommand({
+      appPath,
+      env,
+      args: ["daemon", "status", "--home", home],
+      label: "Bundled CLI shim cold daemon status",
+    });
     if (!pidInfo || typeof pidInfo.pid !== "number") {
-      throw new Error(`Cold CLI daemon wrote invalid pid file: ${JSON.stringify(pidInfo)}`);
+      throw new Error(`Cold CLI daemon status reported no pid: ${JSON.stringify(pidInfo)}`);
     }
 
     if (process.platform === "darwin") {
@@ -678,16 +668,14 @@ async function smokeColdCliDaemonStart({ appPath }) {
       }
     }
   } finally {
-    if (fs.existsSync(pidPath)) {
-      await runCliShimCommand({
-        appPath,
-        env,
-        args: ["daemon", "stop", "--home", home, "--force"],
-        label: "Bundled CLI shim cold daemon stop",
-      }).catch((error) => {
-        console.warn(`Packaged desktop smoke: failed to stop cold CLI daemon: ${error}`);
-      });
-    }
+    await runCliShimCommand({
+      appPath,
+      env,
+      args: ["daemon", "stop", "--home", home, "--force"],
+      label: "Bundled CLI shim cold daemon stop",
+    }).catch((error) => {
+      console.warn(`Packaged desktop smoke: failed to stop cold CLI daemon: ${error}`);
+    });
     await removeTempDir(home);
   }
 }

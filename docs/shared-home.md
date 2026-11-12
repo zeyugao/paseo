@@ -81,9 +81,14 @@ can reclaim a claim stale for over an hour; the original owner can still renew a
 unchanged claim if it acquires the lock first. Once a different run takes over, the old run
 cannot renew that claim or overwrite the replacement's schedule state.
 
-Keep claim renewal independent of agent execution and schedule scans. Periodic work must
-skip overlapping passes rather than queue missed timer callbacks: slow shared storage
+A blocked schedule must not stop admission or lease renewal for another schedule. Coalesce
+overlapping work per schedule rather than queue missed timer callbacks: slow shared storage
 must not turn a renewal timer into an unbounded queue of lock helpers.
+
+Execution claims use `schedules/{scheduleId}.claim.lock`. Stop every daemon sharing a home
+before upgrading from the old directory-wide `schedules/.claims.lock`: the two lock schemes
+do not coordinate. Start only upgraded daemons against that home; do not perform a rolling
+mixed-version cutover. Lock files remain after release and must not be deleted while daemons run.
 
 Cross-process locks remain necessary even with local admission limits. An acquisition
 timeout cancels waiting, not an action already modifying shared state. A helper that has

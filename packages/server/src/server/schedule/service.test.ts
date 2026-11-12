@@ -5513,6 +5513,165 @@ describe("ScheduleService", () => {
     await service.stop();
   });
 
+  test("a blocked schedule claim does not delay other due schedules or later dispatch passes", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const entered = createGate();
+    const release = createGate();
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async (schedule) => ({ agentId: null, output: schedule.prompt }),
+    });
+    const target = {
+      type: "new-agent" as const,
+      config: { provider: "claude" as const, cwd: tempDir },
+    };
+    let held: Promise<void> | null = null;
+    let firstTick: Promise<void> | null = null;
+    try {
+      await service.start();
+      const a = await service.create({
+        prompt: "A",
+        cadence: { type: "every", everyMs: 60_000 },
+        target,
+      });
+      now = new Date(now.getTime() + 1);
+      const b = await service.create({
+        prompt: "B",
+        cadence: { type: "every", everyMs: 60_000 },
+        target,
+      });
+      held = withReclaimLock(join(tempDir, "schedules", `${a.id}.claim.lock`), async () => {
+        entered.open();
+        await release.promise;
+      });
+      await entered.promise;
+      firstTick = service.tick();
+      await expect
+        .poll(async () => (await service.inspect(b.id)).runs[0]?.status)
+        .toBe("succeeded");
+      expect((await service.inspect(a.id)).runs).toEqual([]);
+
+      now = new Date(now.getTime() + 1);
+      const c = await service.create({
+        prompt: "C",
+        cadence: { type: "every", everyMs: 60_000 },
+        target,
+      });
+      await service.tick();
+      expect((await service.inspect(c.id)).runs[0]).toMatchObject({
+        status: "succeeded",
+        output: "C",
+      });
+      expect((await service.inspect(a.id)).runs).toEqual([]);
+
+      release.open();
+      await held;
+      await firstTick;
+      expect((await service.inspect(a.id)).runs[0]).toMatchObject({
+        status: "succeeded",
+        output: "A",
+      });
+      expect((await service.inspect(b.id)).runs.map((run) => run.output)).toEqual(["B"]);
+    } finally {
+      release.open();
+      await held;
+      await firstTick;
+      await service.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  test("a blocked claim renewal does not delay another schedule's renewals or completion", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const aStarted = createGate();
+    const bStarted = createGate();
+    const aFinish = createGate();
+    const bFinish = createGate();
+    const lockEntered = createGate();
+    const lockRelease = createGate();
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      serverId: "srv-local",
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async (schedule) => {
+        const started = schedule.prompt === "A" ? aStarted : bStarted;
+        const finish = schedule.prompt === "A" ? aFinish : bFinish;
+        started.open();
+        await finish.promise;
+        return { agentId: null, output: schedule.prompt };
+      },
+    });
+    const target = {
+      type: "new-agent" as const,
+      config: { provider: "claude" as const, cwd: tempDir },
+    };
+    let aTask: Promise<StoredSchedule> | null = null;
+    let bTask: Promise<StoredSchedule> | null = null;
+    let held: Promise<void> | null = null;
+    try {
+      await service.start();
+      const a = await service.create({
+        prompt: "A",
+        cadence: { type: "every", everyMs: 60_000 },
+        target,
+        runOnCreate: false,
+      });
+      const b = await service.create({
+        prompt: "B",
+        cadence: { type: "every", everyMs: 60_000 },
+        target,
+        runOnCreate: false,
+      });
+      aTask = service.runOnce(a.id);
+      bTask = service.runOnce(b.id);
+      await Promise.all([aStarted.promise, bStarted.promise]);
+      const aClaim = join(tempDir, "schedules", `${a.id}.claim`);
+      const bClaim = join(tempDir, "schedules", `${b.id}.claim`);
+      const bLock = join(tempDir, "schedules", `${b.id}.claim.lock`);
+      const originalMtime = now.getTime();
+      await Promise.all([utimes(aClaim, now, now), utimes(bClaim, now, now)]);
+      held = withReclaimLock(join(tempDir, "schedules", `${a.id}.claim.lock`), async () => {
+        lockEntered.open();
+        await lockRelease.promise;
+      });
+      await lockEntered.promise;
+
+      for (let pass = 0; pass < 2; pass += 1) {
+        now = new Date(now.getTime() + 60_000);
+        vi.advanceTimersByTime(30_000);
+        await expect.poll(async () => (await stat(bClaim)).mtimeMs).toBe(now.getTime());
+        await withReclaimLock(bLock, async () => undefined);
+        expect((await stat(aClaim)).mtimeMs).toBe(originalMtime);
+      }
+      bFinish.open();
+      await bTask;
+      expect((await service.inspect(b.id)).runs[0]).toMatchObject({
+        status: "succeeded",
+        output: "B",
+      });
+      await expect(stat(bClaim)).rejects.toMatchObject({ code: "ENOENT" });
+      expect((await service.inspect(a.id)).runs[0].status).toBe("running");
+    } finally {
+      lockRelease.open();
+      aFinish.open();
+      bFinish.open();
+      await held;
+      await Promise.all([aTask, bTask]);
+      await service.stop();
+      vi.useRealTimers();
+    }
+  });
+
   test("does not lock future schedules and cancels pending manual admission on stop", async () => {
     const entered = createGate();
     const release = createGate();
@@ -5536,10 +5695,13 @@ describe("ScheduleService", () => {
       runOnCreate: false,
       target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
     });
-    const held = withReclaimLock(join(tempDir, "schedules", ".claims.lock"), async () => {
-      entered.open();
-      await release.promise;
-    });
+    const held = withReclaimLock(
+      join(tempDir, "schedules", `${schedule.id}.claim.lock`),
+      async () => {
+        entered.open();
+        await release.promise;
+      },
+    );
     let tick: Promise<void> | null = null;
     try {
       await entered.promise;

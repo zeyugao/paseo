@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useStore } from "zustand";
 import { Gesture } from "react-native-gesture-handler";
-import {
-  runOnJS,
-  useAnimatedReaction,
-  useAnimatedStyle,
-  useSharedValue,
-} from "react-native-reanimated";
+import { runOnJS, useAnimatedReaction, useSharedValue } from "react-native-reanimated";
 import { scheduleOnRN } from "react-native-worklets";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SidebarResizeHandle } from "@/components/sidebar-resize-handle";
@@ -21,7 +17,10 @@ import {
   resolveExplorerSidebarWidth,
   type ExplorerSidebarResize,
 } from "@/components/explorer-sidebar-layout";
-import { usePublishExplorerResizeWidth } from "@/window-layout/sidebar-resize-geometry";
+import {
+  usePublishExplorerResizeWidth,
+  useSidebarResizeGeometry,
+} from "@/window-layout/sidebar-resize-geometry";
 import type { ExplorerGeometryInput, ExplorerGeometry } from "./geometry-types";
 export function useExplorerGeometry({
   workspaceKey,
@@ -34,6 +33,16 @@ export function useExplorerGeometry({
 }: ExplorerGeometryInput): ExplorerGeometry {
   const insets = useSafeAreaInsets();
   const publishExplorerResizeWidth = usePublishExplorerResizeWidth(workspaceKey, containerWidth);
+  const { store, viewportWidth } = useSidebarResizeGeometry();
+  const liveWidth = useStore(store, (state) =>
+    resizeEnabled &&
+    !overlay &&
+    state.explorer?.viewportWidth === viewportWidth &&
+    state.explorer.workspaceKey === workspaceKey &&
+    state.explorer.containerWidth === containerWidth
+      ? state.explorer.width
+      : null,
+  );
   const resizePublication = useMemo(
     () => ({
       active: false,
@@ -170,25 +179,18 @@ export function useExplorerGeometry({
       workspaceKey,
     ],
   );
-  // Keep visibility with width on the UI thread: React can reveal the dock before a new
-  // animated width reaches Fabric, exposing the hidden dock's previous clamped width.
+  // Header presentation, corner ownership, and the dock frame must share one React commit.
+  // Reanimated still owns the gesture; both consumers read its published resize width.
   // Overlays stay laid out while hidden so native scroll ranges survive folding.
-  const animatedWidthStyle = useAnimatedStyle(
+  const frameStyle = useMemo(
     () => ({
-      display: overlay || isOpen ? "flex" : "none",
-      width: resolveExplorerSidebarFrameWidth({
-        width,
-        containerWidth,
-        overlay,
-        resizeEnabled,
-        resize: resizeWorkspaceKey.value === workspaceKey ? resize.value : null,
-        resizeWidth: resizeWidth.value,
-      }),
+      display: overlay || isOpen ? ("flex" as const) : ("none" as const),
+      width: overlay ? containerWidth : (liveWidth ?? width),
     }),
-    [containerWidth, overlay, isOpen, resizeEnabled, width, workspaceKey],
+    [containerWidth, overlay, isOpen, liveWidth, width],
   );
   return {
-    frameStyle: animatedWidthStyle,
+    frameStyle,
     panelStyle: {
       paddingLeft: overlay ? insets.left : 0,
       paddingRight: overlay ? insets.right : 0,

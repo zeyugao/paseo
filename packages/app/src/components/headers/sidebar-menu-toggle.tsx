@@ -17,6 +17,7 @@ import {
   mutedIconColorMapping,
 } from "@/components/ui/icon-button-chrome";
 import { bySizing } from "@/components/ui/control-geometry";
+import { resolveSidebarMenuTogglePresentation } from "@/components/desktop-sidebar-layout";
 
 const ThemedPanelLeft = withUnistyles(PanelLeft);
 
@@ -125,11 +126,14 @@ export function SidebarMenuToggle({ style, ...props }: SidebarMenuToggleProps = 
     [resolvedStyle],
   );
 
-  if (!isMobile && !ownsTopLeft) {
-    return null;
-  }
+  const presentation = resolveSidebarMenuTogglePresentation({
+    isCompact: isMobile,
+    ownsTopLeft,
+    hasTopLeftWindowControls,
+  });
+  if (presentation === "hidden") return null;
 
-  if (!isMobile && hasTopLeftWindowControls) {
+  if (presentation === "placeholder") {
     return (
       <View pointerEvents="none" style={placeholderStyle}>
         <View style={styles.desktopMenuIconSpace} />

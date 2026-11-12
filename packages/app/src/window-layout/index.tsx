@@ -1,6 +1,10 @@
 import type { ReactNode } from "react";
 
-export { useWindowLayout, useWindowLayoutHasTopEdgeControls } from "./context";
+export {
+  useWindowLayout,
+  useWindowLayoutHasTopChrome,
+  useWindowLayoutHasTopEdgeControls,
+} from "./context";
 export { WindowLayoutActions, WindowLayoutActionsHost } from "./actions";
 export { WindowLayoutSurface, WindowLayoutDivisionGap } from "./surface";
 export { WindowLayoutTopInset } from "./top-inset";
@@ -14,4 +18,8 @@ export type { DesktopDivisionLayout, TopBand, WindowLayout, WindowLayoutRect } f
 
 export function WindowLayoutProvider({ children }: { children: ReactNode }) {
   return children;
+}
+
+export function WindowLayoutStatusBar(_props: { hidden: boolean }) {
+  return null;
 }

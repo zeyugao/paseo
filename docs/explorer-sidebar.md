@@ -28,20 +28,26 @@ can remount. Native retained content stays live, while web chat uses its existin
 
 On iOS, read window bounds, safe-area insets, and reserved regions from the same native snapshot
 through window-layout and `useAppWindowSize`. Sample after UIKit's layout transaction: a main-queue
-callback can still see new bounds with the previous safe area. Use `WindowLayoutTopInset` for the
-top clearance of headers and sidebars. Its native spacer reads the nearest layout root and updates
-Yoga without waiting for the workspace's JS render; applying `insets.top` in React can leave the old
-padding visible during rotation. Modals outside that root use their own context inset. Changes to
-the native probe or spacer require a client rebuild; a Metro reload cannot apply them.
+callback can still see new bounds with the previous safe area. Keep shell backgrounds, dividers,
+and resize boundaries at the window edge; only controls consume top and corner clearance. Use
+`WindowLayoutTopInset` for the top clearance of headers and sidebars. Its native spacer reads the
+nearest layout root and updates Yoga without waiting for the workspace's JS render; applying
+`insets.top` in React can leave the old padding visible during rotation. Modals outside that root
+use their own context inset. Changes to the native probe or spacer require a client rebuild;
+a Metro reload cannot apply them.
 
 When iOS places workspace controls in the system top band, opt chat and file scrollers out of
-UIKit's status-bar tap-to-top gesture. Use window-layout context to identify that ownership;
-safe-area insets alone miss Duo's reserved vertical bar. Keep standard status-bar tap behavior
-when the system owns the top edge.
+UIKit's status-bar tap-to-top gesture, including while the status bar is hidden. Hiding removes
+the inset, not UIKit's gesture. Use window-layout context to identify that ownership; safe-area
+insets alone miss Duo's reserved vertical bar. Keep standard status-bar tap behavior when the
+system owns the top edge.
 
 The shared sidebar toggle reserves extra rounded-corner clearance on touch layouts only while
 navigation is collapsed. When navigation is open, use the ordinary leading inset so workspace and
 other page headers stay aligned; pointer layouts keep their existing inset in both states.
+Keep the navigation toggle in the content header when there are no leading system window controls,
+even when a docked sidebar owns the physical corner. Corner ownership controls clearance, not access
+to navigation.
 
 ## Sheets
 
@@ -99,10 +105,12 @@ The shell is outside the workspace split canvas so it divides the full workspace
 never read or modify that width.
 
 Budget workspace headers and the Explorer dock against the same target allocation, including live
-navigation and Explorer resize widths. A retained native stack can report its previous docked frame
-for one layout pass; using that measurement makes Explorer open at its old clamped width and then
-shift again. Native dock visibility and animated width must reach Fabric in the same UI-thread
-update; a React-only reveal can expose the previous width first. Keep the top-clearance spacer,
+navigation and Explorer resize widths. Commit dock visibility and width with header presentation
+and corner ownership in React. A separate UI-thread reveal can trail the header commit, exposing
+a full-width header between the requested and rendered dock states. Gestures publish live resize
+width through the shared geometry store so the dock frame and header budget consume the same value.
+A retained native stack can report its previous docked frame for one layout pass; using that
+measurement makes Explorer open at its old clamped width and then shift again. Keep the top-clearance spacer,
 tab track presentations, label measurements, layout snapshot, and + width above the header branches.
 Recreating the native spacer when Explorer narrows the workspace can expose a zero-height first
 layout before its native height reaches Yoga. Header variants under that owner must not add another
@@ -126,8 +134,11 @@ Explorer uses the shared workspace tab row and ordinary tab context menus. Files
 hide their close buttons through the panel manifest; close them from the tab context menu.
 Other tabs reveal the close control on hover. Compact layouts show no inline close on any tab,
 since a narrow X beside the label is easy to hit by accident; the long-press menu closes it.
-Compact and embedded landscape rails keep their natural width and scroll as soon as they overflow.
-Other pointer rails shrink tabs toward the clickable minimum first. A rail that scrolls never truncates.
+Compact, native Explorer, and embedded landscape rails keep their natural width and scroll as soon
+as they overflow. Other pointer rails shrink tabs toward the clickable minimum first. A rail that
+scrolls never truncates. Native Explorer keeps + in one slot outside a content-sized scroller that
+Yoga shrinks to the available rail width. Viewport measurements may update scroll state, but must
+not change chip widths or move + between the scroller and toolbar during a status transition.
 On Duo's landscape bar layout, the title and tabs share one row. The boxed picker depends on the
 available track width, not the tab count: a few natural-width tabs can stay inline below the usual
 scrolling-rail budget.
@@ -143,6 +154,25 @@ Cmd+E shows or hides Explorer without changing its selected view. All layouts us
 workspace tabs, launcher, and panel host. Below 600 points the shell is the swipeable Explorer
 overlay; at 600 points and above it reserves width beside the workspace. Native docking keeps its
 touch resize handle. Full workspace splits remain a separate web-only capability.
+
+On iOS, reuse the window's top edge only when UIKit leaves room for a complete control row beside
+occlusions on one physical corner edge, outside any full-width status bar and without a native
+vertical bar. This is a geometry capability, not a device or orientation check. An eligible open
+Explorer dock hides the status bar through its scene root; closing it or leaving the active workspace
+restores visibility. Compact overlays and ordinary safe-area layouts do not request hiding.
+The Expo development overlay must follow the same scene preference.
+
+UIKit drops a hidden status bar's occlusion, even from inactive-region queries. Retain its measured
+edge extent for capability and immediate restoration, scoped to the scene and screen mode; rebuild
+corner clearance for current bounds. Hidden-state controls reserve only the corners, not the vanished
+status region. Release that clearance only after the native hide animation completes, not when React
+requests hiding or UIKit first collapses the inset. Ignore superseded animation completions during
+rapid toggles. Do not discard capability during the native/JS dimension handoff, or the dock can
+alternate between hiding and showing the bar. Hide over 280 ms unless Reduce Motion is enabled;
+restore immediately to match the dock's one-render close. After native hide completion, release
+Explorer's inline trailing clearance over 180 ms on the UI thread; the rail and its controls share
+that one animated inset. Apply larger obstructions immediately and cancel release when the retained
+panel becomes inactive. Reduce Motion releases immediately. Keep the dock frame React-owned.
 
 Explorer keeps its preferred width and reserves at least 240 points, leaving 360 for the workspace.
 App navigation yields when it cannot share that allocation without narrowing Explorer. Navigation

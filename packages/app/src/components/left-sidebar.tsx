@@ -87,7 +87,11 @@ import { PluginSidebarItem } from "@/plugins/sidebar-items";
 import { builtinSidebarNavLabelKey } from "@/sidebar-nav/model";
 import { useSidebarNavItems } from "@/sidebar-nav/use-sidebar-nav-items";
 import { usePanelStore } from "@/stores/panel-store";
-import { useOwnsWindowChromeCorner, WindowChromeSafeArea } from "@/utils/desktop-window";
+import {
+  useHasOwnedWindowChromeObstruction,
+  useWindowChromeInlinePadding,
+  WindowChromeSafeArea,
+} from "@/utils/desktop-window";
 import { useCloseAgentListGesture } from "@/mobile-panels/gestures";
 import { useLeftPanelWidth } from "@/mobile-panels/provider";
 import { MobilePanelOverlay } from "@/mobile-panels/presentation";
@@ -709,7 +713,8 @@ function DesktopSidebar({
   active,
   overlay,
 }: DesktopSidebarProps) {
-  const ownsTopLeft = useOwnsWindowChromeCorner("top-left");
+  const ownsTopLeft = useHasOwnedWindowChromeObstruction("top-left");
+  const chromePadding = useWindowChromeInlinePadding();
   const hasActiveHostFilter = useSidebarViewStore((state) => state.hostFilters.length > 0);
   const setSidebarWidth = usePanelStore((state) => state.setSidebarWidth);
   const { width: windowWidth, height: windowHeight } = useAppWindowSize();
@@ -852,7 +857,7 @@ function DesktopSidebar({
       <Animated.View style={desktopSidebarStyle}>
         <View style={desktopSidebarBorderStyle}>
           <WindowLayoutTopInset />
-          <View style={styles.sidebarDragArea}>
+          <View style={[styles.sidebarDragArea, chromePadding]}>
             {ownsTopLeft || DEV_BUILD_LABEL ? (
               <View style={styles.desktopChromeRow}>
                 <TitlebarDragRegion />

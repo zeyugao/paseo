@@ -40,6 +40,7 @@ interface WindowChromeSafeAreaInput {
   obstruction: WindowChromeObstruction;
   corners: WindowChromeCorners;
   placement: WindowChromeSafeAreaPlacement;
+  leadingInset?: number;
 }
 
 const EMPTY_OBSTRUCTION: WindowChromeObstruction = { topLeft: null, topRight: null };
@@ -159,7 +160,10 @@ export function resolveWindowChromeSafeArea(
   if (input.placement === "below") {
     return { height: Math.max(topLeft?.height ?? 0, topRight?.height ?? 0) };
   }
-  return { paddingLeft: topLeft?.width ?? 0, paddingRight: topRight?.width ?? 0 };
+  return {
+    paddingLeft: ownsTopLeft ? Math.max(topLeft?.width ?? 0, input.leadingInset ?? 0) : 0,
+    paddingRight: topRight?.width ?? 0,
+  };
 }
 
 export function WindowChromeProvider({ children }: { children: ReactNode }) {
@@ -332,9 +336,10 @@ export function useHasOwnedWindowChromeObstruction(corner: WindowChromeCorner): 
 export function useWindowChromeInlinePadding(): WindowChromeInlinePadding {
   const obstruction = useContext(WindowChromeContext);
   const corners = useContext(WindowChromeCornersContext);
+  const leadingInset = useTopBand()?.leadingInset;
   return useMemo(
-    () => resolveWindowChromeSafeArea({ obstruction, corners, placement: "inline" }),
-    [obstruction, corners],
+    () => resolveWindowChromeSafeArea({ obstruction, corners, placement: "inline", leadingInset }),
+    [obstruction, corners, leadingInset],
   );
 }
 
@@ -351,8 +356,9 @@ export function WindowChromeSafeArea({
 }: WindowChromeSafeAreaProps) {
   const obstruction = useContext(WindowChromeContext);
   const corners = useContext(WindowChromeCornersContext);
+  const leadingInset = useTopBand()?.leadingInset;
   const safeAreaStyle = useMemo(() => {
-    const resolved = resolveWindowChromeSafeArea({ obstruction, corners, placement });
+    const resolved = resolveWindowChromeSafeArea({ obstruction, corners, placement, leadingInset });
     if (placement === "below") return resolved;
     const paddingLeft = "paddingLeft" in resolved ? resolved.paddingLeft : 0;
     const paddingRight = "paddingRight" in resolved ? resolved.paddingRight : 0;
@@ -360,7 +366,7 @@ export function WindowChromeSafeArea({
       paddingLeft: paddingLeft + horizontalPadding,
       paddingRight: paddingRight + horizontalPadding,
     };
-  }, [corners, horizontalPadding, obstruction, placement]);
+  }, [corners, horizontalPadding, obstruction, placement, leadingInset]);
   const combinedStyle = useMemo(() => [style, safeAreaStyle], [safeAreaStyle, style]);
   return <View {...props} style={combinedStyle} />;
 }

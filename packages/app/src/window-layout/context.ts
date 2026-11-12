@@ -6,6 +6,7 @@ export const WindowLayoutContext = createContext<WindowLayout | null>(null);
 
 /** Published by `WindowLayoutProvider` beside the safe-area insets it derives from it. */
 export const TopBandContext = createContext<TopBand | null>(null);
+export const WindowLayoutStatusBarHiddenContext = createContext(false);
 
 export const WindowLayoutContentAllocationContext = createContext<{
   workspaceKey: string | null;
@@ -31,9 +32,15 @@ export function useTopBand(): TopBand | null {
   return useContext(TopBandContext);
 }
 
+/** Capability survives the native/JS dimension handoff and hidden status-bar occlusions. */
+export function useWindowLayoutHasTopChrome(): boolean {
+  return useContext(WindowLayoutContext)?.topChrome != null;
+}
+
 /** App controls in the system's top band must not trigger UIKit's status-bar tap gesture. */
 export function useWindowLayoutHasTopEdgeControls(): boolean {
   const layout = useWindowLayout();
   const topBand = useTopBand();
-  return topBand !== null || layout?.verticalBar != null;
+  const statusBarHidden = useContext(WindowLayoutStatusBarHiddenContext);
+  return statusBarHidden || topBand !== null || layout?.verticalBar != null;
 }

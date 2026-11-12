@@ -293,7 +293,6 @@ export interface ScheduleServiceOptions {
 export class ScheduleService {
   private readonly store: ScheduleStore;
   private readonly claimsDir: string;
-  private readonly claimsLockPath: string;
   private readonly serverId: string | undefined;
   private readonly logger: Logger;
   private readonly agentManager: ScheduleAgentManager;
@@ -318,7 +317,7 @@ export class ScheduleService {
   private tickTimer: NodeJS.Timeout | undefined;
   private renewalTimer: NodeJS.Timeout | undefined;
   private dispatchPass: Promise<Promise<void>[]> | null = null;
-  private renewalPass: Promise<void> | null = null;
+  private readonly claimRenewals = new Map<string, Promise<void>>();
   private startup: Promise<void> | null = null;
   private stopping: Promise<void> | null = null;
   private stopped = false;
@@ -330,7 +329,6 @@ export class ScheduleService {
   constructor(options: ScheduleServiceOptions) {
     this.logger = options.logger.child({ module: "schedule-service" });
     this.claimsDir = join(options.paseoHome, "schedules");
-    this.claimsLockPath = join(this.claimsDir, ".claims.lock");
     this.store = new ScheduleStore(this.claimsDir, this.logger);
     this.serverId = options.serverId;
     this.agentManager = options.agentManager;
@@ -345,11 +343,15 @@ export class ScheduleService {
     this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
   }
 
+  private claimLockPath(scheduleId: string): string {
+    return join(this.claimsDir, `${scheduleId}.claim.lock`);
+  }
+
   start(): Promise<void> {
     if (this.stopping) return this.stopping.then(() => this.start());
     if (
       this.stopped &&
-      (this.startup || this.tasks.size > 0 || this.dispatchPass || this.renewalPass)
+      (this.startup || this.tasks.size > 0 || this.dispatchPass || this.claimRenewals.size > 0)
     ) {
       return this.stop().then(() => this.start());
     }
@@ -410,7 +412,7 @@ export class ScheduleService {
     clearInterval(this.renewalTimer);
     this.renewalTimer = undefined;
     this.renewalAcquisition.abort();
-    await Promise.allSettled([this.renewalPass]);
+    await Promise.allSettled(this.claimRenewals.values());
     this.startup = null;
     this.stopping = null;
   }
@@ -418,7 +420,6 @@ export class ScheduleService {
   private ensureRenewalTimer(): void {
     if (this.renewalTimer || this.stopped) return;
     this.renewalTimer = setInterval(() => {
-      if (this.renewalPass) return;
       void this.beginRenewalPass().catch((error) => {
         this.logger.warn({ err: error }, "Failed to renew schedule claims");
       });
@@ -434,23 +435,27 @@ export class ScheduleService {
   private async reconcileScheduleOwnership(): Promise<void> {
     if (this.serverId === undefined) return;
     const schedules = await this.store.list();
-    for (const schedule of schedules) {
-      if (this.stopped) return;
-      await withReclaimLock(
-        this.claimsLockPath,
-        async () => {
-          if (this.stopped) return;
-          const claimStat = await stat(join(this.claimsDir, `${schedule.id}.claim`)).catch(
-            (error: NodeJS.ErrnoException) => {
-              if (error.code === "ENOENT") return null;
-              throw error;
-            },
-          );
-          if (!claimStat) await this.reconcileScheduleOwnershipFor(schedule.id);
-        },
-        { signal: this.acquisition.signal },
-      );
-    }
+    await Promise.all(
+      schedules.map((schedule) => this.trackTask(this.reconcileUnclaimedSchedule(schedule.id))),
+    );
+  }
+
+  private async reconcileUnclaimedSchedule(scheduleId: string): Promise<void> {
+    if (this.stopped) return;
+    await withReclaimLock(
+      this.claimLockPath(scheduleId),
+      async () => {
+        if (this.stopped) return;
+        const claimStat = await stat(join(this.claimsDir, `${scheduleId}.claim`)).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return null;
+            throw error;
+          },
+        );
+        if (!claimStat) await this.reconcileScheduleOwnershipFor(scheduleId);
+      },
+      { signal: this.acquisition.signal },
+    );
   }
 
   private async inferScheduleOwner(schedule: StoredSchedule): Promise<string | null> {
@@ -696,7 +701,7 @@ export class ScheduleService {
   }
 
   async delete(id: string): Promise<void> {
-    await withReclaimLock(this.claimsLockPath, async () => {
+    await withReclaimLock(this.claimLockPath(id), async () => {
       await this.store.delete(id, (schedule) => {
         if (schedule) this.assertOwnedByThisServer(schedule);
       });
@@ -760,12 +765,17 @@ export class ScheduleService {
     if (!reservation) {
       throw new ScheduleStateConflictError(`Schedule ${id} is already running`);
     }
-    await this.trackTask(this.runManualSchedule(id, reservation));
+    await this.trackTask(this.runReservedSchedule(id, reservation, "manual"));
     return this.inspect(id);
   }
 
-  private async runManualSchedule(id: string, reservation: ScheduleReservation): Promise<void> {
-    const tasks = await this.admitSchedule(id, reservation, "manual");
+  private async runReservedSchedule(
+    id: string,
+    reservation: ScheduleReservation,
+    kind: "manual" | "due",
+    expectedNextRunAt?: string,
+  ): Promise<void> {
+    const tasks = await this.admitSchedule(id, reservation, kind, expectedNextRunAt);
     await Promise.all(tasks);
   }
 
@@ -829,13 +839,13 @@ export class ScheduleService {
       if (!due && !shouldCompleteSchedule(schedule, now)) continue;
       const reservation = this.reserve(schedule.id);
       if (!reservation) continue;
-      const admitted = await this.admitSchedule(
-        schedule.id,
-        reservation,
-        "due",
-        schedule.nextRunAt,
+      const task = this.trackTask(
+        this.runReservedSchedule(schedule.id, reservation, "due", schedule.nextRunAt),
       );
-      tasks.push(...admitted);
+      void task.catch((error) => {
+        this.logger.error({ err: error, scheduleId: schedule.id }, "Scheduled run failed");
+      });
+      tasks.push(task);
     }
     return tasks;
   }
@@ -884,42 +894,46 @@ export class ScheduleService {
   }
 
   private beginRenewalPass(): Promise<void> {
-    if (this.renewalPass) return this.renewalPass;
-    const pass = this.renewRunningClaims();
-    this.renewalPass = pass;
-    void pass.then(
-      () => {
-        if (this.renewalPass === pass) this.renewalPass = null;
-        return;
-      },
-      () => {
-        if (this.renewalPass === pass) this.renewalPass = null;
-      },
-    );
-    return pass;
+    const pending: Promise<void>[] = [];
+    for (const [id, reservation] of this.runningClaims) {
+      const existing = this.claimRenewals.get(id);
+      if (existing) {
+        pending.push(existing);
+        continue;
+      }
+      const renewal = this.renewRunningClaim(id, reservation);
+      this.claimRenewals.set(id, renewal);
+      const clear = () => {
+        if (this.claimRenewals.get(id) === renewal) this.claimRenewals.delete(id);
+      };
+      void renewal.then(clear, clear);
+      pending.push(renewal);
+    }
+    return Promise.all(pending).then(() => undefined);
   }
 
-  private async renewRunningClaims(): Promise<void> {
-    if (this.runningClaims.size === 0) return;
-    await withReclaimLock(
-      this.claimsLockPath,
-      async () => {
-        for (const [id, reservation] of this.runningClaims) {
-          if (!(await this.ownsClaim(id, reservation))) continue;
+  private async renewRunningClaim(id: string, reservation: ScheduleReservation): Promise<void> {
+    try {
+      await withReclaimLock(
+        this.claimLockPath(id),
+        async () => {
+          if (!(await this.ownsClaim(id, reservation))) return;
           const claimPath = reservation.claimPath;
-          if (!claimPath) continue;
+          if (!claimPath) return;
           const now = this.now();
           try {
             // A stale lease with the same identity can still renew before takeover.
             await utimes(claimPath, now, now);
           } catch (error) {
             reservation.lost = true;
-            this.logger.warn({ err: error, claimPath }, "Failed to renew schedule claim");
+            throw error;
           }
-        }
-      },
-      { signal: this.renewalAcquisition.signal },
-    );
+        },
+        { signal: this.renewalAcquisition.signal },
+      );
+    } catch (error) {
+      this.logger.warn({ err: error, scheduleId: id }, "Failed to renew schedule claim");
+    }
   }
 
   private async ownsClaim(id: string, reservation: ScheduleReservation): Promise<boolean> {
@@ -955,7 +969,7 @@ export class ScheduleService {
   ): Promise<StoredSchedule | null> {
     if (this.startup) await this.startup;
     return withReclaimLock(
-      this.claimsLockPath,
+      this.claimLockPath(id),
       async () => {
         this.assertExecutionAllowed(id, reservation.runId);
         const schedule = await this.store.get(id);
@@ -1117,38 +1131,43 @@ export class ScheduleService {
   }
 
   private async sweepStaleScheduleClaims(): Promise<void> {
+    if (this.stopped) return;
+    const entries = await readdir(this.claimsDir, { withFileTypes: true });
+    const claims = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".claim"));
+    await Promise.all(
+      claims.map((entry) =>
+        this.trackTask(this.sweepStaleScheduleClaim(entry.name.slice(0, -".claim".length))),
+      ),
+    );
+  }
+
+  private async sweepStaleScheduleClaim(scheduleId: string): Promise<void> {
+    if (this.stopped) return;
     await withReclaimLock(
-      this.claimsLockPath,
+      this.claimLockPath(scheduleId),
       async () => {
         if (this.stopped) return;
-        const entries = await readdir(this.claimsDir, { withFileTypes: true });
+        const claimPath = join(this.claimsDir, `${scheduleId}.claim`);
+        const claimStat = await stat(claimPath).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
         const now = this.now();
-        const nowMs = now.getTime();
-        for (const entry of entries) {
-          if (this.stopped) return;
-          if (!entry.isFile() || !entry.name.endsWith(".claim")) continue;
-          const claimPath = join(this.claimsDir, entry.name);
-          const claimStat = await stat(claimPath).catch((error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return null;
-            throw error;
-          });
-          if (!claimStat || nowMs - claimStat.mtimeMs <= SCHEDULE_CLAIM_STALE_MS) continue;
-          const claim = await this.readScheduleClaim(claimPath);
-          const scheduleId = entry.name.slice(0, -".claim".length);
-          if (this.reservations.get(scheduleId)?.committed) continue;
-          try {
-            await this.failAbandonedRunningRuns(scheduleId, claim?.runId, now);
-          } catch (error) {
-            this.logger.warn(
-              { err: error, claimPath, scheduleId },
-              "Failed to fail an abandoned schedule run while sweeping a stale claim",
-            );
-            continue;
-          }
-          await unlink(claimPath).catch((error: NodeJS.ErrnoException) => {
-            if (error.code !== "ENOENT") throw error;
-          });
+        if (!claimStat || now.getTime() - claimStat.mtimeMs <= SCHEDULE_CLAIM_STALE_MS) return;
+        const claim = await this.readScheduleClaim(claimPath);
+        if (this.reservations.get(scheduleId)?.committed) return;
+        try {
+          await this.failAbandonedRunningRuns(scheduleId, claim?.runId, now);
+        } catch (error) {
+          this.logger.warn(
+            { err: error, claimPath, scheduleId },
+            "Failed to fail an abandoned schedule run while sweeping a stale claim",
+          );
+          return;
         }
+        await unlink(claimPath).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
       },
       { signal: this.acquisition.signal },
     );
@@ -1171,10 +1190,9 @@ export class ScheduleService {
 
   private async recoverInterruptedRuns(): Promise<void> {
     const schedules = await this.list();
-    for (const schedule of schedules) {
-      if (this.stopped) return;
-      await this.recoverInterruptedSchedule(schedule.id);
-    }
+    await Promise.all(
+      schedules.map((schedule) => this.trackTask(this.recoverInterruptedSchedule(schedule.id))),
+    );
   }
 
   private async recoverInterruptedSchedule(scheduleId: string): Promise<void> {
@@ -1185,7 +1203,7 @@ export class ScheduleService {
     }> = [];
     let shouldForceArchiveInterruptedWorkspace = false;
     await withReclaimLock(
-      this.claimsLockPath,
+      this.claimLockPath(scheduleId),
       async () => {
         if (this.stopped || this.reservations.get(scheduleId)?.committed) return;
         const now = this.now();
@@ -1325,9 +1343,6 @@ export class ScheduleService {
         return [];
       }
       const task = this.trackTask(this.runSchedule(schedule, reservation, kind === "manual"));
-      void task.catch((error) => {
-        this.logger.error({ err: error, scheduleId: id }, "Scheduled run failed");
-      });
       return [task];
     } catch (error) {
       await this.releaseReservation(id, reservation);
@@ -1339,7 +1354,7 @@ export class ScheduleService {
   private async releaseReservation(id: string, reservation: ScheduleReservation): Promise<void> {
     try {
       if (!reservation.committed && !reservation.claimPath) return;
-      await withReclaimLock(this.claimsLockPath, async () => {
+      await withReclaimLock(this.claimLockPath(id), async () => {
         if (!(await this.ownsClaim(id, reservation))) return;
         if (reservation.claimPath) {
           await this.removeClaimLocked(reservation.claimPath, reservation.runId);
@@ -1569,7 +1584,7 @@ export class ScheduleService {
     runId: string,
     update: (schedule: StoredSchedule) => StoredSchedule,
   ): Promise<boolean> {
-    return withReclaimLock(this.claimsLockPath, async () => {
+    return withReclaimLock(this.claimLockPath(scheduleId), async () => {
       const reservation = this.reservations.get(scheduleId);
       if (!reservation || reservation.runId !== runId || !reservation.committed) return false;
       if (!(await this.ownsClaim(scheduleId, reservation))) return false;
@@ -1587,7 +1602,7 @@ export class ScheduleService {
   private async assertRunCanDispatch(scheduleId: string, runId: string): Promise<void> {
     const reservation = this.assertExecutionAllowed(scheduleId, runId);
     await withReclaimLock(
-      this.claimsLockPath,
+      this.claimLockPath(scheduleId),
       async () => {
         if (!(await this.ownsClaim(scheduleId, reservation))) {
           throw new ScheduleStateConflictError("Scheduled run lost its claim");

@@ -1,0 +1,35 @@
+diff --git a/node_modules/expo-dev-menu/ios/FAB/DevMenuFABWindow.swift b/node_modules/expo-dev-menu/ios/FAB/DevMenuFABWindow.swift
+--- a/node_modules/expo-dev-menu/ios/FAB/DevMenuFABWindow.swift
++++ b/node_modules/expo-dev-menu/ios/FAB/DevMenuFABWindow.swift
+@@ -8,3 +8,25 @@
++private final class DevMenuFABHostingController: UIHostingController<DevMenuFABView> {
++  private var statusBarSource: UIViewController? {
++    // This passthrough window must not override the app's status-bar policy.
++    guard let window = viewIfLoaded?.window,
++      let keyWindow = window.windowScene?.keyWindow,
++      keyWindow !== window,
++      let root = keyWindow.rootViewController,
++      root !== self else {
++      return nil
++    }
++    return root
++  }
++
++  override var prefersStatusBarHidden: Bool {
++    statusBarSource?.prefersStatusBarHidden ?? super.prefersStatusBarHidden
++  }
++
++  override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
++    statusBarSource?.preferredStatusBarUpdateAnimation ?? super.preferredStatusBarUpdateAnimation
++  }
++}
++
+ /// A passthrough window that hosts the floating action button.
+ class DevMenuFABWindow: UIWindow {
+   private weak var manager: DevMenuManager?
+@@ -42,4 +64,4 @@ class DevMenuFABWindow: UIWindow {
+-    let hostingController = UIHostingController(rootView: fabView)
++    let hostingController = DevMenuFABHostingController(rootView: fabView)
+     hostingController.view.backgroundColor = .clear
+     self.hostingController = hostingController
+     rootViewController = hostingController

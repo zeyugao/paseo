@@ -1,5 +1,6 @@
 import { useCallback, useState, type ReactNode } from "react";
 import { View, type LayoutChangeEvent } from "react-native";
+import { StyleSheet } from "react-native-unistyles";
 import { selectWorkspaceChrome } from "./workspace-tab-layout";
 import { WorkspaceTabMeasurementScope } from "./workspace-desktop-tabs-row";
 import type { WorkspaceTabDescriptor } from "./workspace-tabs-types";
@@ -61,7 +62,7 @@ function WorkspaceChrome({
   }
   return (
     <WorkspaceTabMeasurementScope>
-      <View onLayout={onLayout}>
+      <View style={compact ? styles.compactHeader : styles.header} onLayout={onLayout}>
         <HeaderTopInsetHost
           active={compact || inlineHeaderActive || fullHeaderVisible}
           additionalPadding={compact ? HEADER_TOP_PADDING_MOBILE : 0}
@@ -72,6 +73,12 @@ function WorkspaceChrome({
     </WorkspaceTabMeasurementScope>
   );
 }
+
+const styles = StyleSheet.create((theme) => ({
+  // The retained top inset and the header rows must share the same paint owner.
+  header: { backgroundColor: theme.colors.surface0 },
+  compactHeader: { backgroundColor: theme.colors.surfaceWorkspace },
+}));
 
 /** One pane's tabs, as its compact tab switcher and pane menu need them. */
 export interface WorkspaceCompactHeaderTabs {

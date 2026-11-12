@@ -115,6 +115,8 @@ export default {
           : {}),
         NSMicrophoneUsageDescription: "This app needs access to the microphone for voice commands.",
         ITSAppUsesNonExemptEncryption: false,
+        // Scene roots own status-bar visibility, including on iOS 27.
+        UIViewControllerBasedStatusBarAppearance: true,
       },
       bundleIdentifier: variant === variants.production ? "me.elsanna.overkite" : variant.packageId,
       ...(variant.googleServiceInfoPlist

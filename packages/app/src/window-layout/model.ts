@@ -18,6 +18,10 @@ export interface WindowLayout {
   bottomClearance?: number | null;
   /** Where a top bar rests, or null until the system resolves its top bar guide. */
   topBar?: WindowLayoutRect | null;
+  /** Usable first row beside one corner occlusion, retained while the status bar is hidden. */
+  topChrome?: (WindowLayoutRect & { cornerLeft: number; cornerRight: number }) | null;
+  /** True only after this scene's native status-bar hide transition completes. */
+  statusBarHidden?: boolean;
   /** Active system occlusions (status region, camera, Live Activities), margins included. */
   occlusions?: WindowLayoutRect[];
   divisions: WindowLayoutRect[];
@@ -30,6 +34,8 @@ export interface WindowLayout {
 export interface TopBand {
   /** Where the top bar starts, in window points. */
   top: number;
+  /** Rounded-corner / system clearance for controls at the physical left edge only. */
+  leadingInset?: number;
   /**
    * The system region past the bar's trailing end, measured from the band's top, or null
    * when the bar reaches the window's trailing edge.
@@ -37,8 +43,24 @@ export interface TopBand {
   trailingObstruction: { width: number; height: number } | null;
 }
 
-/** Null unless the top bar guide starts above the system's rectangular safe area. */
-export function resolveTopBand(systemTop: number, layout: WindowLayout | null): TopBand | null {
+/** Prefer the reusable window-edge row; otherwise use UIKit's inset top bar guide. */
+export function resolveTopBand(
+  systemTop: number,
+  layout: WindowLayout | null,
+  statusBarHidden = false,
+): TopBand | null {
+  const chrome = layout?.topChrome;
+  if (layout && chrome) {
+    const hidden = statusBarHidden && layout.statusBarHidden === true;
+    const width = Math.ceil(
+      hidden ? chrome.cornerRight : layout.bounds.width - chrome.x - chrome.width,
+    );
+    return {
+      top: chrome.y,
+      leadingInset: Math.max(0, hidden ? chrome.cornerLeft : chrome.x),
+      trailingObstruction: width > 0 ? { width, height: chrome.height } : null,
+    };
+  }
   const bar = layout?.topBar;
   if (!layout || !bar || bar.y >= (layout.insets?.top ?? systemTop)) return null;
   const top = Math.max(0, bar.y);

@@ -14,7 +14,9 @@ import {
   resolveSidebarActivity,
   resolveDesktopSidebarWidth,
   resolveLeftSidebarPresentation,
+  resolveSidebarMenuTogglePresentation,
 } from "@/components/desktop-sidebar-layout";
+import { windowChromeCornersInclude } from "@/utils/desktop-window";
 
 describe("desktop sidebar layout", () => {
   const geometry: WindowLayout = {
@@ -158,8 +160,8 @@ describe("desktop sidebar layout", () => {
         sidebarControlsEnabled: true,
       }),
     ).toEqual({
-      sidebarCorners: "none",
-      contentCorners: "both",
+      sidebarCorners: "top-left",
+      contentCorners: "top-right",
       sidebarToggleOwner: "content",
     });
     expect(
@@ -173,6 +175,41 @@ describe("desktop sidebar layout", () => {
       contentCorners: "both",
       sidebarToggleOwner: "window",
     });
+  });
+
+  it.each([
+    { docked: false, windowControls: false, expected: "button" },
+    { docked: true, windowControls: false, expected: "button" },
+    { docked: false, windowControls: true, expected: "placeholder" },
+    { docked: true, windowControls: true, expected: "hidden" },
+  ] as const)(
+    "keeps one visible toggle with docked=$docked and windowControls=$windowControls",
+    ({ docked, windowControls, expected }) => {
+      const chrome = resolveDesktopAppChromeLayout({
+        desktopSidebarRendered: docked,
+        hasTopLeftWindowControls: windowControls,
+        sidebarControlsEnabled: true,
+      });
+      const presentation = resolveSidebarMenuTogglePresentation({
+        isCompact: false,
+        ownsTopLeft: windowChromeCornersInclude(chrome.contentCorners, "top-left"),
+        hasTopLeftWindowControls: windowControls,
+      });
+      expect(presentation).toBe(expected);
+      expect(
+        Number(chrome.sidebarToggleOwner === "window") + Number(presentation === "button"),
+      ).toBe(1);
+    },
+  );
+
+  it("keeps compact navigation visible independently of window controls and corner ownership", () => {
+    expect(
+      resolveSidebarMenuTogglePresentation({
+        isCompact: true,
+        ownsTopLeft: false,
+        hasTopLeftWindowControls: true,
+      }),
+    ).toBe("button");
   });
 
   it("hides the window-owned sidebar toggle when app chrome is suppressed", () => {

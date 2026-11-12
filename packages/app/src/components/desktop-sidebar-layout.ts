@@ -58,7 +58,7 @@ export function resolveDesktopAppChromeLayout(input: {
   hasTopLeftWindowControls: boolean;
   sidebarControlsEnabled: boolean;
 }) {
-  const sidebarOwnsTopLeft = input.desktopSidebarRendered && input.hasTopLeftWindowControls;
+  const sidebarOwnsTopLeft = input.desktopSidebarRendered;
   let sidebarToggleOwner: "none" | "window" | "content" = "none";
   if (input.sidebarControlsEnabled) {
     sidebarToggleOwner = input.hasTopLeftWindowControls ? "window" : "content";
@@ -68,6 +68,16 @@ export function resolveDesktopAppChromeLayout(input: {
     contentCorners: sidebarOwnsTopLeft ? ("top-right" as const) : ("both" as const),
     sidebarToggleOwner,
   };
+}
+
+export function resolveSidebarMenuTogglePresentation(input: {
+  isCompact: boolean;
+  ownsTopLeft: boolean;
+  hasTopLeftWindowControls: boolean;
+}): "button" | "placeholder" | "hidden" {
+  // A dock can own the physical corner without taking navigation out of the content header.
+  if (input.isCompact || !input.hasTopLeftWindowControls) return "button";
+  return input.ownsTopLeft ? "placeholder" : "hidden";
 }
 
 function resolveDesktopPanelWidth(input: {

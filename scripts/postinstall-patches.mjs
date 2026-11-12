@@ -14,6 +14,13 @@ const patchedPackages = [
     nodeModulesPath: "node_modules/expo-modules-core",
     patchPrefix: "expo-modules-core+",
   },
+  // The development FAB must preserve the scene's app-owned status-bar visibility.
+  // Remove once Expo's passthrough window forwards that preference upstream.
+  {
+    nodeModulesPath: "packages/app/node_modules/expo-dev-menu",
+    patchPrefix: "expo-dev-menu+",
+    cwd: "packages/app",
+  },
   // Backport https://github.com/software-mansion/enriched-markdown/pull/924: preserve settled
   // Android measurements across parent clones. Remove those hunks when upgrading past
   // 1.2.0-nightly-20261019-926ef06f0; reconcile the other local patch hunks separately.

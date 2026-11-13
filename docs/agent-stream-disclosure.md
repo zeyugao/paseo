@@ -35,6 +35,11 @@ Following output:
 - Scroll events during the hold never re-stick: the correction is a programmatic scroll that
   would otherwise read as "back at the bottom".
 
+An overview summary's bounded list owns its own scroll offset. Scroll it to the latest call when
+the summary opens or gains a call, not when its content height changes: expanding a nested detail
+changes that height without adding output. The timeline's hold cannot prevent an inner list from
+scrolling to its end. Apply the same rule to the compact overview sheet.
+
 The trigger can only stay put when the list has scroll room for the change. When the loaded
 content fits the viewport, or a collapse at the end would need an offset past the end, the list
 ends at its end and the trigger moves by the difference.
@@ -153,6 +158,12 @@ the user drags (see [scroll view corrections](#scroll-view-corrections)). They s
 in the detached state LegendList uses the same native correction, and a history page that lands
 mid-drag needs it. They key on the drag, not the touch, so a tap or long press while following
 keeps following.
+
+An expanded tool detail viewport owns drags that start inside it. Keep its body
+wrapper a `View`, not a hover-only `Pressable`: `Pressable` takes the JS responder
+even without `onPress`, and iOS then prevents descendant scroll views from
+cancelling touches. Press handling belongs on the disclosure header; body hover
+handlers are web-only. Do not disable timeline scrolling to make details draggable.
 
 Following resumes only for a gesture that ends within 1 px of the end, either when the finger lifts
 or when momentum stops. A release past the end counts: iOS bounces back to the end, and lines that

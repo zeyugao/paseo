@@ -15,6 +15,7 @@ import type { Theme } from "@/styles/theme";
 interface OverviewToolCallGroupSheetProps {
   visible: boolean;
   summary: string;
+  callCount: number;
   children: ReactNode;
   onClose: () => void;
 }
@@ -28,6 +29,7 @@ const foregroundMutedMapping = (theme: Theme) => ({ color: theme.colors.foregrou
 export function OverviewToolCallGroupSheet({
   visible,
   summary,
+  callCount,
   children,
   onClose,
 }: OverviewToolCallGroupSheetProps) {
@@ -53,7 +55,7 @@ export function OverviewToolCallGroupSheet({
     }
     const frame = requestAnimationFrame(scrollToLatest);
     return () => cancelAnimationFrame(frame);
-  }, [children, scrollToLatest, visible]);
+  }, [callCount, scrollToLatest, visible]);
 
   return (
     <ToolCallSheetModal

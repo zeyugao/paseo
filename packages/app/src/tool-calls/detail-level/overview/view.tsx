@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useRef, type ReactNode } from "react";
+import React, { memo, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { ScrollView } from "react-native";
 import { Wrench } from "lucide-react-native";
 import { StyleSheet } from "react-native-unistyles";
@@ -33,6 +33,12 @@ export const OverviewToolCallGroupView = memo(function OverviewToolCallGroupView
   const scrollToLatest = useCallback(() => {
     scrollRef.current?.scrollToEnd({ animated: false });
   }, []);
+  const callCount = group.run.calls.length;
+  useEffect(() => {
+    if (!expanded || isCompact) return;
+    const frame = requestAnimationFrame(scrollToLatest);
+    return () => cancelAnimationFrame(frame);
+  }, [callCount, expanded, isCompact, scrollToLatest]);
   const hold = useDisclosureHold();
   const toggle = useCallback(() => {
     const apply = () => onExpandedChange(group.run.id, !expanded);
@@ -51,12 +57,11 @@ export const OverviewToolCallGroupView = memo(function OverviewToolCallGroupView
         contentContainerStyle={styles.content}
         nestedScrollEnabled
         showsVerticalScrollIndicator
-        onContentSizeChange={scrollToLatest}
       >
         <IndentRail>{children}</IndentRail>
       </ScrollView>
     ),
-    [children, scrollToLatest],
+    [children],
   );
 
   if (isCompact) {
@@ -71,7 +76,12 @@ export const OverviewToolCallGroupView = memo(function OverviewToolCallGroupView
           isLastInSequence={isLastInSequence}
           onToggle={toggle}
         />
-        <OverviewToolCallGroupSheet visible={expanded} summary={aggregateSummary} onClose={close}>
+        <OverviewToolCallGroupSheet
+          visible={expanded}
+          summary={aggregateSummary}
+          callCount={callCount}
+          onClose={close}
+        >
           {children}
         </OverviewToolCallGroupSheet>
       </>

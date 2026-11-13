@@ -1,3 +1,65 @@
+diff --git a/node_modules/react-native-reanimated/Common/cpp/reanimated/Fabric/ReanimatedCommitHook.cpp b/node_modules/react-native-reanimated/Common/cpp/reanimated/Fabric/ReanimatedCommitHook.cpp
+index 0aba75e..f3d8767 100644
+--- a/node_modules/react-native-reanimated/Common/cpp/reanimated/Fabric/ReanimatedCommitHook.cpp
++++ b/node_modules/react-native-reanimated/Common/cpp/reanimated/Fabric/ReanimatedCommitHook.cpp
+@@ -50,7 +50,7 @@ void ReanimatedCommitHook::maybeInitializeLayoutAnimations(SurfaceId surfaceId)
+ }
+ 
+ RootShadowNode::Unshared ReanimatedCommitHook::shadowTreeWillCommit(
+-    ShadowTree const &,
++    ShadowTree const &shadowTree,
+     RootShadowNode::Shared const &,
+     RootShadowNode::Unshared const &newRootShadowNode,
+     const ShadowTreeCommitOptions &commitOptions) noexcept {
+@@ -58,12 +58,14 @@ RootShadowNode::Unshared ReanimatedCommitHook::shadowTreeWillCommit(
+ 
+   maybeInitializeLayoutAnimations(newRootShadowNode->getSurfaceId());
+ 
++  auto reaShadowNode = std::reinterpret_pointer_cast<ReanimatedCommitShadowNode>(newRootShadowNode);
++  const bool coordinateUnistylesCommit = reaShadowNode->consumeUnistylesCommitTrait() &&
++      shadowTree.getCommitMode() == ShadowTree::CommitMode::Normal;
++
+   if constexpr (StaticFeatureFlags::getFlag("USE_ANIMATION_BACKEND")) {
+     return newRootShadowNode;
+   }
+ 
+-  auto reaShadowNode = std::reinterpret_pointer_cast<ReanimatedCommitShadowNode>(newRootShadowNode);
+-
+   if (reaShadowNode->hasReanimatedCommitTrait()) {
+     // ShadowTree commited by Reanimated, no need to apply updates from
+     // the updates registry manager
+@@ -76,7 +78,9 @@ RootShadowNode::Unshared ReanimatedCommitHook::shadowTreeWillCommit(
+     // State updates are based on the currently committed ShadowTree,
+     // which means that all animation changes are already included.
+     // Therefore, there's no need to reapply styles from the props map.
+-    if (commitOptions.source != ShadowTreeCommitSource::React) {
++    // Unistyles changes props outside React and needs the same animation commit barrier.
++    // Leave ordinary native state updates on the non-pausing path below.
++    if (commitOptions.source != ShadowTreeCommitSource::React && !coordinateUnistylesCommit) {
+       return newRootShadowNode;
+     }
+   }
+diff --git a/node_modules/react-native-reanimated/Common/cpp/reanimated/Fabric/ReanimatedCommitShadowNode.h b/node_modules/react-native-reanimated/Common/cpp/reanimated/Fabric/ReanimatedCommitShadowNode.h
+index 5263921..bdcd97d 100644
+--- a/node_modules/react-native-reanimated/Common/cpp/reanimated/Fabric/ReanimatedCommitShadowNode.h
++++ b/node_modules/react-native-reanimated/Common/cpp/reanimated/Fabric/ReanimatedCommitShadowNode.h
+@@ -21,8 +21,16 @@ namespace reanimated {
+ constexpr ShadowNodeTraits::Trait ReanimatedCommitTrait{1 << 27};
+ constexpr ShadowNodeTraits::Trait ReanimatedMountTrait{1 << 28};
+ 
++// Matches Unistyles' UnistylesCommitTrait; consume it before a root can be committed.
++constexpr ShadowNodeTraits::Trait UnistylesCommitTrait{1 << 30};
++
+ class ReanimatedCommitShadowNode : public ShadowNode {
+  public:
++  inline bool consumeUnistylesCommitTrait() {
++    const bool marked = traits_.check(UnistylesCommitTrait);
++    traits_.unset(UnistylesCommitTrait);
++    return marked;
++  }
+   inline void setReanimatedCommitTrait() {
+     traits_.set(ReanimatedCommitTrait);
+   }
 diff --git a/node_modules/react-native-reanimated/android/src/main/java/com/swmansion/reanimated/NativeProxy.kt b/node_modules/react-native-reanimated/android/src/main/java/com/swmansion/reanimated/NativeProxy.kt
 index 48e3771..0fba1af 100644
 --- a/node_modules/react-native-reanimated/android/src/main/java/com/swmansion/reanimated/NativeProxy.kt

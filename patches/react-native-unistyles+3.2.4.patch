@@ -706,10 +706,16 @@ index a9c1804..f5a3c20 100644
          return Insets(
              this._insets.top / density,
 diff --git a/node_modules/react-native-unistyles/cxx/shadowTree/ShadowTreeManager.cpp b/node_modules/react-native-unistyles/cxx/shadowTree/ShadowTreeManager.cpp
-index 01026dc..3786ec4 100644
+index 01026dc..80e5664 100644
 --- a/node_modules/react-native-unistyles/cxx/shadowTree/ShadowTreeManager.cpp
 +++ b/node_modules/react-native-unistyles/cxx/shadowTree/ShadowTreeManager.cpp
-@@ -17,13 +17,16 @@ void shadow::ShadowTreeManager::updateShadowTree(jsi::Runtime& rt) {
+@@ -1,4 +1,5 @@
+ #include "ShadowTreeManager.h"
++#include "UnistylesCommitShadowNode.h"
+ 
+ using namespace margelo::nitro::unistyles;
+ using namespace facebook::react;
+@@ -17,13 +18,16 @@ void shadow::ShadowTreeManager::updateShadowTree(jsi::Runtime& rt) {
          }
  
  #if REACT_NATIVE_VERSION_MINOR >= 81
@@ -729,7 +735,7 @@ index 01026dc..3786ec4 100644
              auto* mutableFamily = const_cast<ShadowNodeFamily*>(family);
  
              if (mutableFamily->nativeProps_DEPRECATED && mutableFamily->nativeProps_DEPRECATED->isObject()) {
-@@ -31,9 +34,30 @@ void shadow::ShadowTreeManager::updateShadowTree(jsi::Runtime& rt) {
+@@ -31,9 +35,32 @@ void shadow::ShadowTreeManager::updateShadowTree(jsi::Runtime& rt) {
              } else {
                  mutableFamily->nativeProps_DEPRECATED = std::make_unique<folly::dynamic>(safeProps);
              }
@@ -748,11 +754,13 @@ index 01026dc..3786ec4 100644
 +            auto transaction = [&updates](const RootShadowNode& oldRootShadowNode) -> RootShadowNode::Unshared {
 +                auto affectedNodes = shadow::ShadowTreeManager::findAffectedNodes(oldRootShadowNode, updates);
 +
-+                return std::static_pointer_cast<RootShadowNode>(shadow::ShadowTreeManager::cloneShadowTree(
++                auto root = std::static_pointer_cast<RootShadowNode>(shadow::ShadowTreeManager::cloneShadowTree(
 +                    oldRootShadowNode,
 +                    updates,
 +                    affectedNodes
 +                ));
++                std::reinterpret_pointer_cast<core::UnistylesCommitShadowNode>(root)->addUnistylesCommitTrait();
++                return root;
 +            };
 +
 +            // mountSynchronously: this is an update from C++, not React

@@ -318,18 +318,42 @@ function Sidebar() {
 
 This is one of the rare places `useUnistyles()` is the right tool: there is no `withUnistyles(Animated.View)` equivalent, the affected component is small, and the alternative is a crash.
 
+## Native Theme Commits During Animations
+
+Keep the Unistyles and Reanimated native patches paired. Reanimated 4.5.5 skips
+non-React commits, while Unistyles 3.2.4 commits with source `Unknown`. A looping
+workspace animation can advance the root revision on every Unistyles retry,
+starving the theme update. Settings without animations does not exercise this path.
+
+The patches share Unistyles' reserved commit trait, bit 30. Unistyles marks each
+fresh transaction root; Reanimated consumes the marker before its early returns
+and coordinates normal-surface commits through its existing animation-props merge,
+pause, and mount-resume path. Ordinary native state updates remain unmarked.
+Do not replace this with a blanket exception for `Unknown` or label the commit
+as React: those choices change unrelated state-update or renderer semantics.
+
+This bridge uses Reanimated's legacy commit path (`USE_ANIMATION_BACKEND=false`).
+Revisit it before enabling the shared animation backend. When upgrading either
+library, verify OS light/dark changes with a looping workspace animation, loaded
+Markdown, and background/resume—not only the appearance settings screen.
+
 ## Adaptive Themes And Persisted Settings
 
 Unistyles [`initialTheme`](https://www.unistyl.es/v3/guides/theming#select-theme) and [`adaptiveThemes`](https://www.unistyl.es/v3/guides/theming#adaptive-themes) are mutually exclusive. `initialTheme` can be a string or a synchronous function, but it cannot wait on async storage.
 
-Paseo currently stores app settings in AsyncStorage and loads them through react-query. That means the app can mount under adaptive/system theme first, then switch after settings load:
+Paseo stores app settings in AsyncStorage and loads them through react-query. Before
+settings load, Unistyles starts with `adaptiveThemes: true`; a persisted manual
+theme can therefore replace the initial system theme. Styles mounted during that
+transition must update when the persisted preference applies.
 
-1. Unistyles config starts with `adaptiveThemes: true`.
-2. The device may report system light.
-3. Settings load a persisted non-auto preference, such as dark.
-4. The app calls `setAdaptiveThemes(false)` and `setTheme("dark")`.
-
-That brief transition is expected with the current storage model. It makes tracking-compatible styles important: anything mounted during the initial adaptive theme must update correctly after the persisted preference applies. [Issue #550](https://github.com/jpudysz/react-native-unistyles/issues/550) was a separate ScrollView sticky-header bug, but it is still useful context for why ScrollView theme updates deserve extra suspicion.
+On native, System mode is owned by `AppearanceProvider` through React Native's
+`Appearance` API. Unistyles 3.2.4 can keep reporting light from `UIScreen` even
+after RN reports dark, so re-enabling adaptive themes only rereads the stale value.
+The provider disables native Unistyles adaptation and selects light/dark from RN's
+current scheme and change events. Manual and resolved plugin themes do not subscribe.
+Web and Electron retain Unistyles adaptation and the separate web patch below.
+When upgrading Unistyles, verify native OS changes in both directions before removing
+this workaround.
 
 If we ever need to avoid the transition entirely, store at least the theme preference in synchronous storage and configure Unistyles with `initialTheme`.
 

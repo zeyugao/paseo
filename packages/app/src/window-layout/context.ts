@@ -11,6 +11,7 @@ export const WindowLayoutStatusBarHiddenContext = createContext(false);
 export const WindowLayoutContentAllocationContext = createContext<{
   workspaceKey: string | null;
   explorerVisible: boolean;
+  hasPinnedSidebar: boolean;
   // A docked navigation sidebar owns live resize geometry through flex layout.
   width: number | null;
   targetWidth: number;

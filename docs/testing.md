@@ -48,6 +48,10 @@ Filesystem observers can deliver multiple notifications for one write. Assert th
 
 Restart tests reopen the saved home without replaying configuration or installation. Otherwise setup can repair the state the test is meant to verify.
 
+Endpoints reused across daemon stop/start must stay outside the default ephemeral client range.
+A released `listen(0)` probe does not reserve the endpoint for the next start; a concurrent client
+socket can claim it between launches.
+
 ```typescript
 // Bad: conditional and weak
 it("creates a tool call", async () => {

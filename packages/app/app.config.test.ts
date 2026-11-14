@@ -1,4 +1,7 @@
+import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 // Load the copies the Expo CLI uses for prebuild, not older hoisted ones.
@@ -69,9 +72,6 @@ it("follows system rotation on Android", async () => {
 }, 30_000);
 
 it("allows all orientations on iPhone and iPad", async () => {
-  const { mkdtemp, rm } = await import("node:fs/promises");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
   const root = await mkdtemp(join(tmpdir(), "paseo-ios-config-"));
   try {
     const { exp } = await getPrebuildConfigAsync(__dirname, { platforms: ["ios"] });
@@ -94,6 +94,36 @@ it("allows all orientations on iPhone and iPad", async () => {
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);
+
+it.each(["development", "production"])(
+  "allows native HTTP downloads in the %s iOS build",
+  async (variant) => {
+    const root = await mkdtemp(join(tmpdir(), "paseo-ios-http-config-"));
+    const originalVariant = process.env.APP_VARIANT;
+    process.env.APP_VARIANT = variant;
+    try {
+      const { exp } = await getPrebuildConfigAsync(__dirname, { platforms: ["ios"] });
+      await compileModsAsync(exp, {
+        projectRoot: root,
+        introspect: true,
+        platforms: ["ios"],
+        assertMissingModProviders: false,
+      });
+      // Fine-grained ATS keys (even false ones) make iOS ignore arbitrary loads.
+      expect(exp._internal.modResults.ios.infoPlist.NSAppTransportSecurity).toEqual({
+        NSAllowsArbitraryLoads: true,
+      });
+    } finally {
+      if (originalVariant === undefined) {
+        delete process.env.APP_VARIANT;
+      } else {
+        process.env.APP_VARIANT = originalVariant;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
 
 // Scene startup is the integration boundary for the iOS keyboard window.
 describe("hardware keyboard scene integration", () => {

@@ -40,6 +40,8 @@ export const zhCN: TranslationResources = {
       cancel: "取消",
       close: "关闭",
       copy: "复制",
+      copyLink: "复制链接",
+      openLink: "打开链接",
       copyLine: "复制行",
       dismiss: "关闭",
       reload: "重新加载",

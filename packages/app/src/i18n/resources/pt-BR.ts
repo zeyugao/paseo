@@ -41,6 +41,8 @@ export const ptBR: TranslationResources = {
       cancel: "Cancelar",
       close: "Fechar",
       copy: "Copiar",
+      copyLink: "Copiar link",
+      openLink: "Abrir link",
       copyLine: "Copiar linha",
       dismiss: "Dispensar",
       reload: "Recarregar",

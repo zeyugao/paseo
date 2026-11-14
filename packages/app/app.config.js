@@ -115,6 +115,10 @@ export default {
           : {}),
         NSMicrophoneUsageDescription: "This app needs access to the microphone for voice commands.",
         ITSAppUsesNonExemptEncryption: false,
+        // User-configured hosts can use HTTP, including fully qualified domain names.
+        NSAppTransportSecurity: {
+          NSAllowsArbitraryLoads: true,
+        },
         // Scene roots own status-bar visibility, including on iOS 27.
         UIViewControllerBasedStatusBarAppearance: true,
       },

@@ -4,6 +4,8 @@
 
 Tests prove behavior, not structure. Every test should answer: "what user-visible or API-visible behavior does this verify?"
 
+Assert geometry against content fit and containment, not a fixed pixel minimum. A text input must fit a rendered line, and its container must contain the input.
+
 ## Test-driven development
 
 Work in vertical slices: one test, one implementation, repeat. Each test responds to what you learned from the previous cycle.

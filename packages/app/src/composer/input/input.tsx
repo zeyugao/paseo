@@ -241,9 +241,9 @@ export interface MessageInputRef {
 
 const MIN_INPUT_HEIGHT_MOBILE = 30;
 const MIN_INPUT_HEIGHT_DESKTOP = 46;
+const MIN_INPUT_HEIGHT = isWeb ? MIN_INPUT_HEIGHT_DESKTOP : MIN_INPUT_HEIGHT_MOBILE;
 const DEFAULT_MAX_INPUT_HEIGHT = 160;
 const MAX_INPUT_VIEWPORT_RATIO = 0.5;
-const MIN_INPUT_HEIGHT = isWeb ? MIN_INPUT_HEIGHT_DESKTOP : MIN_INPUT_HEIGHT_MOBILE;
 type WebTextInputKeyPressEvent = NativeSyntheticEvent<
   TextInputKeyPressEventData & {
     metaKey?: boolean;
@@ -1965,6 +1965,11 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       onFocusChange?.(true);
     }, [onFocusChange]);
 
+    const focusInput = useMemo(() => {
+      if (readOnly || disabled || isDictating || isRealtimeVoiceForCurrentAgent) return undefined;
+      return () => textInputRef.current?.focus();
+    }, [readOnly, disabled, isDictating, isRealtimeVoiceForCurrentAgent]);
+
     const handleInputBlur = useCallback(() => {
       // A blur in the active pane is a dismissal; only hiding the pane preserves intent.
       if (paneFocusedRef.current) focusIntentRef.current = false;
@@ -2217,9 +2222,9 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
     );
     const toolbar = useMemo(
       () => (
-        <View style={buttonRowStyle}>
+        <View style={buttonRowStyle} pointerEvents="box-none">
           {/* Toolbar left: attachment button + agent controls */}
-          <View style={styles.leftButtonGroup}>
+          <View style={styles.leftButtonGroup} pointerEvents="box-none">
             <AttachmentDropdown
               visible={mode.showAttachments}
               isConnected={isConnected}
@@ -2233,7 +2238,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
           </View>
 
           {/* Right: dictation, then the trailing action (voice mode, send or stop) */}
-          <View style={styles.rightButtonGroup}>
+          <View style={styles.rightButtonGroup} pointerEvents="box-none">
             {beforeVoiceContent}
             <VoiceButtonTooltip
               visible={mode.showVoice}
@@ -2345,6 +2350,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
           send={sendButton}
           error={props.submissionError}
           onExit={exitFullscreen}
+          onFocusInput={focusInput}
           inputWrapperRef={inputWrapperRef}
           inputWrapperStyle={inputWrapperCombinedStyle}
           inputPointerEvents={surfacePresentation.input.pointerEvents}
@@ -2460,6 +2466,8 @@ const styles = StyleSheet.create((theme: Theme) => ({
   // The row keeps a full touch target's height; its disc-sized controls centre in it.
   buttonRow: {
     minHeight: TOOLBAR_CONTROL_HEIGHT,
+    // Preserve the attachment gap; only bring the toolbar closer to the editor.
+    marginTop: bySizing({ touch: -theme.spacing[3], pointer: -theme.spacing[1] }),
     flexShrink: 0,
     flexDirection: "row",
     alignItems: "center",

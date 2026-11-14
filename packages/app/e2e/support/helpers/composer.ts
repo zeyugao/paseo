@@ -497,7 +497,7 @@ export async function activateRetainedComposerTab(page: Page, title: string): Pr
 
 export async function recordVisibleComposerGeometry(page: Page): Promise<void> {
   await page.evaluate(() => {
-    const frames: { input: number; root: number }[] = [];
+    const frames: { input: number; root: number; lineHeight: number }[] = [];
     Reflect.set(window, "__composerGeometryFrames", frames);
     let running = true;
     const tick = () => {
@@ -509,6 +509,7 @@ export async function recordVisibleComposerGeometry(page: Page): Promise<void> {
           frames.push({
             input: input.getBoundingClientRect().height,
             root: root.getBoundingClientRect().height,
+            lineHeight: parseFloat(getComputedStyle(input).lineHeight),
           });
       }
       requestAnimationFrame(tick);
@@ -525,10 +526,13 @@ export async function expectNoCollapsedVisibleComposer(page: Page): Promise<void
     return Reflect.get(window, "__composerGeometryFrames") as {
       input: number;
       root: number;
+      lineHeight: number;
     }[];
   });
   expect(frames.length).toBeGreaterThan(0);
-  expect(frames.filter((frame) => frame.root < 42 || frame.input < 42)).toEqual([]);
+  expect(
+    frames.filter((frame) => !(frame.input >= frame.lineHeight && frame.root >= frame.input)),
+  ).toEqual([]);
 }
 
 /** Exercise the quick-return race before a hidden pane gets a rendering frame. */

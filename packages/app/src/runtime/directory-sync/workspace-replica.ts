@@ -11,8 +11,12 @@ import {
   type WorkspaceDescriptor,
 } from "@/stores/session-store";
 import { useWorkspaceSetupStore } from "@/stores/workspace-setup-store";
+import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import { purgeArchivedWorkspaceState } from "@/workspace/archived-workspace-state";
+import { isWorkspaceArchiveUndoOffered } from "@/workspace/archive-undo";
 import {
   clearWorkspaceArchivePending,
+  isWorkspaceArchivePending,
   shouldSuppressWorkspaceForLocalArchive,
   shouldSuppressWorkspaceRemovalForLocalUndo,
 } from "@/contexts/session-workspace-upserts";
@@ -74,6 +78,7 @@ export class WorkspaceDirectoryReplica {
   ): DirectoryReplicaMutation[] {
     this.replace(snapshot);
     const mutations = deltas.flatMap((delta) => this.applyDelta(delta));
+    this.purgeArchivedLayouts(snapshot);
     useSessionStore.getState().setHasHydratedWorkspaces(this.serverId, true);
     return mutations;
   }
@@ -178,6 +183,43 @@ export class WorkspaceDirectoryReplica {
     return mutations;
   }
 
+  private purgeArchivedLayouts(snapshot: WorkspaceDirectorySnapshot): void {
+    if (!snapshot.syncModes?.workspaces) return;
+    const purge = () => {
+      const prefix = `${this.serverId}:`;
+      const state = useWorkspaceLayoutStore.getState();
+      const keys = new Set([
+        ...Object.keys(state.layoutByWorkspace),
+        ...Object.keys(state.sheetsByWorkspace),
+      ]);
+      for (const key of keys) {
+        if (!key.startsWith(prefix)) continue;
+        const workspaceId = key.slice(prefix.length);
+        if (
+          snapshot.syncModes?.workspaces === "changes" &&
+          !snapshot.touchedWorkspaceIds?.has(workspaceId)
+        )
+          continue;
+        const target = { serverId: this.serverId, workspaceId };
+        if (
+          !this.workspaces.has(workspaceId) &&
+          !isWorkspaceArchivePending(target) &&
+          !shouldSuppressWorkspaceRemovalForLocalUndo(target) &&
+          !isWorkspaceArchiveUndoOffered(target)
+        ) {
+          purgeArchivedWorkspaceState(target);
+        }
+      }
+    };
+    if (useWorkspaceLayoutStore.persist.hasHydrated()) purge();
+    else {
+      const unsubscribe = useWorkspaceLayoutStore.persist.onFinishHydration(() => {
+        unsubscribe();
+        purge();
+      });
+    }
+  }
+
   private removeWorkspace(
     delta: Extract<SessionOutboundMessage, { type: "workspace_update" }>["payload"] & {
       kind: "remove";
@@ -189,6 +231,9 @@ export class WorkspaceDirectoryReplica {
     ) {
       return [];
     }
+    const target = { serverId: this.serverId, workspaceId: delta.id };
+    if (!isWorkspaceArchivePending(target) && !isWorkspaceArchiveUndoOffered(target))
+      purgeArchivedWorkspaceState(target);
     this.deleteWorkspace(delta.id);
     const mutations: DirectoryReplicaMutation[] = [
       { kind: "workspace", type: "delete", id: delta.id },

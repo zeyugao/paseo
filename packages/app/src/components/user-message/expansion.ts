@@ -6,11 +6,12 @@ type Listener = () => void;
  * reassigned to another list container) paints the choice the user made. A toggle notifies only
  * that message's subscribers.
  */
-export function createUserMessageExpansion() {
-  const expanded = new Set<string>();
+export function createUserMessageExpansion(initial?: readonly string[]) {
+  const expanded = new Set<string>(initial);
   const listeners = new Map<string, Set<Listener>>();
   return {
     isExpanded: (itemId: string) => expanded.has(itemId),
+    capture: () => Array.from(expanded),
     subscribe(itemId: string, listener: Listener) {
       let itemListeners = listeners.get(itemId);
       if (!itemListeners) {

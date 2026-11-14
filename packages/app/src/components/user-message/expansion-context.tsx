@@ -3,14 +3,17 @@ import { createUserMessageExpansion, type UserMessageExpansion } from "./expansi
 
 export const UserMessageExpansionContext = createContext<UserMessageExpansion | null>(null);
 
-/** One store per viewed agent; switching agents starts with every message collapsed. */
-export function useAgentUserMessageExpansion(agentId: string): UserMessageExpansion {
+/** One store per viewed agent; saved reading state seeds rows before their first layout. */
+export function useAgentUserMessageExpansion(
+  agentId: string,
+  initial?: readonly string[],
+): UserMessageExpansion {
   const [owner, setOwner] = useState(() => ({
     agentId,
-    expansion: createUserMessageExpansion(),
+    expansion: createUserMessageExpansion(initial),
   }));
   if (owner.agentId === agentId) return owner.expansion;
-  const next = { agentId, expansion: createUserMessageExpansion() };
+  const next = { agentId, expansion: createUserMessageExpansion(initial) };
   setOwner(next);
   return next.expansion;
 }

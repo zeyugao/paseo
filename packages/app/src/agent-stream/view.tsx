@@ -1,5 +1,8 @@
 import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { Button } from "@/components/ui/button";
+import { useReadingPositionRestore } from "./use-reading-position-restore";
+import type { CapturedReadingPosition, ReadingPositionPersistence } from "./reading-position";
 import React, {
   forwardRef,
   memo,
@@ -254,6 +257,7 @@ export interface AgentStreamViewProps {
   isAuthoritativeHistoryReady?: boolean;
   isInitialHistoryLoading?: boolean;
   revealInitialHistory?: boolean;
+  readingPosition?: ReadingPositionPersistence;
   /** Tail space required by a transparent overlay rendered at the bottom edge. */
   bottomOverlayTailClearance?: number;
   /** Bottom offset required for controls floating above that overlay. */
@@ -338,6 +342,52 @@ function ScrollToBottomButton({
   );
 }
 
+function useReadingDisclosures(agentId: string, persistence?: ReadingPositionPersistence) {
+  const saved = persistence?.initial?.agentId === agentId ? persistence.initial : null;
+  const toolCallExpansion = useAgentToolCallExpansion(agentId, saved?.toolCallExpansion);
+  const userMessageExpansion = useAgentUserMessageExpansion(agentId, saved?.expandedUserMessageIds);
+  const [expandedTurnHostIds, setExpandedTurnHostIds] = useState<ReadonlySet<string>>(
+    () => new Set(saved?.expandedTurnHostIds ?? []),
+  );
+  const saveReadingPosition = useStableEvent((position: CapturedReadingPosition | null) => {
+    persistence?.save(
+      position
+        ? {
+            ...position,
+            expandedTurnHostIds: Array.from(expandedTurnHostIds),
+            expandedUserMessageIds: userMessageExpansion.capture(),
+            toolCallExpansion: toolCallExpansion.capture(),
+          }
+        : null,
+    );
+  });
+  return {
+    toolCallExpansion,
+    userMessageExpansion,
+    expandedTurnHostIds,
+    setExpandedTurnHostIds,
+    saveReadingPosition,
+  };
+}
+
+function ReadingPositionLoading({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <View style={stylesheet.emptyState}>
+      {failed ? (
+        <>
+          <Text style={stylesheet.syncingIndicatorText}>{t("agentStream.historyLoadFailed")}</Text>
+          <Button variant="ghost" size="sm" onPress={onRetry}>
+            {t("paneFind.retry")}
+          </Button>
+        </>
+      ) : (
+        <ThemedLoadingSpinner size="large" uniProps={mutedColorMapping} />
+      )}
+    </View>
+  );
+}
+
 const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamViewProps>(
   function AgentStreamView(
     {
@@ -353,6 +403,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       isAuthoritativeHistoryReady = true,
       isInitialHistoryLoading,
       revealInitialHistory,
+      readingPosition,
       bottomOverlayTailClearance = 0,
       bottomOverlayControlClearance,
       toast,
@@ -385,10 +436,14 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const [expandedInlineToolCallIds, setExpandedInlineToolCallIds] = useState<Set<string>>(
       new Set(),
     );
-    const toolCallExpansion = useAgentToolCallExpansion(agentId);
-    const userMessageExpansion = useAgentUserMessageExpansion(agentId);
+    const {
+      toolCallExpansion,
+      userMessageExpansion,
+      expandedTurnHostIds,
+      setExpandedTurnHostIds,
+      saveReadingPosition,
+    } = useReadingDisclosures(agentId, readingPosition);
     const expandedToolCallGroups = useExpandedToolCallGroups(toolCallExpansion);
-    const [expandedTurnHostIds, setExpandedTurnHostIds] = useState<ReadonlySet<string>>(new Set());
 
     // Get serverId (fallback to agent's serverId if not provided)
     const resolvedServerId = serverId ?? context.serverId ?? "";
@@ -550,6 +605,17 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         effectiveTurnPresentation.turnId,
       ],
     );
+    const readingRestore = useReadingPositionRestore({
+      agentId,
+      serverId: resolvedServerId,
+      epoch: timelineEpoch,
+      isAuthoritativeHistoryReady,
+      isActive,
+      tail: presentation.tail,
+      head: presentation.head,
+      replacements: presentation.readingRowReplacements,
+      persistence: isWeb ? undefined : readingPosition,
+    });
     const {
       start: historyWindowStart,
       hasLocalHistory,
@@ -557,6 +623,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       loadOlder,
     } = useStreamHistoryWindow({
       items: presentation.tail,
+      initialRowId: readingRestore.position?.rowId,
       loadRemoteOlder,
     });
     const isLoadingOlder = remoteIsLoadingOlder;
@@ -630,20 +697,25 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       revealLoadedMessage: revealLoadedHistory,
     });
 
+    const requestBottomAnchor = useStableEvent((reason: BottomAnchorLocalRequest["reason"]) => {
+      readingRestore.cancel();
+      viewportRef.current?.scrollToBottom(reason);
+    });
     useImperativeHandle(
       ref,
       () => ({
         scrollToBottom(reason = "jump-to-bottom") {
-          viewportRef.current?.scrollToBottom(reason);
+          requestBottomAnchor(reason);
         },
         prepareForViewportChange() {
           viewportRef.current?.prepareForViewportChange();
         },
       }),
-      [],
+      [requestBottomAnchor],
     );
 
-    const scrollToBottom = useCallback(() => {
+    const scrollToBottom = useStableEvent(() => {
+      readingRestore.cancel();
       if (!isTimelineDetached) {
         viewportRef.current?.scrollToBottom("jump-to-bottom");
         return;
@@ -656,7 +728,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         scrollToBottom: () => viewportRef.current?.scrollToBottom("jump-to-bottom"),
         onError: handleTimelineHistoryLoadError,
       });
-    }, [agentId, handleTimelineHistoryLoadError, isTimelineDetached, resolvedServerId]);
+    });
 
     const setInlineDetailsExpanded = useCallback(
       (itemId: string, expanded: boolean) => {
@@ -677,18 +749,21 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     );
 
     // The summary line holds its row around this; chat find opens a turn without a hold.
-    const setTurnExpanded = useCallback((hostId: string, expanded: boolean) => {
-      setExpandedTurnHostIds((previous) => {
-        if (previous.has(hostId) === expanded) return previous;
-        const next = new Set(previous);
-        if (expanded) {
-          next.add(hostId);
-        } else {
-          next.delete(hostId);
-        }
-        return next;
-      });
-    }, []);
+    const setTurnExpanded = useCallback(
+      (hostId: string, expanded: boolean) => {
+        setExpandedTurnHostIds((previous) => {
+          if (previous.has(hostId) === expanded) return previous;
+          const next = new Set(previous);
+          if (expanded) {
+            next.add(hostId);
+          } else {
+            next.delete(hostId);
+          }
+          return next;
+        });
+      },
+      [setExpandedTurnHostIds],
+    );
     // Chat find reveals a match inside a collapsed turn by opening the turn first.
     const revealLoadedMessage = useStableEvent((messageId: string): boolean => {
       const hostId = presentation.turns.hostIdByFoldedMessageId.get(messageId);
@@ -1176,32 +1251,41 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             <MessageOuterSpacingProvider disableOuterSpacing>
               <ToolCallExpansionContext.Provider value={toolCallExpansion}>
                 <UserMessageExpansionContext.Provider value={userMessageExpansion}>
-                  {streamRenderStrategy.render({
-                    readingRowReplacements: presentation.readingRowReplacements,
-                    agentId,
-                    segments: renderModel.segments,
-                    historyRowRevision,
-                    liveHeadRowRevision: expandedToolCallGroups,
-                    boundary,
-                    renderers,
-                    listEmptyComponent,
-                    viewportRef,
-                    routeBottomAnchorRequest,
-                    isAuthoritativeHistoryReady,
-                    isInitialHistoryLoading,
-                    revealInitialHistory,
-                    onNearBottomChange: nearBottom.set,
-                    onReadingPositionChange: handleReadingPositionChange,
-                    onNearHistoryStart: loadOlder,
-                    isLoadingOlderHistory: isLoadingOlder,
-                    hasOlderHistory: hasOlder,
-                    olderHistoryProgressKey: progressKey,
-                    scrollEnabled: streamScrollEnabled,
-                    listStyle: stylesheet.list,
-                    baseListContentContainerStyle: stylesheet.listContentContainer,
-                    forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
-                    contentMaxWidth,
-                  })}
+                  {readingRestore.pending ? (
+                    <ReadingPositionLoading
+                      failed={readingRestore.failed}
+                      onRetry={readingRestore.retry}
+                    />
+                  ) : (
+                    streamRenderStrategy.render({
+                      readingRowReplacements: presentation.readingRowReplacements,
+                      agentId,
+                      segments: renderModel.segments,
+                      historyRowRevision,
+                      liveHeadRowRevision: expandedToolCallGroups,
+                      boundary,
+                      renderers,
+                      listEmptyComponent,
+                      viewportRef,
+                      routeBottomAnchorRequest,
+                      isAuthoritativeHistoryReady,
+                      isInitialHistoryLoading,
+                      revealInitialHistory,
+                      onNearBottomChange: nearBottom.set,
+                      onReadingPositionChange: handleReadingPositionChange,
+                      initialReadingPosition: readingRestore.position,
+                      onSaveReadingPosition: readingPosition ? saveReadingPosition : undefined,
+                      onNearHistoryStart: loadOlder,
+                      isLoadingOlderHistory: isLoadingOlder,
+                      hasOlderHistory: hasOlder,
+                      olderHistoryProgressKey: progressKey,
+                      scrollEnabled: streamScrollEnabled,
+                      listStyle: stylesheet.list,
+                      baseListContentContainerStyle: stylesheet.listContentContainer,
+                      forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
+                      contentMaxWidth,
+                    })
+                  )}
                 </UserMessageExpansionContext.Provider>
               </ToolCallExpansionContext.Provider>
             </MessageOuterSpacingProvider>
@@ -1340,6 +1424,7 @@ function agentStreamViewPropsEqual(
   if (left.revealInitialHistory !== right.revealInitialHistory) {
     reasons.push("revealInitialHistory");
   }
+  if (left.readingPosition !== right.readingPosition) reasons.push("readingPosition");
   if (left.bottomOverlayTailClearance !== right.bottomOverlayTailClearance) {
     reasons.push("bottomOverlayTailClearance");
   }

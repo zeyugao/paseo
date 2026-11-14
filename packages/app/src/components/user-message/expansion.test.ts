@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { createUserMessageExpansion } from "./expansion";
 
 describe("user message expansion", () => {
+  it("restores expanded content from an independent reading snapshot", () => {
+    const original = createUserMessageExpansion();
+    original.toggle("long-message");
+    const snapshot = original.capture();
+    const reopened = createUserMessageExpansion(snapshot);
+    original.toggle("long-message");
+    expect(reopened.isExpanded("long-message")).toBe(true);
+    reopened.toggle("long-message");
+    expect(reopened.isExpanded("long-message")).toBe(false);
+    expect(snapshot).toEqual(["long-message"]);
+  });
+
   it("toggles one message and notifies only that message", () => {
     const expansion = createUserMessageExpansion();
     const notified: string[] = [];

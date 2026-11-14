@@ -192,6 +192,13 @@ Compact overlay selection and saved dock visibility are independent. Folding cha
 not either mode’s visibility intent. Native workspace retention remains one workspace; web retains
 up to ten with its existing inactive TTL.
 
+Native agent reading positions live in persisted workspace tab state, so restoring a chat does not
+require retaining its view. Preserve row-relative position and disclosure state, not an absolute
+scroll offset. Resolve unloaded history before initial placement, and leave bottom following
+detached until the reader explicitly returns to the end. Committed archives purge the tab state;
+keep it through the Undo window. Reconnect cleanup must use authoritative directory removals or a
+complete snapshot, never absence from a partial cache.
+
 PR discovery belongs to the active workspace: split layouts discover while active, and other
 layouts discover while Explorer is active. The rail requests summary status; selected visible PR
 content also requests timeline data. Inactive consumers read cached data without request demand.

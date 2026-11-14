@@ -14,6 +14,7 @@ import {
 } from "@/contexts/session-workspace-upserts";
 import { useWorkspaceSetupStore } from "@/stores/workspace-setup-store";
 import { WorkspaceDirectoryReplica } from "./workspace-replica";
+import { collectAllTabs, useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 
 function workspace(id: string, projectId = "project"): WorkspaceDescriptorPayload {
   return {
@@ -427,6 +428,65 @@ it("keeps a workspace whose archive is being undone when a refresh snapshot omit
     expect(workspaceIds()).toEqual(["other"]);
   } finally {
     settleWorkspaceArchiveIntent(undo);
+    store.clearSession(serverId);
+  }
+});
+
+it("cleans archived layouts only from authoritative removals and preserves other hosts and undo", async () => {
+  const serverId = "reading-archive";
+  const store = useSessionStore.getState();
+  store.initializeSession(serverId, null as unknown as DaemonClient);
+  await useWorkspaceLayoutStore.persist.rehydrate();
+  const layout = useWorkspaceLayoutStore.getState();
+  const ids = ["gone", "offline", "live", "undo"];
+  const keys = [...ids.map((id) => `${serverId}:${id}`), "reading-other:gone"];
+  for (const workspaceKey of keys) {
+    const tabId = layout.openTab({
+      workspaceKey,
+      target: { kind: "agent", agentId: "agent" },
+      intent: "reveal",
+    })!;
+    layout.setTabState(workspaceKey, tabId, { readingPosition: { rowId: "read-row" } });
+  }
+  const readPosition = (key: string) => {
+    const current = useWorkspaceLayoutStore.getState().layoutByWorkspace[key];
+    return current
+      ? collectAllTabs(current.root).find((tab) => tab.target.kind === "agent")?.state
+      : undefined;
+  };
+  const undo = markWorkspaceArchiveUndoPending({ serverId, workspaceId: "undo" });
+  const replica = new WorkspaceDirectoryReplica(serverId);
+  try {
+    replica.commitCached({ workspaces: new Map(), projects: new Map() });
+    expect(readPosition(keys[0])).toEqual({ readingPosition: { rowId: "read-row" } });
+    replica.commitSnapshot(
+      {
+        workspaces: new Map(),
+        projects: new Map(),
+        syncModes: { workspaces: "changes" },
+        touchedWorkspaceIds: new Set(["gone"]),
+      },
+      [],
+    );
+    expect(useWorkspaceLayoutStore.getState().layoutByWorkspace[keys[0]]).toBeUndefined();
+    expect(readPosition(keys[1])).toEqual({ readingPosition: { rowId: "read-row" } });
+    const live = normalizeWorkspaceDescriptor(workspace("live"));
+    replica.commitSnapshot(
+      {
+        workspaces: new Map([[live.id, live]]),
+        projects: new Map(),
+        syncModes: { workspaces: "snapshot" },
+      },
+      [],
+    );
+    expect(useWorkspaceLayoutStore.getState().layoutByWorkspace[keys[1]]).toBeUndefined();
+    for (const key of keys.slice(2))
+      expect(readPosition(key)).toEqual({ readingPosition: { rowId: "read-row" } });
+    replica.applyDelta({ kind: "remove", id: "live" });
+    expect(useWorkspaceLayoutStore.getState().layoutByWorkspace[keys[2]]).toBeUndefined();
+  } finally {
+    settleWorkspaceArchiveIntent(undo);
+    for (const key of keys) useWorkspaceLayoutStore.getState().purgeWorkspace(key);
     store.clearSession(serverId);
   }
 });

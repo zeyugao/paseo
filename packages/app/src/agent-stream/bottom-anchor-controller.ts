@@ -89,6 +89,7 @@ interface BottomAnchorControllerDriver {
 }
 
 interface CreateBottomAnchorControllerDriverInput {
+  initialMode?: BottomAnchorMode;
   getAgentId: () => string;
   getIsAuthoritativeHistoryReady: () => boolean;
   getRenderStrategy: () => string;
@@ -233,7 +234,7 @@ function createBottomAnchorControllerDriver(
   input: CreateBottomAnchorControllerDriverInput,
 ): BottomAnchorControllerDriver {
   let requestSequence = 0;
-  let mode: BottomAnchorMode = "sticky-bottom";
+  let mode: BottomAnchorMode = input.initialMode ?? "sticky-bottom";
   let pendingRequest: BottomAnchorRequest | null = null;
   let pendingVerification: AttemptContext | null = null;
   let blockedReason: BottomAnchorBlockedReason | null = null;
@@ -687,6 +688,7 @@ export const __private__ = {
 
 export function useBottomAnchorController(input: {
   agentId: string;
+  initialMode?: BottomAnchorMode;
   routeRequest: BottomAnchorRouteRequest | null;
   isAuthoritativeHistoryReady: boolean;
   renderStrategy: string;
@@ -695,7 +697,7 @@ export function useBottomAnchorController(input: {
   isNearBottom: () => boolean;
   scrollToBottom: (animated: boolean) => void;
 }) {
-  const [mode, setMode] = useState<BottomAnchorMode>("sticky-bottom");
+  const [mode, setMode] = useState<BottomAnchorMode>(input.initialMode ?? "sticky-bottom");
   const agentIdRef = useRef(input.agentId);
   const readinessRef = useRef(input.isAuthoritativeHistoryReady);
   const renderStrategyRef = useRef(input.renderStrategy);
@@ -715,6 +717,7 @@ export function useBottomAnchorController(input: {
 
   if (!driverRef.current) {
     driverRef.current = __private__.createBottomAnchorControllerDriver({
+      initialMode: input.initialMode,
       getAgentId: () => agentIdRef.current,
       getIsAuthoritativeHistoryReady: () => readinessRef.current,
       getRenderStrategy: () => renderStrategyRef.current,

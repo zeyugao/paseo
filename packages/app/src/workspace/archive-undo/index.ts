@@ -1,6 +1,7 @@
 export {
   archiveWorkspaceWithUndo,
   undoLatestWorkspaceArchive,
+  isWorkspaceArchiveUndoOffered,
   type UndoableWorkspaceArchiveClient,
 } from "./internal/undo-window";
 export { WorkspaceArchiveUndoShortcutHost } from "./internal/undo-shortcut-host";

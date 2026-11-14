@@ -14,6 +14,31 @@ afterEach(() => {
 });
 
 describe("useStreamHistoryWindow", () => {
+  it("opens a late-loaded reading target's whole turn and retains it through prepends and appends", () => {
+    const recent = Array.from({ length: 12 }, (_, index) => [
+      message(`u${index + 1}`, "user_message"),
+      message(`a${index + 1}`, "assistant_message"),
+    ]).flat();
+    const { result, rerender } = renderHook(
+      ({ items }) =>
+        useStreamHistoryWindow({ items, initialRowId: "a0", loadRemoteOlder: vi.fn() }),
+      { initialProps: { items: recent } },
+    );
+    expect(recent[result.current.start].id).toBe("u3");
+    const restored = [message("u0", "user_message"), message("a0", "assistant_message"), ...recent];
+    rerender({ items: restored });
+    expect(restored[result.current.start].id).toBe("u0");
+    const updated = [
+      message("u-1", "user_message"),
+      message("a-1", "assistant_message"),
+      ...restored,
+      message("u13", "user_message"),
+      message("a13", "assistant_message"),
+    ];
+    rerender({ items: updated });
+    expect(updated[result.current.start].id).toBe("u0");
+  });
+
   it("mounts only the most recent 20 items by default", () => {
     const items = Array.from({ length: 11 }, (_, turn) => [
       message(`u${turn}`, "user_message"),

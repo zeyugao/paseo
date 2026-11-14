@@ -48,6 +48,13 @@ class UndoWindow {
     });
   }
 
+  isFor(workspace: WorkspaceArchiveTarget): boolean {
+    return (
+      this.input.workspace.serverId === workspace.serverId &&
+      this.input.workspace.workspaceId === workspace.workspaceId
+    );
+  }
+
   /** The host finished the archive. It commits now if undo is no longer offered. */
   archiveFinished(): void {
     this.archived = true;
@@ -126,4 +133,8 @@ export function undoLatestWorkspaceArchive(): boolean {
 
 export function hasUndoableWorkspaceArchive(): boolean {
   return latest !== null;
+}
+
+export function isWorkspaceArchiveUndoOffered(workspace: WorkspaceArchiveTarget): boolean {
+  return latest?.isFor(workspace) ?? false;
 }

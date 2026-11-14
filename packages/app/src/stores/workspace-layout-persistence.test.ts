@@ -198,3 +198,55 @@ it.each([1, 2])(
     expect(visible).toEqual(["agent-a"]);
   },
 );
+
+it("restores reading anchors after restart and cannot resurrect one after workspace purge", async () => {
+  const values = new Map<string, string>();
+  const storage: StateStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => {
+      values.set(key, value);
+    },
+    removeItem: (key) => {
+      values.delete(key);
+    },
+  };
+  const source = createWorkspaceLayoutStore(undefined, storage);
+  await source.persist.rehydrate();
+  const anchor = {
+    agentId: "agent",
+    epoch: "epoch",
+    seq: 42,
+    rowId: "message:block:2",
+    viewOffset: -123.5,
+    expandedTurnHostIds: ["turn"],
+    expandedUserMessageIds: ["long-message"],
+    toolCallExpansion: { calls: { call: true }, groups: ["call"] },
+  };
+  const state = { readingPosition: anchor };
+  const keys = ["host:archived", "host:kept", "other-host:archived"];
+  const ids = keys.map((workspaceKey) => {
+    const tabId = source
+      .getState()
+      .openTab({ workspaceKey, target: { kind: "agent", agentId: "agent" }, intent: "reveal" })!;
+    source.getState().setTabState(workspaceKey, tabId, state);
+    return tabId;
+  });
+  const reopened = createWorkspaceLayoutStore(undefined, storage);
+  await reopened.persist.rehydrate();
+  const restored = collectAllTabs(reopened.getState().layoutByWorkspace[keys[0]].root).find(
+    (tab) => tab.tabId === ids[0],
+  );
+  expect(restored?.state).toEqual(state);
+  reopened.getState().purgeWorkspace(keys[0]);
+  reopened.getState().setTabState(keys[0], ids[0], state);
+  const restarted = createWorkspaceLayoutStore(undefined, storage);
+  await restarted.persist.rehydrate();
+  expect(restarted.getState().layoutByWorkspace[keys[0]]).toBeUndefined();
+  for (const key of keys.slice(1)) {
+    expect(
+      collectAllTabs(restarted.getState().layoutByWorkspace[key].root).find(
+        (tab) => tab.target.kind === "agent",
+      )?.state,
+    ).toEqual(state);
+  }
+});

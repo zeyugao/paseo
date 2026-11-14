@@ -104,6 +104,7 @@ import { derivePendingPermissionKey, normalizeAgentSnapshot } from "@/utils/agen
 import { applyLegacyDaemonWorkspaceOwnership } from "@/workspace/legacy-daemon-workspaces";
 import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
 import { buildDraftAgentSetup, type ClientSlashCommand } from "@/client-slash-commands";
+import { useAgentReadingPosition } from "./agent-reading-position";
 
 interface ChatAgentStateShape {
   serverId: string | null;
@@ -1367,6 +1368,39 @@ function SheetAgentFacts({ serverId, agentId }: { serverId: string; agentId: str
   return text ? <PaneSubtitle text={text} testID="agent-pane-subtitle" /> : null;
 }
 
+function useAgentStreamKey(
+  serverId: string,
+  draftId: string | undefined,
+  agentId: string | undefined,
+): string {
+  const identity = useRef({ serverId, draftId, agentId, key: `${serverId}:${draftId ?? agentId}` });
+  if (
+    identity.current.serverId !== serverId ||
+    identity.current.draftId !== draftId ||
+    identity.current.agentId !== agentId
+  ) {
+    // Creating an agent changes the owner of this conversation, not its viewport.
+    // A later retarget to another agent still starts a fresh stream view.
+    const previousDraftId = identity.current.draftId;
+    const pendingCreate = previousDraftId
+      ? useCreateFlowStore.getState().pendingByDraftId[previousDraftId]
+      : undefined;
+    const isDraftHandoff =
+      identity.current.serverId === serverId &&
+      draftId === undefined &&
+      pendingCreate?.serverId === serverId &&
+      pendingCreate.lifecycle === "sent" &&
+      pendingCreate.agentId === agentId;
+    identity.current = {
+      serverId,
+      draftId,
+      agentId,
+      key: isDraftHandoff ? identity.current.key : `${serverId}:${draftId ?? agentId}`,
+    };
+  }
+  return identity.current.key;
+}
+
 const AgentStreamSection = memo(function AgentStreamSection({
   streamViewRef,
   serverId,
@@ -1394,7 +1428,9 @@ const AgentStreamSection = memo(function AgentStreamSection({
   toast: ReturnType<typeof useToastHost>["api"];
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
 }) {
+  const streamKey = useAgentStreamKey(serverId, draft?.draftId, agentId);
   const isCompactFormFactor = useIsCompactFormFactor();
+  const readingPosition = useAgentReadingPosition();
   // The track bar's space is reserved whenever the bar is mounted, pills or not: pills come and go
   // every turn, and the transcript must not jump with them.
   const bottomOverlayTailClearance = hasActiveComposer
@@ -1452,6 +1488,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   if (draftTimeline) {
     return (
       <AgentStreamView
+        key={streamKey}
         ref={streamViewRef}
         agentId={draftTimeline.agent.id}
         serverId={serverId}
@@ -1472,6 +1509,8 @@ const AgentStreamSection = memo(function AgentStreamSection({
   }
   return (
     <AgentStreamView
+      key={streamKey}
+      readingPosition={readingPosition}
       ref={streamViewRef}
       agentId={agent.id}
       serverId={serverId}

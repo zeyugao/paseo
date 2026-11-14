@@ -8,11 +8,17 @@ import {
 
 export const ToolCallExpansionContext = createContext<ToolCallExpansion | null>(null);
 
-/** One store per viewed agent; switching agents starts with every tool call closed. */
-export function useAgentToolCallExpansion(agentId: string): ToolCallExpansion {
-  const [owner, setOwner] = useState(() => ({ agentId, expansion: createToolCallExpansion() }));
+/** One store per viewed agent; saved reading state seeds rows before their first layout. */
+export function useAgentToolCallExpansion(
+  agentId: string,
+  initial?: Parameters<typeof createToolCallExpansion>[0],
+): ToolCallExpansion {
+  const [owner, setOwner] = useState(() => ({
+    agentId,
+    expansion: createToolCallExpansion(initial),
+  }));
   if (owner.agentId === agentId) return owner.expansion;
-  const next = { agentId, expansion: createToolCallExpansion() };
+  const next = { agentId, expansion: createToolCallExpansion(initial) };
   setOwner(next);
   return next.expansion;
 }

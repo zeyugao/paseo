@@ -123,7 +123,9 @@ When a workspace target cannot open yet, `navigateToWorkspace()` records a
 pending open in the layout model under that host and workspace key. The owning
 workspace screen consumes it once after hydration. Archived-workspace recovery
 reads the same pending target, so startup redirects cannot discard it and a
-retained screen cannot consume another workspace's request.
+retained screen cannot consume another workspace's request. Archive cleanup
+removes obsolete saved layout without clearing a newer explicit open request;
+the restored workspace consumes that request.
 
 Legacy `?open=` links seed this model state at the matched route boundary and
 then lose the query parameter. Internal navigation does not use the query as a

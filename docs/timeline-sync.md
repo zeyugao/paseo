@@ -286,6 +286,10 @@ settlement. Canonical acknowledgement retires optimistic activity immediately. W
 known, whichever arrives second deletes the record. A canonical acknowledgement that arrives first
 prevents a later transport error from rolling back a prompt already observed.
 
+Creating an agent transfers the draft's first submitted conversation without replacing its
+viewport. Preserve that viewport only for the agent acknowledged by the draft's create attempt;
+switching to another conversation or host starts a new one.
+
 The daemon's accepted response waits for the correlated run start and guarantees that the canonical
 submitted row has been recorded. It publishes the accepted turn's liveness before that row, so the
 client applies authoritative activity before canonical acknowledgement retires optimistic activity.

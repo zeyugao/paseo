@@ -230,6 +230,10 @@ async function beginTimelineRowStabilityCheck(
 ): Promise<() => Promise<void>> {
   await expect(timelineRow).toBeVisible();
   await timelineRow.evaluate((initialRow) => {
+    const rowId = initialRow.closest<HTMLElement>("[data-history-row-id]")?.dataset.historyRowId;
+    const testId = initialRow.getAttribute("data-testid");
+    if (!rowId || !testId) throw new Error("Expected a rendered timeline message row");
+    const selector = `[data-history-row-id="${CSS.escape(rowId)}"] [data-testid="${CSS.escape(testId)}"]`;
     const state = {
       active: true,
       lastTop: initialRow.getBoundingClientRect().top,
@@ -241,15 +245,16 @@ async function beginTimelineRowStabilityCheck(
     windowState.__messageSubmissionTimelineRowStability = state;
     const checkFrame = () => {
       if (!state.active) return;
-      if (!initialRow.isConnected) {
+      const row = document.querySelector<HTMLElement>(selector);
+      if (!row) {
         state.sawMissing = true;
         requestAnimationFrame(checkFrame);
         return;
       }
-      if (!initialRow.checkVisibility({ opacityProperty: true, visibilityProperty: true })) {
+      if (!row.checkVisibility({ opacityProperty: true, visibilityProperty: true })) {
         state.sawHidden = true;
       }
-      const top = initialRow.getBoundingClientRect().top;
+      const top = row.getBoundingClientRect().top;
       state.largestDownwardShift = Math.max(state.largestDownwardShift, top - state.lastTop);
       state.lastTop = top;
       requestAnimationFrame(checkFrame);
@@ -1192,7 +1197,7 @@ test.describe("Agent message submission", () => {
     test.setTimeout(120_000);
     const toasts = await recordPanelToasts(page);
     const pending = await beginDraftCreateSubmission(page, draftCreateScenario);
-    // The created agent takes over the draft's timeline: the same row stays mounted and painted.
+    // Follow the submitted message's painted row through the ownership change.
     const finishTimelineRowStabilityCheck = await beginTimelineRowStabilityCheck(
       page,
       pending.userMessage,

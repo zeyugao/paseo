@@ -56,6 +56,9 @@ import { useWorkspaceTabLayout } from "@/screens/workspace/use-workspace-tab-lay
 import {
   retainWorkspaceTabMeasuredWidth,
   workspaceTabNaturalWidth,
+  resolveWorkspaceTabRowTrailingInset,
+  resolveWorkspaceTabRowClearance,
+  type WorkspaceTabRowClearance,
   type WorkspaceTabLayoutMetrics,
   type WorkspaceTabLayoutResult,
 } from "@/screens/workspace/workspace-tab-layout";
@@ -100,6 +103,8 @@ import {
   useHorizontalScrollBoundary,
 } from "@/components/ui/horizontal-scroll-boundary";
 import { useSessionStore } from "@/stores/session-store";
+import { useWindowLayout } from "@/window-layout";
+import { useOwnsWindowChromeCorner } from "@/utils/desktop-window";
 
 const DROPDOWN_WIDTH = 220;
 const DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH = 36;
@@ -513,6 +518,8 @@ interface WorkspaceTabTrackState {
   setSnapshot: Dispatch<SetStateAction<WorkspaceTabTrackSnapshot | null>>;
   addButtonWidth: number;
   setAddButtonWidth: Dispatch<SetStateAction<number>>;
+  rowClearance: WorkspaceTabRowClearance | null;
+  setRowClearance: Dispatch<SetStateAction<WorkspaceTabRowClearance | null>>;
 }
 
 const WorkspaceTabTrackContext = createContext<WorkspaceTabTrackState | null>(null);
@@ -526,6 +533,7 @@ export function WorkspaceTabMeasurementScope({ children }: { children: React.Rea
   );
   const [snapshot, setSnapshot] = useState<WorkspaceTabTrackSnapshot | null>(null);
   const [addButtonWidth, setAddButtonWidth] = useState(0);
+  const [rowClearance, setRowClearance] = useState<WorkspaceTabRowClearance | null>(null);
   const track = useMemo(
     () => ({
       presentations,
@@ -536,8 +544,10 @@ export function WorkspaceTabMeasurementScope({ children }: { children: React.Rea
       setSnapshot,
       addButtonWidth,
       setAddButtonWidth,
+      rowClearance,
+      setRowClearance,
     }),
-    [presentations, labelMeasurements, snapshot, addButtonWidth],
+    [presentations, labelMeasurements, snapshot, addButtonWidth, rowClearance],
   );
   return (
     <WorkspaceTabTrackContext.Provider value={track}>{children}</WorkspaceTabTrackContext.Provider>
@@ -1222,15 +1232,50 @@ function ResolvedWorkspaceDesktopTabsRow({
 }: ResolvedWorkspaceDesktopTabsRowProps) {
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
-  const { naturalExplorerTrack, outsideNewTabButton } = useMemo(() => {
+  const ownsTrailingCorner = useOwnsWindowChromeCorner("top-right");
+  const { naturalExplorerTrack, outsideNewTabButton, measuresSystemClearance } = useMemo(() => {
     const nativeExplorer = isNative && host === "explorer";
     return {
       naturalExplorerTrack: nativeExplorer,
       outsideNewTabButton: embedded || nativeExplorer,
+      measuresSystemClearance: host === "main" && !embedded && ownsTrailingCorner,
     };
-  }, [embedded, host]);
+  }, [embedded, host, ownsTrailingCorner]);
   const newTabKeys = useShortcutKeys("workspace-tab-new");
   const [tabsContainerWidth, setTabsContainerWidth] = useState<number>(0);
+  const tabsContainerRef = useRef<View>(null);
+  const windowLayout = useWindowLayout();
+  const { rowClearance, setRowClearance } = useWorkspaceTabTrack();
+  const trailingInset = resolveWorkspaceTabRowClearance(
+    rowClearance,
+    windowLayout,
+    measuresSystemClearance,
+  );
+  const measurementRevision = useRef(0);
+  const measureTrailingInset = useCallback(() => {
+    const revision = ++measurementRevision.current;
+    // Explorer and embedded rails already have an inset owner. A hidden status bar's
+    // snapshot must not erase the clearance needed when the full header returns.
+    if (!measuresSystemClearance || !windowLayout || windowLayout.statusBarHidden) return;
+    tabsContainerRef.current?.measureInWindow((x, y, width, height) => {
+      if (revision !== measurementRevision.current || width <= 0 || height <= 0) return;
+      const inset = resolveWorkspaceTabRowTrailingInset({ x, y, width, height }, windowLayout);
+      setRowClearance((current) =>
+        current?.inset === inset &&
+        current.bounds.width === windowLayout.bounds.width &&
+        current.bounds.height === windowLayout.bounds.height
+          ? current
+          : { bounds: windowLayout.bounds, inset },
+      );
+    });
+  }, [measuresSystemClearance, windowLayout, setRowClearance]);
+  useLayoutEffect(() => {
+    measureTrailingInset();
+    return () => {
+      measurementRevision.current += 1;
+    };
+  }, [measureTrailingInset]);
+  const obstructionStyle = useMemo(() => ({ paddingRight: trailingInset }), [trailingInset]);
   const tabsScrollRef = useRef<ScrollView>(null);
   const [exitFocusModeWidth, setExitFocusModeWidth] = useState<number>(0);
   const {
@@ -1405,7 +1450,8 @@ function ResolvedWorkspaceDesktopTabsRow({
 
   const { layout } = useWorkspaceTabLayout({
     tabLabelWidths: trackSnapshot?.labelWidths ?? [],
-    viewportWidthOverride: tabsContainerWidth > 0 ? tabsContainerWidth : null,
+    viewportWidthOverride:
+      tabsContainerWidth > 0 ? Math.max(0, tabsContainerWidth - trailingInset) : null,
     metrics: layoutMetrics,
     compact: isCompact,
     preserveNaturalWidths: outsideNewTabButton,
@@ -1438,6 +1484,7 @@ function ResolvedWorkspaceDesktopTabsRow({
   );
   const handleTabsContainerLayout = useCallback(
     (event: LayoutChangeEvent) => {
+      measureTrailingInset();
       if (naturalExplorerTrack) {
         if (event.nativeEvent.layout.width >= workspaceTabNaturalWidth(layout, layoutMetrics)) {
           tabsScrollRef.current?.scrollTo({ x: 0, animated: false });
@@ -1446,7 +1493,7 @@ function ResolvedWorkspaceDesktopTabsRow({
       }
       updateMeasuredWidth(setTabsContainerWidth, event);
     },
-    [layout, layoutMetrics, naturalExplorerTrack],
+    [layout, layoutMetrics, naturalExplorerTrack, measureTrailingInset],
   );
   // A scroll view keeps its offset when its content shrinks under the viewport, so a row that
   // stops scrolling would leave the tabs it had panned past out of view with no way back.
@@ -1578,10 +1625,13 @@ function ResolvedWorkspaceDesktopTabsRow({
 
   const row = (
     <View
+      ref={tabsContainerRef}
+      collapsable={false}
       style={[
         styles.tabsContainer,
         onSidebar && styles.tabsContainerSidebar,
         embedded && styles.tabsContainerEmbedded,
+        obstructionStyle,
       ]}
       testID="workspace-tabs-row"
       onLayout={handleTabsContainerLayout}

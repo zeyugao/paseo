@@ -21,6 +21,7 @@ import { windowChromeCornersInclude } from "@/utils/desktop-window";
 describe("desktop sidebar layout", () => {
   const geometry: WindowLayout = {
     bounds: { x: 0, y: 0, width: 951, height: 669 },
+    hingeStatus: "fully-open",
     verticalBarEdge: "trailing",
     verticalBar: { x: 875, y: 160, width: 44, height: 450 },
     divisions: [{ x: 465, y: 0, width: 21, height: 669 }],

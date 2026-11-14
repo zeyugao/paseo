@@ -1,4 +1,11 @@
-import { useCallback, useMemo, useState, type ReactElement, type ReactNode } from "react";
+import {
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import { Pressable, Text, View } from "react-native";
 import { GestureDetector } from "react-native-gesture-handler";
 import Animated from "react-native-reanimated";
@@ -27,6 +34,10 @@ import { getStatusDotColor } from "@/utils/status-dot-color";
 import { STATUS_INDICATOR_FILLED_DOT_SIZE } from "@/utils/status-indicator-geometry";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { COMPOSER_PILL_CLEARANCE, composerPillStyles } from "./pill-styles";
+import {
+  ComposerDockContentInsetsContext,
+  type ComposerDockContentInsets,
+} from "./dock/content-insets";
 
 /**
  * The strip of pills where a pane's ambient trackers and plugin actions live.
@@ -42,10 +53,11 @@ import { COMPOSER_PILL_CLEARANCE, composerPillStyles } from "./pill-styles";
  * move the transcript.
  */
 export function ComposerTrackBar({ children }: { children: ReactNode }): ReactElement {
+  const contentInsets = useContext(ComposerDockContentInsetsContext);
   const scrollGesture = usePanelAwareHorizontalScrollGesture();
   const scrollBoundary = useHorizontalScrollBoundary();
   return (
-    <View style={styles.bar} pointerEvents="box-none">
+    <View style={styles.bar(contentInsets)} pointerEvents="box-none">
       <View style={styles.trackViewport} pointerEvents="box-none">
         <GestureDetector gesture={scrollGesture}>
           <Animated.ScrollView
@@ -392,10 +404,10 @@ const styles = StyleSheet.create((theme) => {
   } as const;
 
   return {
-    bar: {
+    bar: ({ paddingLeft, paddingRight }: ComposerDockContentInsets) => ({
       position: "absolute",
-      left: 0,
-      right: 0,
+      left: paddingLeft,
+      right: paddingRight,
       bottom: 0,
       alignItems: "center",
       paddingHorizontal: theme.spacing[4],
@@ -403,7 +415,7 @@ const styles = StyleSheet.create((theme) => {
         xs: COMPOSER_PILL_CLEARANCE.compact,
         md: COMPOSER_PILL_CLEARANCE.wide,
       },
-    },
+    }),
     trackViewport: {
       width: "100%",
       maxWidth: theme.contentMaxWidth,

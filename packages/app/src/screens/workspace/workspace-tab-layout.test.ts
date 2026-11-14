@@ -33,6 +33,7 @@ const metrics = {
   closeButtonWidth: 0,
 };
 
+
 describe("computeWorkspaceTabLayout", () => {
   it("keeps each tab at its natural content width when space is available", () => {
     const result = computeWorkspaceTabLayout({
@@ -269,6 +270,7 @@ describe("resolveWorkspaceTabChipBackdrop", () => {
 it("uses the old single-row header only for eligible landscape workspaces", () => {
   const landscape: WindowLayout = {
     bounds: { x: 0, y: 0, width: 951, height: 669 },
+    hingeStatus: "fully-open",
     verticalBarEdge: "trailing",
     verticalBar: { x: 895, y: 56, width: 56, height: 613 },
     divisions: [],

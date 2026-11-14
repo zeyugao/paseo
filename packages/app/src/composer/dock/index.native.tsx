@@ -6,8 +6,11 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { HEADER_INNER_HEIGHT } from "@/constants/layout";
 import { resolveContentMaxWidth, useAppSettings } from "@/hooks/use-settings";
+import { useWindowLayout, resolveWorkspaceActionPlacement } from "@/window-layout";
+import { WindowLayoutContentAllocationContext } from "@/window-layout/context";
+import { resolveSafeAreaInsets } from "@/window-layout/model";
 import { KeyboardTranslateView } from "@/keyboard/shift";
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { View, type LayoutChangeEvent, type ViewProps, StyleSheet } from "react-native";
 import { StyleSheet as ThemedStyleSheet } from "react-native-unistyles";
 import Animated, {
@@ -19,12 +22,14 @@ import Animated, {
 import { useKeyboardShift } from "@/keyboard/shift";
 import {
   resolveCenteredClearance,
+  resolveComposerBarCompensation,
   resolveComposerBottomPlacement,
   resolveComposerSlotCapacity,
   updateComposerCapacity,
   type ComposerCapacity,
 } from "./internal/capacity";
 import { SPACING } from "@/styles/theme";
+import { ComposerDockContentInsetsContext } from "./content-insets";
 
 const ViewportSizing = createContext<SharedValue<ComposerCapacity | undefined> | null>(null);
 
@@ -132,8 +137,42 @@ export function ComposerDock({
   fullscreen = false,
 }: ComposerDockProps) {
   const insets = useSafeAreaInsets();
-  const contentMaxWidth = resolveContentMaxWidth(useAppSettings().settings);
+  const windowLayout = useWindowLayout();
+  const hasPinnedSidebar =
+    useContext(WindowLayoutContentAllocationContext)?.hasPinnedSidebar ?? false;
+  const [viewport, setViewport] = useState(() => ({ width: 0, height: 0 }));
   const centeredClearance = useCenteredClearance(insets.bottom);
+  const { measureViewport: measureCenteredViewport } = centeredClearance;
+  const measureViewport = useCallback(
+    (event: LayoutChangeEvent) => {
+      const { width, height } = event.nativeEvent.layout;
+      setViewport((previous) =>
+        previous.width === width && previous.height === height ? previous : { width, height },
+      );
+      if (centered) measureCenteredViewport(event);
+    },
+    [centered, measureCenteredViewport],
+  );
+  const balancedViewportStyle = useMemo(() => {
+    const windowInsets = resolveSafeAreaInsets(insets, windowLayout);
+    // The viewport is already allocated after the header, native bar, and docked sidebars.
+    const balance =
+      !fullscreen &&
+      !hasPinnedSidebar &&
+      resolveWorkspaceActionPlacement(windowLayout) === "vertical-bar"
+        ? resolveComposerBarCompensation({
+            isExpandedDisplay:
+              windowLayout?.hingeStatus === "partially-open" ||
+              windowLayout?.hingeStatus === "fully-open",
+            viewportWidth: viewport.width,
+            viewportHeight: viewport.height,
+            left: windowInsets.left,
+            right: windowInsets.right,
+          })
+        : 0;
+    return { paddingLeft: Math.max(0, balance), paddingRight: Math.max(0, -balance) };
+  }, [fullscreen, hasPinnedSidebar, viewport, windowLayout, insets]);
+  const contentMaxWidth = resolveContentMaxWidth(useAppSettings().settings);
   const placement = resolveComposerBottomPlacement({
     safeAreaBottom: insets.bottom,
     contentSpacing: SPACING[4],
@@ -157,11 +196,11 @@ export function ComposerDock({
         style={
           fullscreen
             ? dockStyles.viewport
-            : [dockStyles.centeredViewport, { paddingBottom: bottomInset }]
+            : [dockStyles.centeredViewport, balancedViewportStyle, { paddingBottom: bottomInset }]
         }
         bottomInset={bottomInset}
         centered
-        onLayout={centeredClearance.measureViewport}
+        onLayout={measureViewport}
       >
         <KeyboardTranslateView
           style={
@@ -196,7 +235,11 @@ export function ComposerDock({
     );
   }
   return (
-    <ComposerViewport style={dockStyles.viewport} keyboardGap={placement.keyboardGap}>
+    <ComposerViewport
+      style={dockStyles.viewport}
+      keyboardGap={placement.keyboardGap}
+      onLayout={measureViewport}
+    >
       <KeyboardTranslateView
         style={dockStyles.surface}
         enabled={!fullscreen}
@@ -211,12 +254,16 @@ export function ComposerDock({
           {/* A responder ancestor intercepts native scroll drags on Android Fabric.
               Only unclaimed background touches may reach this sibling. */}
           <ComposerDockBackground style={StyleSheet.absoluteFill} />
-          <View style={dockStyles.content} pointerEvents="box-none">
-            {content}
-          </View>
+          <ComposerDockContentInsetsContext.Provider value={balancedViewportStyle}>
+            <View style={dockStyles.content} pointerEvents="box-none">
+              {content}
+            </View>
+          </ComposerDockContentInsetsContext.Provider>
         </View>
         <ComposerViewportContent
-          style={fullscreen ? dockStyles.fullscreenSlot : dockStyles.composer}
+          style={
+            fullscreen ? dockStyles.fullscreenSlot : [dockStyles.composer, balancedViewportStyle]
+          }
           fullscreen={fullscreen}
         >
           <View

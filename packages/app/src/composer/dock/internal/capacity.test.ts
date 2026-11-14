@@ -1,12 +1,40 @@
 import { describe, expect, it } from "vitest";
 import {
   resolveCenteredClearance,
+  resolveComposerBarCompensation,
   resolveComposerBottomPlacement,
   resolveComposerSlotCapacity,
   resolveInlineComposerCapacity,
   resolveComposerCapacity,
   updateComposerCapacity,
 } from "./capacity";
+
+describe("composer bar compensation", () => {
+  it.each([
+    { expanded: true, width: 382, height: 566, left: 0, right: 84, expected: 0 },
+    { expanded: true, width: 867, height: 625, left: 0, right: 84, expected: 84 },
+    { expanded: true, width: 399, height: 625, left: 70, right: 0, expected: 0 },
+    { expanded: true, width: 434, height: 300, left: 0, right: 84, expected: 84 },
+    { expanded: true, width: 600, height: 400, left: 70, right: 0, expected: -70 },
+    { expanded: true, width: 400, height: 400, left: 0, right: 84, expected: 0 },
+    { expanded: true, width: 867, height: 0, left: 0, right: 84, expected: 0 },
+    { expanded: false, width: 382, height: 566, left: 0, right: 84, expected: 0 },
+    { expanded: false, width: 600, height: 400, left: 70, right: 0, expected: 0 },
+  ])(
+    "balances $width × $height only on an expanded display ($expanded)",
+    ({ expanded, width, height, left, right, expected }) => {
+      expect(
+        resolveComposerBarCompensation({
+          isExpandedDisplay: expanded,
+          viewportWidth: width,
+          viewportHeight: height,
+          left,
+          right,
+        }),
+      ).toBe(expected);
+    },
+  );
+});
 
 describe("composer bottom placement", () => {
   const keyboardHeight = 264;

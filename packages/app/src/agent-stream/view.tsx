@@ -1,10 +1,15 @@
 import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import {
+  ComposerDockContentInsetsContext,
+  type ComposerDockContentInsets,
+} from "@/composer/dock/content-insets";
 import React, {
   forwardRef,
   memo,
   useCallback,
   useEffect,
+  useContext,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -363,6 +368,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     ref,
   ) {
     const { t } = useTranslation();
+    const contentInsets = useContext(ComposerDockContentInsetsContext);
     const autoExpandReasoning = useSettings((settings) => settings.autoExpandReasoning);
     const chatDisplay = useSettings((settings) => settings.chatDisplay);
     const chatOutlineEnabled = useSettings((settings) => settings.chatOutlineEnabled);
@@ -1198,7 +1204,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
                     olderHistoryProgressKey: progressKey,
                     scrollEnabled: streamScrollEnabled,
                     listStyle: stylesheet.list,
-                    baseListContentContainerStyle: stylesheet.listContentContainer,
+                    baseListContentContainerStyle: stylesheet.listContentContainer(contentInsets),
                     forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
                     contentMaxWidth,
                   })}
@@ -1715,14 +1721,18 @@ const stylesheet = StyleSheet.create((theme) => ({
     alignSelf: "center",
     paddingHorizontal: theme.spacing[2],
   },
-  listContentContainer: {
+  listContentContainer: ({ paddingLeft, paddingRight }: ComposerDockContentInsets) => ({
     paddingVertical: 0,
     flexGrow: 1,
-    paddingHorizontal: {
-      xs: theme.spacing[3],
-      md: theme.spacing[4],
+    paddingLeft: {
+      xs: theme.spacing[3] + paddingLeft,
+      md: theme.spacing[4] + paddingLeft,
     },
-  },
+    paddingRight: {
+      xs: theme.spacing[3] + paddingRight,
+      md: theme.spacing[4] + paddingRight,
+    },
+  }),
   forwardListContentContainer: {
     paddingTop: theme.spacing[4],
     paddingBottom: theme.spacing[4],

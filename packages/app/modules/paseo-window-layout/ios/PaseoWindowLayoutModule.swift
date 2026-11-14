@@ -101,6 +101,7 @@ final class WindowLayoutView: ExpoView {
   private var topBarGuide: UILayoutGuide?
   private var occlusions: [CGRect] = []
   private var measuredBounds = CGRect.zero
+  private var hingeStatus = "unavailable"
 
   required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
@@ -113,6 +114,20 @@ final class WindowLayoutView: ExpoView {
         view.setNeedsUpdateConstraints()
         view.scheduleUpdate()
       }
+      addInteraction(UIHingeInteraction { [weak self] _, update in
+        guard let self else { return }
+        let status: String
+        switch update.hinge?.status {
+        case .closed?: status = "closed"
+        case .partiallyOpen?: status = "partially-open"
+        case .fullyOpen?: status = "fully-open"
+        case nil: status = "unavailable"
+        default: status = "unknown"
+        }
+        guard status != self.hingeStatus else { return }
+        self.hingeStatus = status
+        self.scheduleUpdate()
+      })
     }
     #endif
   }
@@ -248,6 +263,7 @@ final class WindowLayoutView: ExpoView {
     }
     let payload: [String: Any] = [
       "bounds": rect(bounds),
+      "hingeStatus": hingeStatus,
       "insets": [
         "top": insets.top,
         "right": insets.right,

@@ -11,6 +11,7 @@ const systemInsets = { top: 59, right: 0, bottom: 34, left: 0 };
 function layout(input: Partial<WindowLayout> = {}): WindowLayout {
   return {
     bounds: { x: 0, y: 0, width: 402, height: 874 },
+    hingeStatus: "unavailable",
     verticalBarEdge: "none",
     verticalBar: null,
     divisions: [],

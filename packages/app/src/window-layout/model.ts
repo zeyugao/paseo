@@ -7,6 +7,8 @@ export interface WindowLayoutRect {
 
 export interface WindowLayout {
   bounds: WindowLayoutRect;
+  /** Native hinge state for this view hierarchy; unavailable on displays without one. */
+  hingeStatus: "unavailable" | "unknown" | "closed" | "partially-open" | "fully-open";
   /** Rectangular safe area measured with these bounds and system-control guides. */
   insets?: { top: number; right: number; bottom: number; left: number };
   verticalBarEdge: "none" | "leading" | "trailing";

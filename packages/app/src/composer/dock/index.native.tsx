@@ -6,8 +6,11 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { HEADER_INNER_HEIGHT } from "@/constants/layout";
 import { resolveContentMaxWidth, useAppSettings } from "@/hooks/use-settings";
+import { useWindowLayout, resolveWorkspaceActionPlacement } from "@/window-layout";
+import { WindowLayoutContentAllocationContext } from "@/window-layout/context";
+import { resolveSafeAreaInsets } from "@/window-layout/model";
 import { KeyboardTranslateView } from "@/keyboard/shift";
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { View, type LayoutChangeEvent, type ViewProps, StyleSheet } from "react-native";
 import { StyleSheet as ThemedStyleSheet } from "react-native-unistyles";
 import Animated, {
@@ -19,6 +22,7 @@ import Animated, {
 import { useKeyboardShift } from "@/keyboard/shift";
 import {
   resolveCenteredClearance,
+  resolveComposerBarCompensation,
   resolveComposerBottomPlacement,
   resolveComposerSlotCapacity,
   updateComposerCapacity,
@@ -132,8 +136,39 @@ export function ComposerDock({
   fullscreen = false,
 }: ComposerDockProps) {
   const insets = useSafeAreaInsets();
-  const contentMaxWidth = resolveContentMaxWidth(useAppSettings().settings);
+  const windowLayout = useWindowLayout();
+  const hasPinnedSidebar =
+    useContext(WindowLayoutContentAllocationContext)?.hasPinnedSidebar ?? false;
+  const [viewport, setViewport] = useState(() => ({ width: 0, height: 0 }));
   const centeredClearance = useCenteredClearance(insets.bottom);
+  const { measureViewport: measureCenteredViewport } = centeredClearance;
+  const measureViewport = useCallback(
+    (event: LayoutChangeEvent) => {
+      const { width, height } = event.nativeEvent.layout;
+      setViewport((previous) =>
+        previous.width === width && previous.height === height ? previous : { width, height },
+      );
+      if (centered) measureCenteredViewport(event);
+    },
+    [centered, measureCenteredViewport],
+  );
+  const balancedViewportStyle = useMemo(() => {
+    const windowInsets = resolveSafeAreaInsets(insets, windowLayout);
+    // The viewport is already allocated after the header, native bar, and docked sidebars.
+    const balance =
+      !fullscreen &&
+      !hasPinnedSidebar &&
+      resolveWorkspaceActionPlacement(windowLayout) === "vertical-bar"
+        ? resolveComposerBarCompensation({
+            viewportWidth: viewport.width,
+            viewportHeight: viewport.height,
+            left: windowInsets.left,
+            right: windowInsets.right,
+          })
+        : 0;
+    return { paddingLeft: Math.max(0, balance), paddingRight: Math.max(0, -balance) };
+  }, [fullscreen, hasPinnedSidebar, viewport, windowLayout, insets]);
+  const contentMaxWidth = resolveContentMaxWidth(useAppSettings().settings);
   const placement = resolveComposerBottomPlacement({
     safeAreaBottom: insets.bottom,
     contentSpacing: SPACING[4],
@@ -157,11 +192,11 @@ export function ComposerDock({
         style={
           fullscreen
             ? dockStyles.viewport
-            : [dockStyles.centeredViewport, { paddingBottom: bottomInset }]
+            : [dockStyles.centeredViewport, balancedViewportStyle, { paddingBottom: bottomInset }]
         }
         bottomInset={bottomInset}
         centered
-        onLayout={centeredClearance.measureViewport}
+        onLayout={measureViewport}
       >
         <KeyboardTranslateView
           style={
@@ -196,7 +231,11 @@ export function ComposerDock({
     );
   }
   return (
-    <ComposerViewport style={dockStyles.viewport} keyboardGap={placement.keyboardGap}>
+    <ComposerViewport
+      style={[dockStyles.viewport, balancedViewportStyle]}
+      keyboardGap={placement.keyboardGap}
+      onLayout={measureViewport}
+    >
       <KeyboardTranslateView
         style={dockStyles.surface}
         enabled={!fullscreen}

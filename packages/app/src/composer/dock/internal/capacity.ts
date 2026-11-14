@@ -1,3 +1,15 @@
+/** Balance only a landscape content allocation, independent of the display or window mode. */
+export function resolveComposerBarCompensation(input: {
+  viewportWidth: number;
+  viewportHeight: number;
+  left: number;
+  right: number;
+}): number {
+  return input.viewportHeight > 0 && input.viewportWidth > input.viewportHeight
+    ? input.right - input.left
+    : 0;
+}
+
 interface ComposerGeometry {
   height: number;
   bottomInset: number;

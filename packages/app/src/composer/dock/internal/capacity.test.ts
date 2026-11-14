@@ -1,12 +1,37 @@
 import { describe, expect, it } from "vitest";
 import {
   resolveCenteredClearance,
+  resolveComposerBarCompensation,
   resolveComposerBottomPlacement,
   resolveComposerSlotCapacity,
   resolveInlineComposerCapacity,
   resolveComposerCapacity,
   updateComposerCapacity,
 } from "./capacity";
+
+describe("composer bar compensation", () => {
+  it.each([
+    { width: 382, height: 566, left: 0, right: 84, expected: 0 },
+    { width: 867, height: 625, left: 0, right: 84, expected: 84 },
+    { width: 399, height: 625, left: 70, right: 0, expected: 0 },
+    { width: 434, height: 300, left: 0, right: 84, expected: 84 },
+    { width: 600, height: 400, left: 70, right: 0, expected: -70 },
+    { width: 400, height: 400, left: 0, right: 84, expected: 0 },
+    { width: 867, height: 0, left: 0, right: 84, expected: 0 },
+  ])(
+    "balances a measured $width × $height allocation",
+    ({ width, height, left, right, expected }) => {
+      expect(
+        resolveComposerBarCompensation({
+          viewportWidth: width,
+          viewportHeight: height,
+          left,
+          right,
+        }),
+      ).toBe(expected);
+    },
+  );
+});
 
 describe("composer bottom placement", () => {
   const keyboardHeight = 264;

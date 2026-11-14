@@ -398,6 +398,8 @@ function WindowLayoutContentFrame({
   compact,
   workspaceKey,
   explorerVisible,
+  workspaceVisible,
+  focusModeEnabled,
   unreservedWidth,
   divided,
   desktopSidebarVisible,
@@ -406,6 +408,8 @@ function WindowLayoutContentFrame({
   compact: boolean;
   workspaceKey: string | null;
   explorerVisible: boolean;
+  workspaceVisible: boolean;
+  focusModeEnabled: boolean;
   unreservedWidth: number;
   divided: boolean;
   desktopSidebarVisible: boolean;
@@ -416,9 +420,14 @@ function WindowLayoutContentFrame({
   // A retained native stack can still report its previous docked frame for one layout pass.
   const width = desktopSidebarVisible ? null : unreservedWidth;
   const targetWidth = unreservedWidth - leftDockWidth;
+  const hasPinnedSidebar =
+    desktopSidebarVisible || (workspaceVisible && explorerVisible && !focusModeEnabled);
   const allocation = useMemo(
-    () => (compact ? null : { workspaceKey, explorerVisible, width, targetWidth, leftDockWidth }),
-    [compact, workspaceKey, explorerVisible, width, targetWidth, leftDockWidth],
+    () =>
+      compact
+        ? null
+        : { workspaceKey, explorerVisible, hasPinnedSidebar, width, targetWidth, leftDockWidth },
+    [compact, workspaceKey, explorerVisible, hasPinnedSidebar, width, targetWidth, leftDockWidth],
   );
   return (
     <WindowLayoutContentAllocationContext.Provider value={allocation}>
@@ -561,6 +570,8 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
       compact={isCompactLayout}
       workspaceKey={activeWorkspaceKey}
       explorerVisible={explorerVisible}
+      workspaceVisible={isWorkspaceRoute}
+      focusModeEnabled={isWorkspaceFocusModeEnabled}
       unreservedWidth={divisionLayout?.contentWidth ?? viewportWidth}
       divided={divisionLayout !== null}
       desktopSidebarVisible={desktopSidebarVisible}

@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import {
+  AppState,
   View,
   type LayoutChangeEvent,
   type NativeScrollEvent,
@@ -29,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { useTranslation } from "react-i18next";
 import type { StreamItem } from "@/types/stream";
+import type { CapturedReadingPosition } from "./reading-position";
 import type { Theme } from "@/styles/theme";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { useWindowLayoutHasTopEdgeControls } from "@/window-layout";
@@ -148,6 +150,8 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     isInitialHistoryLoading,
     revealInitialHistory,
     onNearBottomChange,
+    initialReadingPosition,
+    onSaveReadingPosition,
     onNearHistoryStart,
     isLoadingOlderHistory,
     hasOlderHistory,
@@ -176,6 +180,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     contentMeasuredForKey: null as string | null,
   });
   const scrollOffsetYRef = useRef(0);
+  const headerHeightRef = useRef(0);
   const isUserScrollActiveRef = useRef(false);
   const scrollKeyboardDismiss = useScrollKeyboardDismiss();
   const userScrollEndFrameIdRef = useRef<number | null>(null);
@@ -205,6 +210,13 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     newRowEstimates.noteRows(nextRows);
     return nextRows;
   }, [newRowEstimates, historyRows, liveRows]);
+  const [initialScrollTarget] = useState(() => {
+    if (!initialReadingPosition) return undefined;
+    const index = rows.findIndex((row) => row.id === initialReadingPosition.rowId);
+    return index < 0
+      ? undefined
+      : { index, viewOffset: initialReadingPosition.viewOffset, viewPosition: 0 };
+  });
   const getEstimatedItemSize = useStableEvent((item: StreamItem) => newRowEstimates.estimate(item));
   const getHistoryStartPaginationInput = useStableEvent((): HistoryStartPaginationInput => {
     const metrics = streamViewportMetricsRef.current;
@@ -296,7 +308,8 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
 
   const bottomAnchorController = useBottomAnchorController({
     agentId,
-    routeRequest: routeBottomAnchorRequest,
+    initialMode: initialScrollTarget ? "detached" : "sticky-bottom",
+    routeRequest: initialScrollTarget ? null : routeBottomAnchorRequest,
     isAuthoritativeHistoryReady,
     renderStrategy: "legend-stream",
     getTransportBehavior: getBottomAnchorTransportBehavior,
@@ -436,6 +449,45 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     [baseListContentContainerStyle, topOverlayInset],
   );
 
+  const saveReadingPosition = useStableEvent(() => {
+    if (!onSaveReadingPosition || !isListPlacedRef.current) return;
+    if (isFollowingEnd || isAtEnd()) {
+      onSaveReadingPosition(null);
+      return;
+    }
+    const state = listRef.current?.getState();
+    if (!state) return;
+    const row: StreamItem | undefined = state.data[state.start];
+    if (!row?.timelineCursor) return;
+    const position: CapturedReadingPosition = {
+      agentId,
+      epoch: row.timelineCursor.epoch,
+      seq: row.timelineCursor.seq,
+      rowId: row.id,
+      viewOffset:
+        state.positionAtIndex(state.start) +
+        headerHeightRef.current +
+        topOverlayInset -
+        state.scroll,
+    };
+    onSaveReadingPosition(position);
+  });
+  useLayoutEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state !== "active") saveReadingPosition();
+    });
+    return () => {
+      saveReadingPosition();
+      subscription.remove();
+    };
+  }, [saveReadingPosition]);
+  useLayoutEffect(() => {
+    if (!isActive) saveReadingPosition();
+  }, [isActive, saveReadingPosition]);
+  const handleListMetricsChange = useStableEvent(({ headerSize }: { headerSize: number }) => {
+    headerHeightRef.current = headerSize;
+  });
+
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       historyStartReadyRef.current = true;
@@ -453,6 +505,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
   useEffect(() => {
     const handle: StreamViewportHandle = {
       scrollToBottom: (reason = "jump-to-bottom") => {
+        onSaveReadingPosition?.(null);
         bottomAnchorController.requestLocalAnchor({
           agentId,
           reason,
@@ -469,7 +522,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
         viewportRef.current = null;
       }
     };
-  }, [agentId, bottomAnchorController, holdRow, viewportRef]);
+  }, [agentId, bottomAnchorController, holdRow, viewportRef, onSaveReadingPosition]);
 
   // The scroll-to-bottom button shows whenever following would not resume on its own. A detached
   // list resumes only from the end, so the button shows anywhere short of it. While following, the
@@ -593,6 +646,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
       bottomAnchorController.endUserScroll({
         isAtEnd: isReleasedAtEndRef.current || isAtEnd(),
       });
+      saveReadingPosition();
     });
   });
 
@@ -612,6 +666,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
       bottomAnchorController.endUserScroll({
         isAtEnd: isReleasedAtEndRef.current || isScrollEventAtEnd(event),
       });
+      saveReadingPosition();
     },
   );
 
@@ -761,11 +816,13 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
         onContentSizeChange={handleContentSizeChange}
         onItemSizeChanged={handleItemSizeChanged}
         onReady={handleListPlaced}
+        onMetricsChange={handleListMetricsChange}
         maintainVisibleContentPosition={maintainVisibleContentPosition}
         renderScrollComponent={renderScrollComponent}
         recycleItems={false}
         alignItemsAtEnd
-        initialScrollAtEnd
+        initialScrollAtEnd={!initialScrollTarget}
+        initialScrollIndex={initialScrollTarget}
         drawDistance={NATIVE_STREAM_DRAW_DISTANCE}
         getEstimatedItemSize={getEstimatedItemSize}
         scrollEnabled={scrollEnabled}

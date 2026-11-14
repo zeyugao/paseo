@@ -13,10 +13,13 @@ export interface ExpandedToolCallGroups {
  * that row again when the group forms and reads the open state then. A call toggle notifies only
  * that call's subscribers.
  */
-export function createToolCallExpansion() {
-  const calls = new Map<string, boolean>();
+export function createToolCallExpansion(initial?: {
+  calls: Record<string, boolean>;
+  groups: readonly string[];
+}) {
+  const calls = initial ? new Map(Object.entries(initial.calls)) : new Map<string, boolean>();
   const callListeners = new Map<string, Set<Listener>>();
-  const groups = new Set<string>();
+  const groups = new Set<string>(initial?.groups);
   const groupListeners = new Set<Listener>();
   let expandedGroups = createExpandedGroups();
 
@@ -30,6 +33,7 @@ export function createToolCallExpansion() {
   }
 
   return {
+    capture: () => ({ calls: Object.fromEntries(calls), groups: Array.from(groups) }),
     isCallExpanded: (callId: string, defaultExpanded: boolean) =>
       calls.get(callId) ?? defaultExpanded,
     subscribeCall(callId: string, listener: Listener) {

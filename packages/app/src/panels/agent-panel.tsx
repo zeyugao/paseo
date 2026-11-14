@@ -104,6 +104,7 @@ import { derivePendingPermissionKey, normalizeAgentSnapshot } from "@/utils/agen
 import { applyLegacyDaemonWorkspaceOwnership } from "@/workspace/legacy-daemon-workspaces";
 import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
 import { buildDraftAgentSetup, type ClientSlashCommand } from "@/client-slash-commands";
+import { useAgentReadingPosition } from "./agent-reading-position";
 
 interface ChatAgentStateShape {
   serverId: string | null;
@@ -1395,6 +1396,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
 }) {
   const isCompactFormFactor = useIsCompactFormFactor();
+  const readingPosition = useAgentReadingPosition();
   // The track bar's space is reserved whenever the bar is mounted, pills or not: pills come and go
   // every turn, and the transcript must not jump with them.
   const bottomOverlayTailClearance = hasActiveComposer
@@ -1472,6 +1474,8 @@ const AgentStreamSection = memo(function AgentStreamSection({
   }
   return (
     <AgentStreamView
+      key={agent.id}
+      readingPosition={readingPosition}
       ref={streamViewRef}
       agentId={agent.id}
       serverId={serverId}

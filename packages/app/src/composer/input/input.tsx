@@ -239,11 +239,10 @@ export interface MessageInputRef {
   getNativeElement?: () => HTMLElement | null;
 }
 
-const MIN_INPUT_HEIGHT_MOBILE = 30;
-const MIN_INPUT_HEIGHT_DESKTOP = 46;
+// The editor's intrinsic line box owns its height, including an empty draft.
+const MIN_INPUT_HEIGHT = 0;
 const DEFAULT_MAX_INPUT_HEIGHT = 160;
 const MAX_INPUT_VIEWPORT_RATIO = 0.5;
-const MIN_INPUT_HEIGHT = isWeb ? MIN_INPUT_HEIGHT_DESKTOP : MIN_INPUT_HEIGHT_MOBILE;
 type WebTextInputKeyPressEvent = NativeSyntheticEvent<
   TextInputKeyPressEventData & {
     metaKey?: boolean;
@@ -2376,7 +2375,7 @@ const styles = StyleSheet.create((theme: Theme) => ({
     ...(Platform.OS === "ios" ? { overflow: "hidden" as const } : {}),
     flexShrink: 1,
     flexDirection: "column",
-    gap: theme.spacing[3],
+    gap: bySizing({ touch: 0, pointer: theme.spacing[2] }),
     backgroundColor: theme.colors.surface1,
     borderWidth: theme.borderWidth[1],
     borderColor: theme.colors.borderAccent,
@@ -2434,6 +2433,7 @@ const styles = StyleSheet.create((theme: Theme) => ({
     // Preserve the controls when an ancestor constrains an overlong draft.
     flexShrink: 1,
     width: "100%",
+    paddingVertical: 0,
     color: theme.colors.foreground,
     fontSize: theme.fontSize.content,
     fontWeight: theme.fontWeight.normal,

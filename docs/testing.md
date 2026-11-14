@@ -187,6 +187,8 @@ Codex MultiAgentV2 real tests use local Codex authentication rather than the Ope
 - Agent lifecycle fixtures must survive a fresh disk read before reopening. A cached record can hide serialization errors that appear after restart or on another host.
 - App: `packages/app/vitest.setup.ts` provides `expo`/`__DEV__` shims and stubs a few native-only modules (`react-native-unistyles`, `react-native-svg`, `expo-linking`, `@xterm/addon-ligatures`). Stubbing here is for modules that have no meaningful Node behavior — not a license to mock app code.
 
+Browser ESM validates native-only named imports before platform guards run. Keep those import shims in the shared React Native adapter; verify native UI interactions on the native surface rather than simulating a menu choice in the browser.
+
 ## Running tests locally
 
 Test suites in this repo are heavy. Running them in bulk freezes the machine, especially with multiple agents in parallel.

@@ -118,6 +118,12 @@ When Mo requests an APK, use `npm run build:apk:arm64` for an ARM64 build: write
 
 See [docs/development.md](docs/development.md) for full setup, build sync requirements, and debugging.
 
+## Commit history
+
+- When a change corrects a problem in an earlier commit, fold the correction, tests, and docs into that original commit. Amend it if it is `HEAD`; otherwise use an interactive rebase. Do not leave a second fix or fixup commit for the same change.
+- Keep unrelated changes in separate commits and preserve the behavior of replayed commits. Update the original commit message to describe the final behavior and validation.
+- This rule does not authorize force-pushing shared branches. Keep upstream history and published release branches and tags unchanged; follow the release policy below.
+
 ## Rebasing onto upstream/main
 
 Rebasing onto `upstream/main` must produce a series of complete, final functional changes on top of the selected upstream commit.

@@ -41,6 +41,8 @@ export const fr: TranslationResources = {
       cancel: "Annuler",
       close: "Fermer",
       copy: "Copier",
+      copyLink: "Copier le lien",
+      openLink: "Ouvrir le lien",
       copyLine: "Copier la ligne",
       dismiss: "Ignorer",
       reload: "Recharger",

@@ -1,5 +1,28 @@
 import { COMPACT_CONTENT_WIDTH } from "@/constants/layout";
-import { resolveWorkspaceActionPlacement, type WindowLayout } from "@/window-layout/model";
+import {
+  resolveWorkspaceActionPlacement,
+  type WindowLayout,
+  type WindowLayoutRect,
+} from "@/window-layout/model";
+
+export function resolveWorkspaceTabRowTrailingInset(
+  row: WindowLayoutRect,
+  layout: WindowLayout | null,
+): number {
+  const occlusions = layout?.occlusions;
+  if (!occlusions) return 0;
+  const right = row.x + row.width;
+  const bottom = row.y + row.height;
+  let inset = 0;
+  for (const occlusion of occlusions) {
+    const overlapsHorizontally = occlusion.x < right && occlusion.x + occlusion.width > row.x;
+    const overlapsVertically = occlusion.y < bottom && occlusion.y + occlusion.height > row.y;
+    if (overlapsHorizontally && overlapsVertically) {
+      inset = Math.max(inset, Math.ceil(right - Math.max(row.x, occlusion.x)));
+    }
+  }
+  return inset;
+}
 
 export function shouldUseInlineWorkspaceHeader(
   layout: WindowLayout | null,

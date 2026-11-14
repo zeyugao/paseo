@@ -17,6 +17,7 @@ import {
   resolveInlineWorkspaceTitleWidth,
   resolveInlineWorkspaceTabPresentation,
   shouldUseInlineWorkspaceHeader,
+  resolveWorkspaceTabRowTrailingInset,
   workspaceTabNaturalWidth,
 } from "@/screens/workspace/workspace-tab-layout";
 
@@ -32,6 +33,47 @@ const metrics = {
   tabHorizontalPadding: 8,
   closeButtonWidth: 0,
 };
+
+describe("workspace tab row system clearance", () => {
+  const portrait: WindowLayout = {
+    bounds: { x: 0, y: 0, width: 669, height: 951 },
+    verticalBarEdge: "none",
+    verticalBar: null,
+    occlusions: [{ x: 525, y: 0, width: 144, height: 82 }],
+    divisions: [],
+  };
+
+  it("keeps second-row tabs and their actions before the portrait status region", () => {
+    const row = { x: 200, y: 44, width: 469, height: 44 };
+    const inset = resolveWorkspaceTabRowTrailingInset(row, portrait);
+    expect(row.x + row.width - inset).toBe(525);
+  });
+
+  it("does not reserve an occlusion outside the row or repeat an existing reservation", () => {
+    expect(
+      resolveWorkspaceTabRowTrailingInset({ x: 200, y: 82, width: 469, height: 44 }, portrait),
+    ).toBe(0);
+    expect(
+      resolveWorkspaceTabRowTrailingInset({ x: 200, y: 44, width: 325, height: 44 }, portrait),
+    ).toBe(0);
+    expect(
+      resolveWorkspaceTabRowTrailingInset(
+        { x: 200, y: 44, width: 469, height: 44 },
+        { ...portrait, occlusions: [] },
+      ),
+    ).toBe(0);
+  });
+
+  it("rounds fractional clearance outward and follows changed system geometry", () => {
+    const row = { x: 200, y: 44, width: 469, height: 44 };
+    const fractional = {
+      ...portrait,
+      occlusions: [{ x: 524.75, y: 0, width: 144.25, height: 82 }],
+    };
+    expect(resolveWorkspaceTabRowTrailingInset(row, fractional)).toBe(145);
+    expect(resolveWorkspaceTabRowTrailingInset(row, null)).toBe(0);
+  });
+});
 
 describe("computeWorkspaceTabLayout", () => {
   it("keeps each tab at its natural content width when space is available", () => {

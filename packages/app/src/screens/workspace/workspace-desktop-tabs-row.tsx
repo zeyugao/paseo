@@ -56,6 +56,7 @@ import { useWorkspaceTabLayout } from "@/screens/workspace/use-workspace-tab-lay
 import {
   retainWorkspaceTabMeasuredWidth,
   workspaceTabNaturalWidth,
+  resolveWorkspaceTabRowTrailingInset,
   type WorkspaceTabLayoutMetrics,
   type WorkspaceTabLayoutResult,
 } from "@/screens/workspace/workspace-tab-layout";
@@ -100,6 +101,7 @@ import {
   useHorizontalScrollBoundary,
 } from "@/components/ui/horizontal-scroll-boundary";
 import { useSessionStore } from "@/stores/session-store";
+import { useWindowLayout } from "@/window-layout";
 
 const DROPDOWN_WIDTH = 220;
 const DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH = 36;
@@ -1231,6 +1233,21 @@ function ResolvedWorkspaceDesktopTabsRow({
   }, [embedded, host]);
   const newTabKeys = useShortcutKeys("workspace-tab-new");
   const [tabsContainerWidth, setTabsContainerWidth] = useState<number>(0);
+  const tabsContainerRef = useRef<View>(null);
+  const windowLayout = useWindowLayout();
+  const [trailingInset, setTrailingInset] = useState(0);
+  const measureTrailingInset = useCallback(() => {
+    if (!windowLayout) {
+      setTrailingInset(0);
+      return;
+    }
+    tabsContainerRef.current?.measureInWindow((x, y, width, height) => {
+      if (width <= 0 || height <= 0) return;
+      setTrailingInset(resolveWorkspaceTabRowTrailingInset({ x, y, width, height }, windowLayout));
+    });
+  }, [windowLayout]);
+  useLayoutEffect(measureTrailingInset, [measureTrailingInset]);
+  const obstructionStyle = useMemo(() => ({ paddingRight: trailingInset }), [trailingInset]);
   const tabsScrollRef = useRef<ScrollView>(null);
   const [exitFocusModeWidth, setExitFocusModeWidth] = useState<number>(0);
   const {
@@ -1405,7 +1422,8 @@ function ResolvedWorkspaceDesktopTabsRow({
 
   const { layout } = useWorkspaceTabLayout({
     tabLabelWidths: trackSnapshot?.labelWidths ?? [],
-    viewportWidthOverride: tabsContainerWidth > 0 ? tabsContainerWidth : null,
+    viewportWidthOverride:
+      tabsContainerWidth > 0 ? Math.max(0, tabsContainerWidth - trailingInset) : null,
     metrics: layoutMetrics,
     compact: isCompact,
     preserveNaturalWidths: outsideNewTabButton,
@@ -1438,6 +1456,7 @@ function ResolvedWorkspaceDesktopTabsRow({
   );
   const handleTabsContainerLayout = useCallback(
     (event: LayoutChangeEvent) => {
+      measureTrailingInset();
       if (naturalExplorerTrack) {
         if (event.nativeEvent.layout.width >= workspaceTabNaturalWidth(layout, layoutMetrics)) {
           tabsScrollRef.current?.scrollTo({ x: 0, animated: false });
@@ -1446,7 +1465,7 @@ function ResolvedWorkspaceDesktopTabsRow({
       }
       updateMeasuredWidth(setTabsContainerWidth, event);
     },
-    [layout, layoutMetrics, naturalExplorerTrack],
+    [layout, layoutMetrics, naturalExplorerTrack, measureTrailingInset],
   );
   // A scroll view keeps its offset when its content shrinks under the viewport, so a row that
   // stops scrolling would leave the tabs it had panned past out of view with no way back.
@@ -1578,10 +1597,13 @@ function ResolvedWorkspaceDesktopTabsRow({
 
   const row = (
     <View
+      ref={tabsContainerRef}
+      collapsable={false}
       style={[
         styles.tabsContainer,
         onSidebar && styles.tabsContainerSidebar,
         embedded && styles.tabsContainerEmbedded,
+        obstructionStyle,
       ]}
       testID="workspace-tabs-row"
       onLayout={handleTabsContainerLayout}

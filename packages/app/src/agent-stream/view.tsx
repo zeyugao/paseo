@@ -1,6 +1,12 @@
 import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { Button } from "@/components/ui/button";
+import { ComposerTrackBar } from "@/composer/tracks";
+import {
+  COMPOSER_PILL_MIN_HEIGHT,
+  composerPillStyles,
+  resolveComposerTrackTailClearance,
+} from "@/composer/pill-styles";
 import { useReadingPositionRestore } from "./use-reading-position-restore";
 import type { CapturedReadingPosition, ReadingPositionPersistence } from "./reading-position";
 import React, {
@@ -258,10 +264,7 @@ export interface AgentStreamViewProps {
   isInitialHistoryLoading?: boolean;
   revealInitialHistory?: boolean;
   readingPosition?: ReadingPositionPersistence;
-  /** Tail space required by a transparent overlay rendered at the bottom edge. */
-  bottomOverlayTailClearance?: number;
-  /** Bottom offset required for controls floating above that overlay. */
-  bottomOverlayControlClearance?: number;
+  bottomBarContent?: ReactNode;
   toast?: ToastApi | null;
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
   readOnly?: boolean;
@@ -297,10 +300,6 @@ function useRetainedValue<T>(value: T, active: boolean): T {
 const EMPTY_PENDING_MESSAGE_SUBMISSIONS: readonly PendingMessageSubmission[] = [];
 const GROUPED_TOOL_CALL_DETAIL_MAX_HEIGHT = 200;
 
-function resolveBottomOverlayControlOffset(clearance: number | undefined): number {
-  return Math.max(16, clearance ?? 0);
-}
-
 // Keep entry/exit animations off on Android due to RN dispatchDraw crashes
 // tracked in react-native-reanimated#8422.
 const shouldDisableEntryExitAnimations = Platform.OS === "android";
@@ -310,35 +309,27 @@ const scrollIndicatorFadeOut = shouldDisableEntryExitAnimations ? undefined : Fa
 function ScrollToBottomButton({
   nearBottom,
   isTimelineDetached,
-  bottomOffset,
   onPress,
 }: {
   nearBottom: NearBottom;
   isTimelineDetached: boolean;
-  bottomOffset: number;
   onPress: () => void;
 }) {
   const { t } = useTranslation();
   const isNearBottom = useIsNearBottom(nearBottom);
-  const containerStyle = useMemo(
-    () => [stylesheet.scrollToBottomContainer, { bottom: bottomOffset }],
-    [bottomOffset],
-  );
   if (isNearBottom && !isTimelineDetached) return null;
   return (
-    <View style={containerStyle} pointerEvents="box-none">
-      <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
-        <Pressable
-          style={stylesheet.scrollToBottomButton}
-          onPress={onPress}
-          accessibilityRole="button"
-          accessibilityLabel={t("agentStream.scrollToBottom")}
-          testID="scroll-to-bottom-button"
-        >
-          <ChevronDown size={24} color={stylesheet.scrollToBottomIcon.color} />
-        </Pressable>
-      </Animated.View>
-    </View>
+    <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
+      <Button
+        size="sm"
+        variant="outline"
+        style={[composerPillStyles.body, stylesheet.scrollToBottomButton]}
+        leftIcon={ChevronDown}
+        onPress={onPress}
+        accessibilityLabel={t("agentStream.scrollToBottom")}
+        testID="scroll-to-bottom-button"
+      />
+    </Animated.View>
   );
 }
 
@@ -404,8 +395,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       isInitialHistoryLoading,
       revealInitialHistory,
       readingPosition,
-      bottomOverlayTailClearance = 0,
-      bottomOverlayControlClearance,
+      bottomBarContent,
       toast,
       onOpenWorkspaceFile,
       readOnly = false,
@@ -424,6 +414,11 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       [pendingMessageSubmissions],
     );
     const isMobile = useIsCompactFormFactor();
+    const [bottomBarContentHeight, setBottomBarContentHeight] = useState(0);
+    const bottomOverlayTailClearance = resolveComposerTrackTailClearance({
+      isCompact: isMobile,
+      contentHeight: bottomBarContentHeight,
+    });
     const streamRenderStrategy = useMemo(
       () =>
         resolveStreamRenderStrategy({
@@ -1108,7 +1103,6 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     }, [baseRenderModel, pendingPermissionsNode, turnFooterNode]);
 
     const emptyStateStyle = useMemo(() => [stylesheet.emptyState, stylesheet.contentWrapper], []);
-    const scrollToBottomOffset = resolveBottomOverlayControlOffset(bottomOverlayControlClearance);
     const listEmptyComponent = useMemo(
       () =>
         renderListEmptyComponent({
@@ -1236,6 +1230,16 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       () => [...effectiveStreamItems, ...(effectiveStreamHead ?? [])],
       [effectiveStreamItems, effectiveStreamHead],
     );
+    const bottomBarTrailing = useMemo(
+      () => (
+        <ScrollToBottomButton
+          nearBottom={nearBottom}
+          isTimelineDetached={isTimelineDetached}
+          onPress={scrollToBottom}
+        />
+      ),
+      [nearBottom, isTimelineDetached, scrollToBottom],
+    );
     return (
       <ChatFind
         agentId={agentId}
@@ -1294,12 +1298,12 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               activePrompt={chatOutline.activePrompt}
               onJumpToPrompt={chatOutline.jumpToPrompt}
             />
-            <ScrollToBottomButton
-              nearBottom={nearBottom}
-              isTimelineDetached={isTimelineDetached}
-              bottomOffset={scrollToBottomOffset}
-              onPress={scrollToBottom}
-            />
+            <ComposerTrackBar
+              trailing={bottomBarTrailing}
+              onContentHeightChange={setBottomBarContentHeight}
+            >
+              {bottomBarContent}
+            </ComposerTrackBar>
           </AssistantSelectionCopySurface>
         </ToolCallSheetProvider>
       </ChatFind>
@@ -1425,11 +1429,8 @@ function agentStreamViewPropsEqual(
     reasons.push("revealInitialHistory");
   }
   if (left.readingPosition !== right.readingPosition) reasons.push("readingPosition");
-  if (left.bottomOverlayTailClearance !== right.bottomOverlayTailClearance) {
-    reasons.push("bottomOverlayTailClearance");
-  }
-  if (left.bottomOverlayControlClearance !== right.bottomOverlayControlClearance) {
-    reasons.push("bottomOverlayControlClearance");
+  if (left.bottomBarContent !== right.bottomBarContent) {
+    reasons.push("bottomBarContent");
   }
   if (left.toast !== right.toast) reasons.push("toast");
   if (left.onOpenWorkspaceFile !== right.onOpenWorkspaceFile) reasons.push("onOpenWorkspaceFile");
@@ -1849,23 +1850,13 @@ const stylesheet = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.base,
     textAlign: "center",
   },
-  scrollToBottomContainer: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    alignItems: "center",
-  },
   scrollToBottomButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: theme.colors.surface2,
-    alignItems: "center",
-    justifyContent: "center",
-    ...theme.shadow.sm,
-  },
-  scrollToBottomIcon: {
-    color: theme.colors.foreground,
+    width: COMPOSER_PILL_MIN_HEIGHT,
+    height: COMPOSER_PILL_MIN_HEIGHT,
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+    borderRadius: theme.borderRadius.full,
+    flexShrink: 0,
   },
 }));
 

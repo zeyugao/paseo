@@ -6,8 +6,9 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { HEADER_INNER_HEIGHT } from "@/constants/layout";
 import { resolveContentMaxWidth, useAppSettings } from "@/hooks/use-settings";
+import { useWindowLayout } from "@/window-layout";
 import { KeyboardTranslateView } from "@/keyboard/shift";
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { View, type LayoutChangeEvent, type ViewProps, StyleSheet } from "react-native";
 import { StyleSheet as ThemedStyleSheet } from "react-native-unistyles";
 import Animated, {
@@ -132,6 +133,19 @@ export function ComposerDock({
   fullscreen = false,
 }: ComposerDockProps) {
   const insets = useSafeAreaInsets();
+  const windowLayout = useWindowLayout();
+  const balancedViewportStyle = useMemo(() => {
+    const windowInsets = windowLayout?.insets ?? insets;
+    // The outer surface already clears the system bar. Balance only the dock below the tabs.
+    const paddingLeft =
+      !fullscreen &&
+      windowLayout?.verticalBarEdge === "trailing" &&
+      windowLayout.verticalBar !== null &&
+      windowLayout.bounds.width > windowLayout.bounds.height
+        ? Math.max(0, windowInsets.right - windowInsets.left)
+        : 0;
+    return { paddingLeft };
+  }, [fullscreen, windowLayout, insets]);
   const contentMaxWidth = resolveContentMaxWidth(useAppSettings().settings);
   const centeredClearance = useCenteredClearance(insets.bottom);
   const placement = resolveComposerBottomPlacement({
@@ -157,7 +171,7 @@ export function ComposerDock({
         style={
           fullscreen
             ? dockStyles.viewport
-            : [dockStyles.centeredViewport, { paddingBottom: bottomInset }]
+            : [dockStyles.centeredViewport, balancedViewportStyle, { paddingBottom: bottomInset }]
         }
         bottomInset={bottomInset}
         centered
@@ -196,7 +210,10 @@ export function ComposerDock({
     );
   }
   return (
-    <ComposerViewport style={dockStyles.viewport} keyboardGap={placement.keyboardGap}>
+    <ComposerViewport
+      style={[dockStyles.viewport, balancedViewportStyle]}
+      keyboardGap={placement.keyboardGap}
+    >
       <KeyboardTranslateView
         style={dockStyles.surface}
         enabled={!fullscreen}

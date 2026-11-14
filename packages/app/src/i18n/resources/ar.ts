@@ -40,6 +40,8 @@ export const ar: TranslationResources = {
       cancel: "يلغي",
       close: "يغلق",
       copy: "ينسخ",
+      copyLink: "نسخ الرابط",
+      openLink: "فتح الرابط",
       copyLine: "نسخ السطر",
       dismiss: "رفض",
       reload: "إعادة التحميل",

@@ -2,15 +2,21 @@ import { fromMarkdown } from "mdast-util-from-markdown";
 import { toNativeLinkRecognition } from "react-native-enriched-markdown/src/utils/regexParser";
 import { parseMarkdown } from "react-native-enriched-markdown/src/web/parseMarkdown";
 import { recognizeTextLinks } from "react-native-enriched-markdown/src/web/recognizeTextLinks";
+import type * as LinkMenuModule from "react-native-enriched-markdown/lib/typescript/src/linkContextMenuUtils";
+import type { LinkPressEvent } from "react-native-enriched-markdown";
 import { matchCommandLink } from "@/agent-commands";
 import { createForgeShorthand } from "@/git/forge-shorthand";
 
 import { classifyAssistantFileLink } from "@/assistant-file-links";
+import {
+  classifyForResolution,
+  type AssistantFileLinkResolution,
+} from "@/assistant-file-links/resolver";
 import { markInlineImages } from "react-native-enriched-markdown/src/web/utils";
 import type { ASTNode } from "react-native-enriched-markdown/src/web/types";
 import { QueryClient } from "@tanstack/react-query";
 import { decodeMarkdownImage, getMarkdownImageStatus } from "./image-decoding";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { darkTheme, lightTheme } from "@/styles/theme";
 import { createMarkdownStyles } from "./styles";
 import { prepareMarkdownSource, PENDING_MARKDOWN_IMAGE } from "./source";
@@ -587,15 +593,39 @@ it("recognizes bare Unicode filenames and preserves inline-code URLs", () => {
   expect(prepared.linkRecognition.inlineCode?.test("https://example.com")).toBe(true);
 });
 
-it("keeps explicit and inline-code links distinct when their URL strings match", () => {
-  const url = "/tmp/my%20file.ts";
-  const prepared = prepareMarkdownSource(`[open](${url}) and \`${url}\``);
-  expect(prepared.linkSource(url, "markdown")).toEqual({ href: url, text: url });
-  expect(prepared.linkSource(url, "inline-code")).toEqual({
-    href: url,
-    text: url,
-    sourceType: "inline-code",
-  });
+it("opens the correct file from menus when explicit and inline-code URLs match", async () => {
+  const { dispatchLinkContextMenuItem } = await vi.importActual<typeof LinkMenuModule>(
+    "react-native-enriched-markdown/lib/module/linkContextMenuUtils.js",
+  );
+  const url = "/repo/my%20file.ts:17";
+  const prepared = prepareMarkdownSource(`[open](${url}) and \`${url}\``, "/repo");
+  const resolutions: AssistantFileLinkResolution[] = [];
+  const menus = {
+    ".*": [
+      {
+        text: "Open",
+        onPress: ({ url: href, sourceType }: LinkPressEvent) => {
+          resolutions.push(
+            classifyForResolution(prepared.linkSource(href, sourceType), {
+              workspaceRoot: "/repo",
+            }),
+          );
+        },
+      },
+    ],
+  };
+  dispatchLinkContextMenuItem(menus, ".*", "Open", url, "markdown");
+  dispatchLinkContextMenuItem(menus, ".*", "Open", url, "inline-code");
+  expect(resolutions).toMatchObject([
+    {
+      kind: "resolved",
+      value: { kind: "file", target: { path: "/repo/my file.ts", lineStart: 17 } },
+    },
+    {
+      kind: "resolved",
+      value: { kind: "file", target: { path: "/repo/my%20file.ts", lineStart: 17 } },
+    },
+  ]);
 });
 
 it("extracts only Mermaid fences for the native diagram host", async () => {

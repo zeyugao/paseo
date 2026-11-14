@@ -34,10 +34,6 @@ import {
   useComposerFullscreen,
   type ComposerEditingSession,
 } from "@/composer/editing-session";
-import {
-  resolveComposerTrackControlClearance,
-  resolveComposerTrackTailClearance,
-} from "@/composer/pill-styles";
 import { getActiveMessageSubmissions } from "@/composer/submission/model";
 import { RewindComposerRestoreProvider } from "@/components/rewind/composer-restore";
 import { useAgentDescriptor } from "@/agent-presentation";
@@ -1190,6 +1186,18 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
     onAttentionInputFocus();
     return false;
   }, [onAttentionInputFocus]);
+  const bottomBarContent = useMemo(
+    () =>
+      hasActiveComposer && !draft ? (
+        <AgentTracks
+          serverId={serverId}
+          workspaceId={workspaceId}
+          agentId={agentId}
+          parentAgentId={parentPillAgentId}
+        />
+      ) : null,
+    [hasActiveComposer, draft, serverId, workspaceId, agentId, parentPillAgentId],
+  );
   const streamContent = (
     <View
       style={animatedStaticStyles.content}
@@ -1211,19 +1219,11 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
             !showHistorySyncError
           }
           revealInitialHistory={hasCachedHistory || showHistorySyncError}
-          hasActiveComposer={hasActiveComposer}
+          bottomBarContent={bottomBarContent}
           toast={toastApi}
           onOpenWorkspaceFile={onOpenWorkspaceFile}
         />
       </RenderProfile>
-      {hasActiveComposer && !draft ? (
-        <AgentTracks
-          serverId={serverId}
-          workspaceId={workspaceId}
-          agentId={agentId}
-          parentAgentId={parentPillAgentId}
-        />
-      ) : null}
     </View>
   );
 
@@ -1378,7 +1378,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   hasAppliedAuthoritativeHistory,
   isInitialHistoryLoading,
   revealInitialHistory,
-  hasActiveComposer,
+  bottomBarContent,
   toast,
   onOpenWorkspaceFile,
 }: {
@@ -1391,20 +1391,11 @@ const AgentStreamSection = memo(function AgentStreamSection({
   hasAppliedAuthoritativeHistory: boolean;
   isInitialHistoryLoading: boolean;
   revealInitialHistory: boolean;
-  hasActiveComposer: boolean;
+  bottomBarContent: ReactNode;
   toast: ReturnType<typeof useToastHost>["api"];
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
 }) {
-  const isCompactFormFactor = useIsCompactFormFactor();
   const readingPosition = useAgentReadingPosition();
-  // The track bar's space is reserved whenever the bar is mounted, pills or not: pills come and go
-  // every turn, and the transcript must not jump with them.
-  const bottomOverlayTailClearance = hasActiveComposer
-    ? resolveComposerTrackTailClearance(isCompactFormFactor)
-    : 0;
-  const bottomOverlayControlClearance = hasActiveComposer
-    ? resolveComposerTrackControlClearance(isCompactFormFactor)
-    : 0;
   const streamItemsRaw = useAgentStreamTail(serverId, agentId);
   const pendingMessageSubmissions = useSessionStore(
     useShallow((state) =>
@@ -1460,8 +1451,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
         context={draftTimeline.agent}
         streamItems={draftTimeline.streamItems}
         pendingPermissions={EMPTY_PENDING_PERMISSIONS}
-        bottomOverlayTailClearance={bottomOverlayTailClearance}
-        bottomOverlayControlClearance={bottomOverlayControlClearance}
+        bottomBarContent={bottomBarContent}
         toast={toast}
         pendingMessageSubmissions={draftTimeline.pendingMessageSubmissions}
         turnPresentation={draftTimeline.turnPresentation}
@@ -1486,8 +1476,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
       isAuthoritativeHistoryReady={hasAppliedAuthoritativeHistory}
       isInitialHistoryLoading={isInitialHistoryLoading}
       revealInitialHistory={revealInitialHistory}
-      bottomOverlayTailClearance={bottomOverlayTailClearance}
-      bottomOverlayControlClearance={bottomOverlayControlClearance}
+      bottomBarContent={bottomBarContent}
       toast={toast}
       pendingMessageSubmissions={pendingMessageSubmissions}
       turnPresentation={turnPresentation}

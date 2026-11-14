@@ -111,12 +111,16 @@ a full-width header between the requested and rendered dock states. Gestures pub
 width through the shared geometry store so the dock frame and header budget consume the same value.
 A retained native stack can report its previous docked frame for one layout pass; using that
 measurement makes Explorer open at its old clamped width and then shift again. Keep the top-clearance spacer,
-tab track presentations, label measurements, layout snapshot, and + width above the header branches.
+tab track presentations, label measurements, layout snapshot, + width, and second-row system clearance above the header branches.
 Recreating the native spacer when Explorer narrows the workspace can expose a zero-height first
 layout before its native height reaches Yoga. Header variants under that owner must not add another
 top inset. Pane tab strips without a workspace header and focus mode do not reserve header clearance.
 The stable chrome wrapper also paints the retained top clearance and header rows as one surface.
 Full and inline headers use `surface0`; compact headers keep their workspace surface.
+The second row restores its last visible-status measurement with the full header, before UIKit's
+restored status-region snapshot arrives. Scope that measurement to the window size and trailing-corner
+owner; hidden-status measurements and superseded callbacks cannot replace it. Explorer and embedded
+rails use their outer chrome's inset instead of measuring and applying it a second time.
 
 `packages/app/src/workspace-tabs/open-supporting-view.ts` owns semantic Changes and pull-request
 opens. Compact and wide native layouts select the matching workspace tab in Explorer. Desktop Changes opens

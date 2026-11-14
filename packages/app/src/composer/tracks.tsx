@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState, type ReactElement, type ReactNode } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Pressable, Text, View, type LayoutChangeEvent } from "react-native";
 import { GestureDetector } from "react-native-gesture-handler";
 import Animated from "react-native-reanimated";
 import { StyleSheet } from "react-native-unistyles";
@@ -36,42 +36,58 @@ import { COMPOSER_PILL_CLEARANCE, composerPillStyles } from "./pill-styles";
  * pane. Built-in and contributed pills share this one-line rail and its deterministic geometry
  * on every platform.
  *
- * The bar floats over the transcript with no background, so content remains visible underneath.
- * Its host gives the scroll viewport a small bottom inset for as long as the bar is mounted, with
- * or without pills: that keeps the final footer clear, and pills that come and go every turn do not
- * move the transcript.
+ * The bar floats over the transcript with no background. Only tracker content reserves tail
+ * space; the trailing navigation action must not keep an empty row above the composer.
  */
-export function ComposerTrackBar({ children }: { children: ReactNode }): ReactElement {
+export function ComposerTrackBar({
+  children,
+  trailing,
+  onContentHeightChange,
+}: {
+  children: ReactNode;
+  trailing?: ReactNode;
+  onContentHeightChange?: (height: number) => void;
+}): ReactElement {
   const scrollGesture = usePanelAwareHorizontalScrollGesture();
   const scrollBoundary = useHorizontalScrollBoundary();
+  const handleTrackLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      const { width, height } = event.nativeEvent.layout;
+      onContentHeightChange?.(width > 0 ? height : 0);
+    },
+    [onContentHeightChange],
+  );
   return (
     <View style={styles.bar} pointerEvents="box-none">
-      <View style={styles.trackViewport} pointerEvents="box-none">
-        <GestureDetector gesture={scrollGesture}>
-          <Animated.ScrollView
-            testID="composer-track-scroll"
-            style={styles.trackScroller}
-            horizontal
-            keyboardShouldPersistTaps="handled"
-            showsHorizontalScrollIndicator={false}
-            onLayout={scrollBoundary.onLayout}
-            onContentSizeChange={scrollBoundary.onContentSizeChange}
-            onScroll={scrollBoundary.onScroll}
-            scrollEventThrottle={16}
-          >
-            <View style={styles.track} pointerEvents="box-none">
-              {children}
-            </View>
-          </Animated.ScrollView>
-        </GestureDetector>
-        <HorizontalScrollBoundaryShades
-          visible
-          backdrop="surface"
-          testIDPrefix="composer-track-scroll-shade"
-          bottomInset={0}
-          leftStyle={scrollBoundary.leftShadeStyle}
-          rightStyle={scrollBoundary.rightShadeStyle}
-        />
+      <View style={styles.rail} pointerEvents="box-none">
+        <View style={styles.trackViewport} pointerEvents="box-none">
+          <GestureDetector gesture={scrollGesture}>
+            <Animated.ScrollView
+              testID="composer-track-scroll"
+              style={styles.trackScroller}
+              horizontal
+              keyboardShouldPersistTaps="handled"
+              showsHorizontalScrollIndicator={false}
+              onLayout={scrollBoundary.onLayout}
+              onContentSizeChange={scrollBoundary.onContentSizeChange}
+              onScroll={scrollBoundary.onScroll}
+              scrollEventThrottle={16}
+            >
+              <View style={styles.track} pointerEvents="box-none" onLayout={handleTrackLayout}>
+                {children}
+              </View>
+            </Animated.ScrollView>
+          </GestureDetector>
+          <HorizontalScrollBoundaryShades
+            visible
+            backdrop="surface"
+            testIDPrefix="composer-track-scroll-shade"
+            bottomInset={0}
+            leftStyle={scrollBoundary.leftShadeStyle}
+            rightStyle={scrollBoundary.rightShadeStyle}
+          />
+        </View>
+        {trailing}
       </View>
     </View>
   );
@@ -404,12 +420,16 @@ const styles = StyleSheet.create((theme) => {
         md: COMPOSER_PILL_CLEARANCE.wide,
       },
     },
-    trackViewport: {
+    rail: {
       width: "100%",
       maxWidth: theme.contentMaxWidth,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing[1],
+    },
+    trackViewport: {
+      flex: 1,
       minWidth: 0,
-      flexGrow: 0,
-      flexShrink: 1,
     },
     // Only as wide as its pills, so the rest of the row passes touches to the transcript. The
     // scroller can't use box-none for that: Android's horizontal ScrollView won't scroll with it.

@@ -233,6 +233,53 @@ test("opening an agent focuses the composer when a mouse drives the UI", async (
   }
 });
 
+for (const hasTouch of [false, true]) {
+  test.describe(`composer surface focus with ${hasTouch ? "touch" : "pointer"}`, () => {
+    test.use({ hasTouch, isMobile: hasTouch });
+
+    test("composer padding focuses the editor without capturing toolbar buttons", async ({
+      page,
+    }) => {
+      const agent = await seedMockAgentWorkspace({
+        repoPrefix: "composer-surface-focus-",
+        title: "Composer surface focus",
+      });
+      try {
+        await openAgentRoute(page, agent);
+        await expectComposerVisible(page);
+        const surface = page.getByTestId("message-input-root").filter({ visible: true }).first();
+        const bounds = await surface.boundingBox();
+        expect(bounds).not.toBeNull();
+        const inputBounds = await composerLocator(page).boundingBox();
+        expect(inputBounds).not.toBeNull();
+        const editorMidY = inputBounds!.y + inputBounds!.height / 2 - bounds!.y;
+        const positions = [
+          { x: bounds!.width / 2, y: 2 },
+          { x: 2, y: editorMidY },
+          { x: bounds!.width - 2, y: editorMidY },
+        ];
+        for (const position of positions) {
+          await test.step(`focus from padding ${position.x}, ${position.y}`, async () => {
+            await blurComposerInput(page);
+            if (hasTouch) await surface.tap({ position });
+            else await surface.click({ position });
+            await expectComposerFocused(page);
+          });
+        }
+
+        await blurComposerInput(page);
+        const attach = page.getByRole("button", { name: "Add attachment", exact: true });
+        if (hasTouch) await attach.tap();
+        else await attach.click();
+        await expect(page.getByTestId("message-input-attachment-menu-item-image")).toBeVisible();
+        await expectComposerNotFocused(page);
+      } finally {
+        await agent.cleanup();
+      }
+    });
+  });
+}
+
 async function waitForAnimationFrames(page: Page, count: number): Promise<void> {
   await page.evaluate(async (frames) => {
     for (let frame = 0; frame < frames; frame += 1) {

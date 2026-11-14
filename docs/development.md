@@ -70,6 +70,16 @@ PASEO_DEV_RESET_HOME=1 npm run dev            # clear and reseed the derived wor
 
 In Paseo-managed worktree services, use the injected service environment rather than hardcoded root checkout ports.
 
+iOS development and release builds allow HTTP for user-configured hosts, including file
+downloads. HTTP sends file contents and authentication headers in cleartext; use HTTPS
+on untrusted networks. HTTPS certificate validation remains enabled.
+
+Keep the iOS ATS policy in `app.config.js` free of fine-grained exceptions such as
+`NSAllowsLocalNetworking`: their presence makes iOS ignore `NSAllowsArbitraryLoads`,
+and local-network permission alone does not cover fully qualified hostnames. ATS
+changes require a rebuilt native client; a JavaScript update cannot change an installed
+build's policy.
+
 ### Expo Router
 
 Route ownership, startup restore, and native blank-screen gotchas live in

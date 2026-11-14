@@ -3,6 +3,7 @@ import { View, type ViewProps } from "react-native";
 import { Maximize2, Minimize2 } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
+import { PressHighlight } from "@/components/ui/press-highlight";
 import { ComposerFullscreenBody, ComposerFullscreenFooter } from "@/composer/dock";
 import { useComposerKeyboardScope } from "@/composer/keyboard-scope";
 import { isWeb } from "@/constants/platform";
@@ -36,6 +37,7 @@ export function ComposerInputPresentation({
   send,
   error,
   onExit,
+  onFocusInput,
   inputWrapperRef,
   inputWrapperStyle,
   inputPointerEvents,
@@ -53,6 +55,7 @@ export function ComposerInputPresentation({
   send: ReactNode;
   error: ReactNode;
   onExit: () => void;
+  onFocusInput?: () => void;
   inputWrapperRef: Ref<View>;
   inputWrapperStyle: ViewProps["style"];
   inputPointerEvents: ViewProps["pointerEvents"];
@@ -111,8 +114,19 @@ export function ComposerInputPresentation({
           style={fullscreen ? styles.fullscreenInputWrapper : inputWrapperStyle}
           pointerEvents={inputPointerEvents}
         >
+          {/* A sibling hit surface leaves native selection and child controls in charge. */}
+          <PressHighlight
+            style={styles.focusSurface}
+            accessible={false}
+            focusable={false}
+            disabled={!onFocusInput}
+            onPress={onFocusInput}
+          />
           {fullscreen ? null : attachmentSlot}
-          <View style={fullscreen ? styles.fullscreenTextSurface : styles.inlineTextSurface}>
+          <View
+            style={fullscreen ? styles.fullscreenTextSurface : styles.inlineTextSurface}
+            pointerEvents="box-none"
+          >
             {surface}
             {showFullscreenButton && !fullscreen ? (
               <Button
@@ -146,6 +160,7 @@ export function ComposerInputPresentation({
 const styles = StyleSheet.create((theme) => ({
   inline: { flexShrink: 1, position: "relative" },
   inlineTextSurface: { flexShrink: 1, position: "relative" },
+  focusSurface: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0 },
   iconButton: {
     width: TOOLBAR_CONTROL_HEIGHT,
     height: TOOLBAR_CONTROL_HEIGHT,

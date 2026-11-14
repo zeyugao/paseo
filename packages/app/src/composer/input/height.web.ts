@@ -132,7 +132,7 @@ export function useComposerHeight({
     (_previousText: string, nextText: string) => measure(nextText),
     [measure],
   );
-  const reset = useCallback(() => setBoundedHeight(minHeight), [minHeight, setBoundedHeight]);
+  const reset = useCallback(() => measure(""), [measure]);
   const style = useMemo(() => ({ height, minHeight, maxHeight }), [height, maxHeight, minHeight]);
 
   return {

@@ -21,13 +21,31 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-async function port() {
-  const server = net.createServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const value = (server.address() as net.AddressInfo).port;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  if (value === 6767 || value === 6768) throw new Error("Unsafe test port");
-  return value;
+// Restart endpoints must stay outside the default ephemeral client range and the 20000-30000
+// band used by concurrent CLI test daemons. A released listen(0) probe does not reserve the
+// endpoint for the next start.
+const PORT_RANGE_START = 15_000;
+const PORT_RANGE_END = 20_000;
+let nextTestPort = PORT_RANGE_START + (process.pid % (PORT_RANGE_END - PORT_RANGE_START));
+
+async function port(host = "127.0.0.1") {
+  for (let attempts = 0; attempts < PORT_RANGE_END - PORT_RANGE_START; attempts += 1) {
+    const candidate = nextTestPort;
+    nextTestPort = candidate + 1 === PORT_RANGE_END ? PORT_RANGE_START : candidate + 1;
+    const server = net.createServer();
+    const listen = Promise.withResolvers<boolean>();
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "EADDRINUSE") listen.resolve(false);
+      else listen.reject(error);
+    });
+    server.listen(candidate, host, () => listen.resolve(true));
+    if (!(await listen.promise)) continue;
+    const closed = Promise.withResolvers<void>();
+    server.close(() => closed.resolve());
+    await closed.promise;
+    return candidate;
+  }
+  throw new Error(`No free test port in ${PORT_RANGE_START}-${PORT_RANGE_END}`);
 }
 
 async function fixture() {
@@ -483,7 +501,7 @@ test.skipIf(process.platform === "win32")(
 test("IPv6 publication supports home-selected query and worker restart", async () => {
   const f = await fixture();
   const home = f.homes[0]!;
-  const endpoint = `[::1]:${await port()}`;
+  const endpoint = `[::1]:${await port("::1")}`;
   try {
     await f.configure(home, endpoint);
     const launch = await f.ok(["start", "--home", home, "--timeout", "30"]);

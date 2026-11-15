@@ -369,8 +369,27 @@ close. This includes native centered dialogs: separate React Native Modals canno
 root-owned sibling dialog over an existing iOS presenter. `SheetHostScope` moves the portal host
 and container measurement while forwarding the same modal queue. Compact
 [workspace sheets](explorer-sidebar.md#sheets) use the app overlay host above both sidebars;
-wide layouts keep local geometry. That export is
-what `patches/@gorhom+bottom-sheet+*.patch` adds.
+wide layouts otherwise keep local geometry. That export is what
+`patches/@gorhom+bottom-sheet+*.patch` adds.
+
+On iOS with a resolved vertical bar, `SheetWindowHost` gives that same queue one native presentation
+above the page's bar controls. UIKit's horizontal-bar preference belongs to this presentation's
+controller, not a visibility toggle on the workspace controller. Keep it until the entire stack
+closes; dismissing an inner sheet must not restore vertical chrome beneath the outer one. Native
+window hosting takes precedence over local scopes. The portal and backdrop must fill the entire
+window, including its safe area; reserve the horizontal status region with the sheet's top inset,
+not by shifting the host. Shifting the host leaves an undimmed strip above every backdrop.
+For percentage sheet stops, status clearance and the stop's unused height fraction are competing
+minimums, not cumulative margins. The shared modal wrapper applies this rule using the host's live
+height: tool details keep a 5% gap, and Workspace tabs keep 10%, unless the status safe area is larger.
+Fixed-height stops keep their declared size. Gorhom must react to inset-only changes as well as host
+resizes; switching bar presentation can change the safe area without changing the window bounds.
+
+Content moved into a UIKit presentation needs both a Fabric touch handler and a gesture root.
+Working pan gestures or backdrops do not prove that ordinary buttons receive React touches.
+Transparent development windows must follow the active presented controller's bar preference,
+not only the page root, and refresh it on presentation changes. Otherwise the modal can report
+horizontal safe areas while the development overlay keeps the status bar vertical.
 
 A sheet whose owner may veto the close (unsaved work) passes `enableDismissOnClose={false}`. Every
 close path then parks the sheet at index -1 with its content mounted; the owner hears

@@ -17,6 +17,7 @@ import { ComposerEditingSessionsProvider } from "@/composer/editing-session";
 import { SheetHostScope } from "@/components/ui/isolated-bottom-sheet-modal";
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
+import { SheetWindowHost } from "@/components/ui/isolated-bottom-sheet-modal/window-host";
 import { PortalProvider } from "@gorhom/portal";
 import { LucideProvider } from "lucide-react-native";
 import * as Linking from "expo-linking";
@@ -1031,8 +1032,10 @@ function RootOverlayProviders({ children }: { children: ReactNode }) {
     <ToastProvider>
       <PortalProvider>
         <BottomSheetModalProvider>
-          {children}
-          <WindowLayoutActionsHost />
+          <SheetWindowHost>
+            {children}
+            <WindowLayoutActionsHost />
+          </SheetWindowHost>
         </BottomSheetModalProvider>
       </PortalProvider>
     </ToastProvider>

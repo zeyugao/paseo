@@ -65,6 +65,12 @@ public final class PaseoWindowLayoutModule: Module {
         view.unownedInset = CGFloat(inset)
       }
     }
+    View(SheetWindowView.self) {
+      Events("onGeometryChange")
+      Prop("active", false) { (view: SheetWindowView, active: Bool) in
+        view.active = active
+      }
+    }
   }
 }
 

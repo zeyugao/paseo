@@ -71,6 +71,8 @@ import { buildDesktopFrameStyle } from "./combobox-frame-style";
 
 export { buildDesktopFrameStyle } from "./combobox-frame-style";
 
+const MOBILE_SNAP_POINTS = ["60%", "90%"];
+
 const IS_WEB = isWeb;
 
 export type ComboboxOption = ComboboxOptionModel;
@@ -913,7 +915,6 @@ function resolveInitialActiveIndex(
 interface MobileBodyProps {
   overlayLayer: number;
   isOpen: boolean;
-  snapPoints: string[];
   handleIndicatorStyle: { backgroundColor: string };
   titleColor: string;
   title: string;
@@ -977,7 +978,7 @@ function MobileComboboxSheet(props: MobileBodyProps): ReactElement {
     <IsolatedBottomSheetModal
       ref={bottomSheetRef}
       contextBridge={null}
-      snapPoints={props.snapPoints}
+      snapPoints={MOBILE_SNAP_POINTS}
       index={0}
       enableDynamicSizing={false}
       onChange={handleSheetChange}
@@ -1334,7 +1335,6 @@ export function Combobox({
   const effectiveOptionsPosition = resolveEffectiveOptionsPosition(isMobile, optionsPosition);
   const isDesktopAboveSearch = resolveIsDesktopAboveSearch(isMobile, effectiveOptionsPosition);
   const { height: windowHeight, width: windowWidth } = useWindowDimensions();
-  const snapPoints = useMemo(() => ["60%", "90%"], []);
   const [availableSize, setAvailableSize] = useState<{ width?: number; height?: number } | null>(
     null,
   );
@@ -1595,7 +1595,6 @@ export function Combobox({
       <MobileComboboxBody
         overlayLayer={floatingLayer}
         isOpen={isOpen}
-        snapPoints={snapPoints}
         handleIndicatorStyle={handleIndicatorStyle}
         titleColor={titleColor}
         title={resolvedTitle}

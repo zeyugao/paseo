@@ -4,7 +4,7 @@ import {
   useBottomSheetModalInternal,
 } from "@gorhom/bottom-sheet";
 import { PortalHost } from "@gorhom/portal";
-import { useCallback, useId, useMemo, useRef, type ReactNode } from "react";
+import { useCallback, useContext, useId, useMemo, useRef, type ReactNode } from "react";
 import {
   Dimensions,
   StatusBar,
@@ -16,6 +16,7 @@ import {
 } from "react-native";
 import { useSharedValue } from "react-native-reanimated";
 
+import { SheetWindowContext } from "./window-host-context";
 /**
  * Hosts the sheets presented from inside it.
  *
@@ -40,6 +41,8 @@ export function SheetHostScope({
   enabled?: boolean;
 }) {
   const parent = useBottomSheetModalInternal();
+  const sheetWindow = useContext(SheetWindowContext);
+  const localHostEnabled = enabled && !sheetWindow.enabled;
   const hostName = `sheet-host-${useId()}`;
   const containerLayoutState = useSharedValue({ ...INITIAL_CONTAINER_LAYOUT });
   const hostRef = useRef<View>(null);
@@ -72,10 +75,10 @@ export function SheetHostScope({
   );
 
   return (
-    <BottomSheetModalInternalProvider value={enabled ? value : parent}>
+    <BottomSheetModalInternalProvider value={localHostEnabled ? value : parent}>
       <View style={[styles.scope, style]}>
         {children}
-        {enabled ? (
+        {localHostEnabled ? (
           <View ref={hostRef} style={styles.host} pointerEvents="box-none" onLayout={handleLayout}>
             <PortalHost name={hostName} />
           </View>

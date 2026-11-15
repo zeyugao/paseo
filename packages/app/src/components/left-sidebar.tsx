@@ -213,7 +213,11 @@ export const LeftSidebar = memo(function LeftSidebar({
     router.push(buildSettingsRoute());
   }, [showMobileAgent]);
 
-  const handleAddHost = useAddHost();
+  const openAddHost = useAddHost();
+  const handleAddHost = useCallback(() => {
+    showMobileAgent();
+    openAddHost();
+  }, [showMobileAgent, openAddHost]);
 
   const handleOpenHostSettings = useCallback(
     (serverId: string) => {

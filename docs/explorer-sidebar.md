@@ -92,7 +92,8 @@ host: a workspace-local host sits behind the app-level left sidebar. The sheet p
 (`useSheetPaneBridge`) preserves existing editing sessions, caches, file-link resolution and
 supported navigation context without moving their providers. Keep this capability at the workspace
 boundary; new sheet callers must not assemble provider internals. Wide layouts retain local hosting
-and pane geometry. Both hosts forward the same Gorhom modal queue; neither creates another stack.
+and pane geometry unless the [native sheet window](floating-panels.md#gotcha-6--bottom-sheet-refs-are-not-lifecycle-truth)
+owns presentation. Every host forwards the same Gorhom modal queue; none creates another stack.
 See
 [floating-panels.md Gotcha 7](floating-panels.md#gotcha-7--a-sheet-cannot-read-context-from-its-call-site).
 

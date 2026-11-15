@@ -195,6 +195,10 @@ Codex MultiAgentV2 real tests use local Codex authentication rather than the Ope
 
 Browser ESM validates native-only named imports before platform guards run. Keep those import shims in the shared React Native adapter; verify native UI interactions on the native surface rather than simulating a menu choice in the browser.
 
+Playwright loads the daemon SDK from built workspace packages. Keep the client, protocol, and relay
+`dist` graphs outside its transpiler so Node owns their ESM exports. Build those packages before
+starting the browser run; do not repair a missing export by adding loader retries.
+
 ## Running tests locally
 
 Test suites in this repo are heavy. Running them in bulk freezes the machine, especially with multiple agents in parallel.

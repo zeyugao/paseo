@@ -15,6 +15,15 @@ function videoMode(): "on" | "on-first-retry" | "retain-on-failure" {
 export default defineConfig({
   testDir: "./e2e/browser",
   globalSetup: "./e2e/support/global-setup.ts",
+  // The daemon SDK is already compiled ESM; re-transforming its dependency graph
+  // can give Node an incompatible cached module during worker startup.
+  build: {
+    external: [
+      "**/packages/client/dist/**",
+      "**/packages/protocol/dist/**",
+      "**/packages/relay/dist/**",
+    ],
+  },
   timeout: 60_000,
   expect: {
     timeout: 10_000,

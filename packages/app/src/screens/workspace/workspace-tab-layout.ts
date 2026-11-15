@@ -52,13 +52,7 @@ export function shouldUseInlineWorkspaceHeader(
   compact = false,
   focusMode = false,
 ): boolean {
-  return (
-    !compact &&
-    !focusMode &&
-    layout !== null &&
-    layout.bounds.width > layout.bounds.height &&
-    resolveWorkspaceActionPlacement(layout) === "vertical-bar"
-  );
+  return !compact && !focusMode && resolveWorkspaceActionPlacement(layout) === "vertical-bar";
 }
 
 export function shouldUseCompactWorkspaceHeader(width: number): boolean {

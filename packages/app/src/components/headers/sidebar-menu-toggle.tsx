@@ -4,6 +4,7 @@ import { View, type StyleProp, type ViewStyle } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { PanelLeft } from "lucide-react-native";
 import { HeaderToggleButton, headerIconSlotStyle } from "./header-toggle-button";
+import { SidebarCloseButton } from "./sidebar-close-button";
 import { selectIsAgentListOpen, usePanelStore } from "@/stores/panel-store";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { getShortcutOs } from "@/utils/shortcut-platform";
@@ -16,8 +17,9 @@ import {
   iconButtonChromeGlyphSize,
   mutedIconColorMapping,
 } from "@/components/ui/icon-button-chrome";
-import { bySizing } from "@/components/ui/control-geometry";
 import { resolveSidebarMenuTogglePresentation } from "@/components/desktop-sidebar-layout";
+import { useWindowLayout, WindowLayoutActions } from "@/window-layout";
+import { resolveSidebarNavigationPlacement } from "@/window-layout/model";
 
 const ThemedPanelLeft = withUnistyles(PanelLeft);
 
@@ -108,29 +110,57 @@ function SidebarMenuToggleButton({
   );
 }
 
-export function SidebarMenuToggle({ style, ...props }: SidebarMenuToggleProps = {}) {
-  const isMobile = useIsCompactFormFactor();
-  const isOpen = usePanelStore((state) => selectIsAgentListOpen(state, { isCompact: isMobile }));
-  const leftSidebarPresentation = usePanelStore((state) => state.layout.leftSidebar);
+export function useSidebarMenuInWindowBar(): boolean {
+  const compact = useIsCompactFormFactor();
+  return resolveSidebarNavigationPlacement(useWindowLayout(), compact) === "vertical-bar";
+}
+
+export function useSidebarMenuTogglePresentation(): "button" | "placeholder" | "hidden" {
+  const isCompact = useIsCompactFormFactor();
   const ownsTopLeft = useOwnsWindowChromeCorner("top-left");
   const hasTopLeftWindowControls = useHasWindowChromeObstruction("top-left");
-  // The negative inset belongs to a docked navigation edge. An overlay leaves this header's
-  // leading edge in place, so switching the inset would move the title before the panel covers it.
-  const navigationBesideToggle = isOpen && leftSidebarPresentation === "dock";
-  const resolvedStyle = useMemo(
-    () => [styles.leadingToggle, !navigationBesideToggle && styles.collapsedLeadingToggle, style],
-    [navigationBesideToggle, style],
-  );
-  const placeholderStyle = useMemo(
-    () => [headerIconSlotStyle.slot, resolvedStyle],
-    [resolvedStyle],
-  );
+  const navigationInBar = useSidebarMenuInWindowBar();
+  if (navigationInBar) return "hidden";
+  return resolveSidebarMenuTogglePresentation({ isCompact, ownsTopLeft, hasTopLeftWindowControls });
+}
 
-  const presentation = resolveSidebarMenuTogglePresentation({
-    isCompact: isMobile,
-    ownsTopLeft,
-    hasTopLeftWindowControls,
-  });
+/** The top bar control follows intent, not the sidebar content's animation settlement. */
+export function WindowBarNavigation({ enabled }: { enabled: boolean }) {
+  const { t } = useTranslation();
+  const target = usePanelStore((state) => state.mobilePanel.target);
+  const closeSidebar = usePanelStore((state) => state.showMobileAgent);
+  const navigationInBar = useSidebarMenuInWindowBar();
+  return (
+    <WindowLayoutActions
+      slot="navigation"
+      active={enabled && (target === "agent-list" || (target === "agent" && navigationInBar))}
+    >
+      {target === "agent-list" ? (
+        <SidebarCloseButton
+          label={t("sidebar.actions.closeSidebar")}
+          onPress={closeSidebar}
+          testID="sidebar-close"
+          nativeID="sidebar-close"
+        />
+      ) : (
+        <SidebarMenuToggle inWindowBar />
+      )}
+    </WindowLayoutActions>
+  );
+}
+
+export function SidebarMenuToggle({
+  style,
+  inWindowBar = false,
+  ...props
+}: SidebarMenuToggleProps & { inWindowBar?: boolean } = {}) {
+  const isMobile = useIsCompactFormFactor();
+  const presentation = useSidebarMenuTogglePresentation();
+  const placeholderStyle = useMemo(() => [headerIconSlotStyle.slot, style], [style]);
+
+  if (inWindowBar) {
+    return <SidebarMenuToggleButton {...props} isMobile={isMobile} resolvedStyle={style} />;
+  }
   if (presentation === "hidden") return null;
 
   if (presentation === "placeholder") {
@@ -141,7 +171,7 @@ export function SidebarMenuToggle({ style, ...props }: SidebarMenuToggleProps = 
     );
   }
 
-  return <SidebarMenuToggleButton {...props} isMobile={isMobile} resolvedStyle={resolvedStyle} />;
+  return <SidebarMenuToggleButton {...props} isMobile={isMobile} resolvedStyle={style} />;
 }
 
 export function WindowSidebarMenuToggle({ style, ...props }: SidebarMenuToggleProps = {}) {
@@ -162,10 +192,6 @@ const styles = StyleSheet.create((theme) => ({
       xs: 0,
       md: -theme.spacing[2],
     },
-  },
-  // Without navigation beside it, the touch control must clear the window's rounded corner.
-  collapsedLeadingToggle: {
-    marginLeft: bySizing({ touch: 0, pointer: -theme.spacing[2] }),
   },
   mobileMenuIcon: {
     width: MOBILE_MENU_LINE_WIDTH,

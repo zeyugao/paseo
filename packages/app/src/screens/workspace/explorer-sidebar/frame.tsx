@@ -61,6 +61,7 @@ function ExplorerFrameBase({
           closeGesture={gesture}
           presentation={presentation}
           dockVisible={isOpen}
+          overlayWidth={containerWidth}
           frameStyle={geometry.frameStyle}
           panelStyle={[{ backgroundColor: surfaceColor }, geometry.panelStyle]}
         >

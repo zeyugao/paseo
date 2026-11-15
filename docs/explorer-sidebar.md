@@ -27,9 +27,11 @@ The host keeps three recently used tabs plus modified tabs; unmodified tabs beyo
 can remount. Native retained content stays live, while web chat uses its existing deferred Freeze.
 
 On iOS, read window bounds, safe-area insets, and reserved regions from the same native snapshot
-through window-layout and `useAppWindowSize`. Sample after UIKit's layout transaction: a main-queue
-callback can still see new bounds with the previous safe area. Keep shell backgrounds, dividers,
-and resize boundaries at the window edge; only controls consume top and corner clearance. Use
+through window-layout and `useAppWindowSize`. A vertical bar guide can reserve horizontal space even
+when UIKit reports a zero safe-area inset, notably in Duo's leading split. Resolve that clearance
+from the same snapshot. Sample after UIKit's layout transaction: a main-queue callback can still
+see new bounds with the previous safe area. Keep shell backgrounds, dividers, and resize boundaries
+at the window edge; only controls consume top and corner clearance. Use
 `WindowLayoutTopInset` for the top clearance of headers and sidebars. Its native spacer reads the
 nearest layout root and updates Yoga without waiting for the workspace's JS render; applying
 `insets.top` in React can leave the old padding visible during rotation. Modals outside that root
@@ -45,9 +47,15 @@ system owns the top edge.
 The shared sidebar toggle reserves extra rounded-corner clearance on touch layouts only while
 navigation is collapsed. When navigation is open, use the ordinary leading inset so workspace and
 other page headers stay aligned; pointer layouts keep their existing inset in both states.
-Keep the navigation toggle in the content header when there are no leading system window controls,
-even when a docked sidebar owns the physical corner. Corner ownership controls clearance, not access
-to navigation.
+On compact or system-split windows with a resolved native bar, app navigation lives in the shell's
+bar on workspace, New workspace, History, and other menu pages. A wide window covering its entire
+display keeps left navigation in the leading header when the native bar is on the trailing edge;
+do not move that entry across the page into the right bar. A leading bar can carry navigation.
+The shell's navigation slot precedes the active page's actions in one window-coordinate frame;
+retained pages must not mount another bar frame or duplicate the navigation toggle. Opening an
+overlay replaces covered bar controls with its close action. Without a bar, keep navigation in the
+content header when there are no leading system window controls, even when a docked sidebar owns
+the physical corner. Corner ownership controls clearance, not access to navigation.
 
 ## Sheets
 
@@ -160,6 +168,10 @@ Cmd+E shows or hides Explorer without changing its selected view. All layouts us
 workspace tabs, launcher, and panel host. Below 600 points the shell is the swipeable Explorer
 overlay; at 600 points and above it reserves width beside the workspace. Native docking keeps its
 touch resize handle. Full workspace splits remain a separate web-only capability.
+Size a compact Explorer overlay from its allocated content viewport, not the full window: the
+window surface may already have removed a leading or trailing native bar. Its motion and content
+must use the same width. With a resolved native bar, the overlay's close action lives in that bar;
+the covered workspace actions become inactive. Without a bar, keep close in the overlay header.
 
 On iOS, reuse the window's top edge only when UIKit leaves room for a complete control row beside
 occlusions on one physical corner edge, outside any full-width status bar and without a native

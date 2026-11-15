@@ -252,7 +252,7 @@ export function PluginSurfaceScreen() {
           actions={hostFilter}
         />
       ) : (
-        <ScreenHeader left={headerLeft} right={headerRight} />
+        <ScreenHeader right={headerRight}>{headerLeft}</ScreenHeader>
       )}
       <View style={styles.body}>
         {plugin && surface && client ? (

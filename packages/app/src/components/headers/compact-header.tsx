@@ -13,7 +13,7 @@ import { ArrowLeft } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { HeaderToggleButton } from "@/components/headers/header-toggle-button";
-import { SidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
+import { HeaderLeading, HEADER_CONTENT_PADDING } from "./header-leading";
 import {
   IconButtonChromeProvider,
   iconButtonChromeGlyphSize,
@@ -34,8 +34,8 @@ const ThemedArrowLeft = withUnistyles(ArrowLeft);
 const NO_SHORTCUT: ShortcutKey[] = [];
 
 interface CompactHeaderProps {
-  /** The leading island: the sidebar menu, or a back button. */
-  navigation: "menu" | "back";
+  /** The leading island, or null when navigation is hosted in the window bar. */
+  navigation: "menu" | "back" | null;
   /** Back button action. Defaults to navigating back. */
   onBack?: () => void;
   title?: string;
@@ -77,23 +77,26 @@ export function CompactHeader({
     ],
     [insets.left, insets.right],
   );
+  const leadingNavigation = useMemo(
+    () => (navigation === "back" ? <BackButton onBack={onBack} /> : navigation),
+    [navigation, onBack],
+  );
 
   return (
     <IconButtonChromeProvider value="header-island">
       <View style={rootStyle}>
         <HeaderTopInset additionalPadding={HEADER_TOP_PADDING_MOBILE} />
         <View style={inTopBand ? styles.topBandRow : styles.row}>
-          <View style={styles.island}>
-            {navigation === "menu" ? <SidebarMenuToggle /> : <BackButton onBack={onBack} />}
-          </View>
-          <View style={styles.titleGroup}>
-            <CompactHeaderTitle
-              loading={loading}
-              title={title}
-              titleTestID={titleTestID}
-              subtitle={subtitle}
-            />
-          </View>
+          <HeaderLeading navigation={leadingNavigation}>
+            <View style={styles.titleGroup}>
+              <CompactHeaderTitle
+                loading={loading}
+                title={title}
+                titleTestID={titleTestID}
+                subtitle={subtitle}
+              />
+            </View>
+          </HeaderLeading>
           {actions ? <View style={styles.island}>{actions}</View> : null}
         </View>
       </View>
@@ -218,7 +221,7 @@ function BackButton({ onBack }: { onBack?: () => void }) {
 
 const styles = StyleSheet.create((theme) => ({
   root: {
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: HEADER_CONTENT_PADDING,
   },
   row: {
     height: HEADER_INNER_HEIGHT_MOBILE,

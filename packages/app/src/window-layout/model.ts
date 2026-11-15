@@ -7,6 +7,8 @@ export interface WindowLayoutRect {
 
 export interface WindowLayout {
   bounds: WindowLayoutRect;
+  /** Whether this window covers its entire display, rather than a system split or floating region. */
+  fillsDisplay?: boolean;
   /** Rectangular safe area measured with these bounds and system-control guides. */
   insets?: { top: number; right: number; bottom: number; left: number };
   verticalBarEdge: "none" | "leading" | "trailing";
@@ -20,6 +22,8 @@ export interface WindowLayout {
   topBar?: WindowLayoutRect | null;
   /** Usable first row beside one corner occlusion, retained while the status bar is hidden. */
   topChrome?: (WindowLayoutRect & { cornerLeft: number; cornerRight: number }) | null;
+  /** Rounded-corner clearance at the first header row, independent of reusable top chrome. */
+  headerCornerInsets?: { left: number; right: number } | null;
   /** True only after this scene's native status-bar hide transition completes. */
   statusBarHidden?: boolean;
   /** Active system occlusions (status region, camera, Live Activities), margins included. */
@@ -85,12 +89,37 @@ export function resolveSafeAreaInsets<
   const clearance = layout?.bottomClearance;
   const bottom = typeof clearance === "number" ? clearance : insets.bottom;
   const top = resolveTopBand(insets.top, layout)?.top ?? insets.top;
+  // UIKit can report zero horizontal safe area beside a resolved leading bar.
+  const bar = layout?.verticalBar;
+  const left =
+    bar && layout.verticalBarEdge === "leading"
+      ? Math.max(insets.left ?? 0, bar.x + bar.width)
+      : insets.left;
+  const right =
+    bar && layout.verticalBarEdge === "trailing"
+      ? Math.max(insets.right ?? 0, layout.bounds.width - bar.x)
+      : insets.right;
   return top === systemInsets.top &&
-    insets.right === systemInsets.right &&
+    right === systemInsets.right &&
     bottom === systemInsets.bottom &&
-    insets.left === systemInsets.left
+    left === systemInsets.left
     ? systemInsets
-    : { ...systemInsets, ...insets, top, bottom };
+    : { ...systemInsets, ...insets, top, right, bottom, left };
+}
+
+const ZERO_INSETS = { top: 0, right: 0, bottom: 0, left: 0 };
+
+/** Horizontal safe area is already owned by the surface; only the remaining corner applies. */
+export function resolveHeaderCornerInsets(
+  layout: WindowLayout | null,
+): { left: number; right: number } | null {
+  const corners = layout?.headerCornerInsets;
+  if (!corners) return null;
+  const insets = resolveSafeAreaInsets(ZERO_INSETS, layout);
+  return {
+    left: Math.max(0, corners.left - insets.left),
+    right: Math.max(0, corners.right - insets.right),
+  };
 }
 
 export interface DesktopDivisionLayout {
@@ -102,9 +131,21 @@ export interface DesktopDivisionLayout {
 export function resolveWorkspaceActionPlacement(
   layout: WindowLayout | null,
 ): "header" | "vertical-bar" {
-  return layout?.verticalBarEdge === "trailing" && layout.verticalBar !== null
+  return layout?.verticalBar &&
+    (layout.verticalBarEdge === "leading" || layout.verticalBarEdge === "trailing")
     ? "vertical-bar"
     : "header";
+}
+
+/** A full-width wide page keeps left navigation on its leading header edge. */
+export function resolveSidebarNavigationPlacement(
+  layout: WindowLayout | null,
+  compact: boolean,
+): "header" | "vertical-bar" {
+  if (resolveWorkspaceActionPlacement(layout) !== "vertical-bar") return "header";
+  return !compact && layout?.fillsDisplay === true && layout.verticalBarEdge === "trailing"
+    ? "header"
+    : "vertical-bar";
 }
 
 export function resolveWorkspaceBarActions(

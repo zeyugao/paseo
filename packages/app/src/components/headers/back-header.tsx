@@ -39,23 +39,17 @@ function DesktopBackHeader({ title, rightContent, onBack }: BackHeaderProps) {
   }, [onBack]);
 
   return (
-    <ScreenHeader
-      left={
-        <>
-          <Pressable
-            onPress={handleBack}
-            style={styles.backButton}
-            accessibilityRole="button"
-            accessibilityLabel={t("common.actions.back")}
-          >
-            <ArrowLeft size={theme.iconSize.lg} color={theme.colors.foregroundMuted} />
-          </Pressable>
-          {title && <ScreenTitle>{title}</ScreenTitle>}
-        </>
-      }
-      right={rightContent}
-      leftStyle={styles.left}
-    />
+    <ScreenHeader right={rightContent} leftStyle={styles.left}>
+      <Pressable
+        onPress={handleBack}
+        style={styles.backButton}
+        accessibilityRole="button"
+        accessibilityLabel={t("common.actions.back")}
+      >
+        <ArrowLeft size={theme.iconSize.lg} color={theme.colors.foregroundMuted} />
+      </Pressable>
+      {title && <ScreenTitle>{title}</ScreenTitle>}
+    </ScreenHeader>
   );
 }
 

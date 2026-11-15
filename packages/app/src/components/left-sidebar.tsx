@@ -35,6 +35,7 @@ import {
   useWindowLayout,
   resolveDesktopDivisionLayout,
   WindowLayoutTopInset,
+  resolveWorkspaceActionPlacement,
 } from "@/window-layout";
 import { useAppWindowSize } from "@/hooks/use-app-window-size";
 import { usePublishSidebarResizeWidth } from "@/window-layout/sidebar-resize-geometry";
@@ -575,6 +576,7 @@ function MobileSidebar({
   closeSidebar,
 }: MobileSidebarProps) {
   const insets = useSafeAreaInsets();
+  const closesInBar = resolveWorkspaceActionPlacement(useWindowLayout()) === "vertical-bar";
   const hasActiveHostFilter = useSidebarViewStore((state) => state.hostFilters.length > 0);
   const { gesture: closeGesture, gestureRef: closeGestureRef } = useCloseAgentListGesture();
 
@@ -607,7 +609,7 @@ function MobileSidebar({
     <SidebarNavRows
       style={styles.mobileNavRowsGroup}
       onBeforeNavigate={closeSidebar}
-      firstRowTrailing={closeButton}
+      firstRowTrailing={closesInBar ? undefined : closeButton}
     />
   );
 

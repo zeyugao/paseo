@@ -108,6 +108,50 @@ describe("window chrome", () => {
     ).toEqual({ height: 0 });
   });
 
+  it("clears rounded corners without a reusable top band or system-control obstruction", () => {
+    const obstruction = { topLeft: null, topRight: null };
+    const cornerInsets = { left: 32, right: 24 };
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        cornerInsets,
+        corners: "both",
+        placement: "inline",
+      }),
+    ).toEqual({ paddingLeft: 32, paddingRight: 24 });
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        cornerInsets,
+        corners: "top-right",
+        placement: "inline",
+      }),
+    ).toEqual({ paddingLeft: 0, paddingRight: 24 });
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        cornerInsets,
+        corners: "both",
+        placement: "below",
+      }),
+    ).toEqual({ height: 0 });
+    expect(
+      resolveHasOwnedWindowChromeObstruction({ obstruction, corners: "both", corner: "top-left" }),
+    ).toBe(false);
+  });
+
+  it("combines overlapping corner and control clearances without adding them", () => {
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction: { topLeft: { width: 80, height: 44 }, topRight: { width: 48, height: 44 } },
+        cornerInsets: { left: 32, right: 64 },
+        leadingInset: 56,
+        corners: "both",
+        placement: "inline",
+      }),
+    ).toEqual({ paddingLeft: 80, paddingRight: 64 });
+  });
+
   it("intersects identical and empty corner claims", () => {
     expect(intersectWindowChromeCorners("both", "both")).toBe("both");
     expect(intersectWindowChromeCorners("top-left", "top-left")).toBe("top-left");

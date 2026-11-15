@@ -153,6 +153,12 @@ Pick the rails from the content, then hold them. A settings card establishes a l
 
 The pressable is bigger than the glyph, and that is fine. Hit areas grow outward from the aligned content — they never move it. A button that looks two pixels off because its padding is asymmetric is misaligned even though its box is correct. The composer toolbar is the worked example: its outermost ink, the attach `+` on the left and the trailing glyph or send/stop disc on the right, sits on the text column's edges, and touch-sized the end highlights overhang into the composer padding by each end control's ink inset (`composerToolbarOverhang`).
 
+Header navigation uses `HeaderLeading` to keep the visible edge-to-glyph and glyph-to-title gaps
+equal. The frame reserves window clearance once; the control keeps its touch size and never shifts
+itself when the sidebar opens, closes, or changes presentation. Without navigation, the title
+starts on the same content rail. A window-control placeholder reserves a real slot; navigation
+moved into the system bar leaves no placeholder in the header.
+
 Optical alignment beats arithmetic when a glyph disagrees with its bounding box. Icons with visual weight on one side, chevrons, and single-character labels usually need a small nudge to look centered. Trust the eye, then leave a comment saying the offset is optical.
 
 One row off the rail makes the whole card look unconsidered.
@@ -174,7 +180,10 @@ The branching is one `useIsCompactFormFactor()` check at the top of the screen c
 
 The workspace screen (`packages/app/src/screens/workspace/workspace-screen.tsx`) follows a different but parallel rule: tabs collapse on compact, panes split on desktop. The sidebar (`packages/app/src/components/left-sidebar.tsx`) is overlaid on compact and pinned on desktop.
 
-Portrait workspace chrome follows the upstream compact/full layout. A second-row tab rail also gives way to system occlusions that overlap its measured window frame; keep both its tabs and trailing actions outside that region. Do not reserve the same space again when a parent has already shortened the rail. Duo's landscape layout with a trailing system bar keeps the single-row header: tabs start after the content-sized title, not at the opposite edge, and the project caption uses the interface-scaled `xs` tier. When the natural tab track cannot fit, the picker occupies the trailing slot. Below the header, the conversation and composer reserve matching space opposite the system bar only when no sidebar is pinned and their measured content viewport is wider than it is tall. Measure that allocation after the header and native bar have taken their space, before adding compensation. Pinning app navigation or Explorer removes the compensation; an overlay does not count as pinned. Do not infer the aspect ratio from display coverage, window mode, device orientation, or the whole window's dimensions. A portrait or square allocation gets no compensation, including on the folded outer display. This is content padding, not another safe-area inset; the tab row retains its full width. This landscape presentation does not change the 500pt content threshold.
+Portrait workspace chrome follows the upstream compact/full layout. A second-row tab rail also gives way to system occlusions that overlap its measured window frame; keep both its tabs and trailing actions outside that region. Do not reserve the same space again when a parent has already shortened the rail. A resolved native leading or trailing bar selects workspace actions by its reported guide, regardless of window orientation. Wide content keeps the single-row header: tabs start after the content-sized title, not at the opposite edge, and the project caption uses the interface-scaled `xs` tier. When the natural tab track cannot fit, the picker occupies the trailing slot. Below the header, the conversation and composer reserve matching space opposite the system bar only when no sidebar is pinned and their measured content viewport is wider than it is tall. Measure that allocation after the header and native bar have taken their space, before adding compensation. Pinning app navigation or Explorer removes the compensation; an overlay does not count as pinned. Do not infer the aspect ratio from display coverage, window mode, device orientation, or the whole window's dimensions. A portrait or square allocation gets no compensation, including on the folded outer display. This is content padding, not another safe-area inset; the tab row retains its full width. Bar placement does not change the 500pt content threshold.
+
+Compact and wide navigation share the [header alignment contract](#8-alignment); moving navigation
+into the native window bar changes its presence, not the content gutter.
 
 On a narrow window using the wide layout, app navigation yields when the remaining width cannot accommodate the content topology. Settings prefers a 720px split (320px list + 400px detail); its list shrinks first to keep forms readable without reducing the detail below 400px. Explorer reserves at least 240px plus a 360px workspace. These are local space budgets, not compact breakpoints. The app sidebar shrinks from its preferred 320px toward a 200px minimum to leave a 400px center target; its preferred width fits at 720px. Temporary width clamps are render-only; widening restores the user's saved sidebar widths.
 
@@ -183,6 +192,10 @@ Electron window controls are top-corner obstructions, not a compact-layout condi
 Windows and Linux controls are fixed window chrome, outside scrolling header content. A tab rail that reaches them ends at their obstruction and shows the shared overflow fade. On macOS, the Explorer toggle occupies a fixed top-right window slot so opening and closing Explorer does not move the pointer target.
 
 Each window edge has one safe-area owner. `WindowLayoutProvider` publishes the bottom inset that every surface reads through `useSafeAreaInsets()`: on iOS 27.1 and later it is UIKit's bottom-bar clearance, which refines the rectangular home-indicator inset to the screen's corners, and elsewhere the system inset. Surfaces apply that value once and never stack their own spacing under it; `WindowLayoutSurface` owns the horizontal insets the same way.
+
+A vertical system bar can remove the reusable top band while the physical window corners remain.
+Measure header corner clearance independently. It is not a system-control obstruction and must not
+hide navigation or reserve another row.
 
 A new list+detail feature copies the settings shell. A new workspace-shaped feature copies the workspace shell. Inventing a third shape happens in design review, not in a PR.
 

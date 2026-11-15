@@ -34,8 +34,8 @@ const ThemedArrowLeft = withUnistyles(ArrowLeft);
 const NO_SHORTCUT: ShortcutKey[] = [];
 
 interface CompactHeaderProps {
-  /** The leading island: the sidebar menu, or a back button. */
-  navigation: "menu" | "back";
+  /** The leading island, or null when navigation is hosted in the window bar. */
+  navigation: "menu" | "back" | null;
   /** Back button action. Defaults to navigating back. */
   onBack?: () => void;
   title?: string;
@@ -83,9 +83,11 @@ export function CompactHeader({
       <View style={rootStyle}>
         <HeaderTopInset additionalPadding={HEADER_TOP_PADDING_MOBILE} />
         <View style={inTopBand ? styles.topBandRow : styles.row}>
-          <View style={styles.island}>
-            {navigation === "menu" ? <SidebarMenuToggle /> : <BackButton onBack={onBack} />}
-          </View>
+          {navigation !== null ? (
+            <View style={styles.island}>
+              {navigation === "menu" ? <SidebarMenuToggle /> : <BackButton onBack={onBack} />}
+            </View>
+          ) : null}
           <View style={styles.titleGroup}>
             <CompactHeaderTitle
               loading={loading}

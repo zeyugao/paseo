@@ -14,7 +14,11 @@ import {
   type InlinePathTarget,
 } from "@/assistant-file-links";
 import { useFileExplorerActions } from "@/hooks/use-file-explorer-actions";
-import { useWindowLayout, resolveWorkspaceActionPlacement } from "@/window-layout";
+import {
+  useWindowLayout,
+  resolveWorkspaceActionPlacement,
+  WindowLayoutActions,
+} from "@/window-layout";
 import { revealWorkspaceTab } from "@/workspace-tabs/navigation";
 import type { LayoutChangeEvent } from "react-native";
 import { ExplorerSidebarDock } from "@/screens/workspace/explorer-sidebar";
@@ -3542,7 +3546,7 @@ function WorkspaceScreenContent({
       return (
         <CompactWorkspaceHeader
           headerVariant={headerVariant}
-          actionsActive={isRouteFocused && (!isMobile || workspacePanelActive)}
+          actionsActive={isRouteFocused && workspacePanelActive}
           tabSwitcher={tabSwitcher}
           inlineTabRail={inlineTabRail}
           inlineTabsNaturalWidth={inlineTabsNaturalWidth}
@@ -3597,7 +3601,6 @@ function WorkspaceScreenContent({
       handleCreateTerminalWithProfile,
       handleOpenSetupTab,
       handleToggleExplorerSidebar,
-      isMobile,
       isRouteFocused,
       isWorkspaceHeaderLoading,
       isWorkspaceHeaderSubtitleDistinct,
@@ -3839,25 +3842,35 @@ function WorkspaceScreenContent({
         onExitFocusMode={toggleFocusMode}
         onReorderTabsInPane={handleReorderTabsInPane}
         buildPaneContentModel={buildDesktopPaneContentModel}
-        headerAction={renderExplorerSidebarHeaderAction()}
+        headerAction={
+          isMobile && workspaceActionsInBar ? null : renderExplorerSidebarHeaderAction()
+        }
       />
     );
     return (
-      <ExplorerFrame
-        presentation={isMobile ? "overlay" : "dock"}
-        isWorkspaceActive={isRouteFocused}
-        persistenceKey={persistenceKey}
-        containerWidth={explorerContainerWidth}
-        isOpen={isExplorerSidebarShowing && !desktopFocusModeEnabled}
-      >
-        {dock}
-      </ExplorerFrame>
+      <>
+        {isMobile && workspaceActionsInBar ? (
+          <WindowLayoutActions active={isRouteFocused && isExplorerSidebarShowing}>
+            {renderExplorerSidebarHeaderAction()}
+          </WindowLayoutActions>
+        ) : null}
+        <ExplorerFrame
+          presentation={isMobile ? "overlay" : "dock"}
+          isWorkspaceActive={isRouteFocused}
+          persistenceKey={persistenceKey}
+          containerWidth={explorerContainerWidth}
+          isOpen={isExplorerSidebarShowing && !desktopFocusModeEnabled}
+        >
+          {dock}
+        </ExplorerFrame>
+      </>
     );
   }, [
     workspaceLayout,
     explorerSidebarPaneId,
     persistenceKey,
     isMobile,
+    workspaceActionsInBar,
     uiTabs,
     normalizedServerId,
     normalizedWorkspaceId,

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  resolveWorkspaceActionPlacement,
+  resolveSidebarNavigationPlacement,
   resolveSafeAreaInsets,
   resolveTopBand,
   type WindowLayout,
@@ -17,6 +19,50 @@ function layout(input: Partial<WindowLayout> = {}): WindowLayout {
     ...input,
   };
 }
+
+describe("resolveWorkspaceActionPlacement", () => {
+  it.each(["leading", "trailing"] as const)("uses a resolved %s native guide", (edge) => {
+    const geometry = layout({
+      verticalBarEdge: edge,
+      verticalBar: { x: 17, y: 91, width: 44, height: 600 },
+    });
+    expect(resolveWorkspaceActionPlacement(geometry)).toBe("vertical-bar");
+    expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBar: null })).toBe("header");
+    expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBarEdge: "none" })).toBe(
+      "header",
+    );
+  });
+
+  it("keeps workspace actions in the header before native geometry arrives", () => {
+    expect(resolveWorkspaceActionPlacement(null)).toBe("header");
+  });
+});
+
+describe("resolveSidebarNavigationPlacement", () => {
+  it.each([
+    { edge: "trailing" as const, fillsDisplay: true, compact: false, expected: "header" },
+    { edge: "trailing" as const, fillsDisplay: false, compact: false, expected: "vertical-bar" },
+    { edge: "trailing" as const, fillsDisplay: true, compact: true, expected: "vertical-bar" },
+    { edge: "trailing" as const, fillsDisplay: false, compact: true, expected: "vertical-bar" },
+    { edge: "leading" as const, fillsDisplay: true, compact: false, expected: "vertical-bar" },
+    { edge: "leading" as const, fillsDisplay: false, compact: true, expected: "vertical-bar" },
+  ])(
+    "places navigation for $edge full=$fillsDisplay compact=$compact",
+    ({ edge, fillsDisplay, compact, expected }) => {
+      const geometry = layout({
+        fillsDisplay,
+        verticalBarEdge: edge,
+        verticalBar: { x: 17, y: 91, width: 44, height: 600 },
+      });
+      expect(resolveSidebarNavigationPlacement(geometry, compact)).toBe(expected);
+    },
+  );
+
+  it("keeps navigation in the header without a resolved native bar", () => {
+    expect(resolveSidebarNavigationPlacement(null, false)).toBe("header");
+    expect(resolveSidebarNavigationPlacement(layout(), true)).toBe("header");
+  });
+});
 
 describe("resolveSafeAreaInsets", () => {
   it("replaces only the bottom with the measured bar clearance", () => {
@@ -39,6 +85,35 @@ describe("resolveSafeAreaInsets", () => {
   it("leaves system insets alone before the native layout arrives", () => {
     expect(resolveSafeAreaInsets(systemInsets, null)).toBe(systemInsets);
   });
+
+  it.each([
+    { edge: "leading" as const, inset: 0, expected: 70 },
+    { edge: "leading" as const, inset: 100, expected: 100 },
+    { edge: "trailing" as const, inset: 0, expected: 70 },
+    { edge: "trailing" as const, inset: 100, expected: 100 },
+  ])(
+    "clears a $edge bar without shrinking a larger inset ($inset)",
+    ({ edge, inset, expected }) => {
+      const leading = edge === "leading";
+      const insets = {
+        top: 0,
+        right: leading ? 0 : inset,
+        bottom: 34,
+        left: leading ? inset : 0,
+      };
+      const geometry = layout({
+        bounds: { x: 0, y: 0, width: 469, height: 669 },
+        insets,
+        verticalBarEdge: edge,
+        verticalBar: { x: leading ? 26 : 399, y: 16, width: 44, height: 619 },
+      });
+      expect(resolveSafeAreaInsets(insets, geometry)).toEqual({
+        ...insets,
+        left: leading ? expected : 0,
+        right: leading ? 0 : expected,
+      });
+    },
+  );
 
   it("starts the top where the top bar rests when it sits above the system top", () => {
     const insets = resolveSafeAreaInsets(

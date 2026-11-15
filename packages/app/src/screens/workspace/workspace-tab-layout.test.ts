@@ -329,24 +329,30 @@ describe("resolveWorkspaceTabChipBackdrop", () => {
   });
 });
 
-it("uses the old single-row header only for eligible landscape workspaces", () => {
-  const landscape: WindowLayout = {
-    bounds: { x: 0, y: 0, width: 951, height: 669 },
-    verticalBarEdge: "trailing",
-    verticalBar: { x: 895, y: 56, width: 56, height: 613 },
-    divisions: [],
-  };
-  const portrait: WindowLayout = {
-    ...landscape,
-    bounds: { x: 0, y: 0, width: 669, height: 951 },
-  };
+it.each(["leading", "trailing"] as const)(
+  "uses the single-row header beside a resolved %s bar without inferring orientation",
+  (edge) => {
+    const geometry: WindowLayout = {
+      bounds: { x: 0, y: 0, width: 951, height: 669 },
+      verticalBarEdge: edge,
+      verticalBar: { x: edge === "leading" ? 0 : 895, y: 56, width: 56, height: 613 },
+      divisions: [],
+    };
+    const tallWindow: WindowLayout = {
+      ...geometry,
+      bounds: { x: 0, y: 0, width: 669, height: 951 },
+      verticalBar: { x: edge === "leading" ? 0 : 613, y: 56, width: 56, height: 895 },
+    };
 
-  expect(shouldUseInlineWorkspaceHeader(portrait)).toBe(false);
-  expect(shouldUseInlineWorkspaceHeader(landscape)).toBe(true);
-  expect(shouldUseInlineWorkspaceHeader(landscape, true)).toBe(false);
-  expect(shouldUseInlineWorkspaceHeader(landscape, false, true)).toBe(false);
-  expect(shouldUseInlineWorkspaceHeader({ ...landscape, verticalBar: null })).toBe(false);
-});
+    expect(shouldUseInlineWorkspaceHeader(geometry)).toBe(true);
+    expect(shouldUseInlineWorkspaceHeader(tallWindow)).toBe(true);
+    expect(shouldUseInlineWorkspaceHeader(geometry, true)).toBe(false);
+    expect(shouldUseInlineWorkspaceHeader(geometry, false, true)).toBe(false);
+    expect(shouldUseInlineWorkspaceHeader({ ...geometry, verticalBar: null })).toBe(false);
+    expect(shouldUseInlineWorkspaceHeader({ ...geometry, verticalBarEdge: "none" })).toBe(false);
+    expect(shouldUseInlineWorkspaceHeader(null)).toBe(false);
+  },
+);
 
 import { shouldUseCompactWorkspaceHeader } from "./workspace-tab-layout";
 it.each([

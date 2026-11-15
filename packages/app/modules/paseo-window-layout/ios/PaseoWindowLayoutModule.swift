@@ -205,7 +205,7 @@ final class WindowLayoutView: ExpoView {
   }
 
   private func publish() {
-    guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+    guard let window, let scene = window.windowScene, bounds.width > 0, bounds.height > 0 else { return }
     // Resolve pending constraints and guides before pairing them with this view's insets.
     updateConstraintsIfNeeded()
     layoutIfNeeded()
@@ -246,8 +246,17 @@ final class WindowLayoutView: ExpoView {
       hasTopBand = nextHasTopBand
       NotificationCenter.default.post(name: windowLayoutInsetsDidChange, object: self)
     }
+    // Compare in the scene's display coordinate space, not orientation-dependent window sizes.
+    let displayBounds = scene.screen.coordinateSpace.bounds
+    let windowOnDisplay = window.convert(window.bounds, to: scene.screen.coordinateSpace)
+    let tolerance = 1 / traitCollection.displayScale
+    let fillsDisplay = abs(windowOnDisplay.minX - displayBounds.minX) <= tolerance &&
+      abs(windowOnDisplay.minY - displayBounds.minY) <= tolerance &&
+      abs(windowOnDisplay.maxX - displayBounds.maxX) <= tolerance &&
+      abs(windowOnDisplay.maxY - displayBounds.maxY) <= tolerance
     let payload: [String: Any] = [
       "bounds": rect(bounds),
+      "fillsDisplay": fillsDisplay,
       "insets": [
         "top": insets.top,
         "right": insets.right,
@@ -259,7 +268,7 @@ final class WindowLayoutView: ExpoView {
       "bottomClearance": bottomClearance,
       "topBar": topBar,
       "topChrome": topChromePayload,
-      "statusBarHidden": (window?.rootViewController as? WindowLayoutRootViewController)?
+      "statusBarHidden": (window.rootViewController as? WindowLayoutRootViewController)?
         .statusBarHiddenSettled ?? false,
       "occlusions": occlusions.map(rect),
       "divisions": divisions.map(rect)

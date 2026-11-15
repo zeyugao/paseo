@@ -7,6 +7,8 @@ export interface WindowLayoutRect {
 
 export interface WindowLayout {
   bounds: WindowLayoutRect;
+  /** Whether this window covers its entire display, rather than a system split or floating region. */
+  fillsDisplay?: boolean;
   /** Rectangular safe area measured with these bounds and system-control guides. */
   insets?: { top: number; right: number; bottom: number; left: number };
   verticalBarEdge: "none" | "leading" | "trailing";
@@ -85,12 +87,22 @@ export function resolveSafeAreaInsets<
   const clearance = layout?.bottomClearance;
   const bottom = typeof clearance === "number" ? clearance : insets.bottom;
   const top = resolveTopBand(insets.top, layout)?.top ?? insets.top;
+  // UIKit can report zero horizontal safe area beside a resolved leading bar.
+  const bar = layout?.verticalBar;
+  const left =
+    bar && layout.verticalBarEdge === "leading"
+      ? Math.max(insets.left ?? 0, bar.x + bar.width)
+      : insets.left;
+  const right =
+    bar && layout.verticalBarEdge === "trailing"
+      ? Math.max(insets.right ?? 0, layout.bounds.width - bar.x)
+      : insets.right;
   return top === systemInsets.top &&
-    insets.right === systemInsets.right &&
+    right === systemInsets.right &&
     bottom === systemInsets.bottom &&
-    insets.left === systemInsets.left
+    left === systemInsets.left
     ? systemInsets
-    : { ...systemInsets, ...insets, top, bottom };
+    : { ...systemInsets, ...insets, top, right, bottom, left };
 }
 
 export interface DesktopDivisionLayout {
@@ -102,9 +114,21 @@ export interface DesktopDivisionLayout {
 export function resolveWorkspaceActionPlacement(
   layout: WindowLayout | null,
 ): "header" | "vertical-bar" {
-  return layout?.verticalBarEdge === "trailing" && layout.verticalBar !== null
+  return layout?.verticalBar &&
+    (layout.verticalBarEdge === "leading" || layout.verticalBarEdge === "trailing")
     ? "vertical-bar"
     : "header";
+}
+
+/** A full-width wide page keeps left navigation on its leading header edge. */
+export function resolveSidebarNavigationPlacement(
+  layout: WindowLayout | null,
+  compact: boolean,
+): "header" | "vertical-bar" {
+  if (resolveWorkspaceActionPlacement(layout) !== "vertical-bar") return "header";
+  return !compact && layout?.fillsDisplay === true && layout.verticalBarEdge === "trailing"
+    ? "header"
+    : "vertical-bar";
 }
 
 export function resolveWorkspaceBarActions(

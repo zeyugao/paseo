@@ -3,7 +3,7 @@ import { StyleSheet } from "react-native-unistyles";
 import { ScreenHeader } from "./screen-header";
 import { ScreenTitle } from "./screen-title";
 import { CompactHeader } from "./compact-header";
-import { SidebarMenuToggle } from "./sidebar-menu-toggle";
+import { SidebarMenuToggle, useSidebarMenuInWindowBar } from "./sidebar-menu-toggle";
 import { useIsCompactFormFactor } from "@/constants/layout";
 
 interface MenuHeaderProps {
@@ -14,8 +14,15 @@ interface MenuHeaderProps {
 
 export function MenuHeader({ title, rightContent, borderless }: MenuHeaderProps) {
   const isCompact = useIsCompactFormFactor();
+  const navigationInBar = useSidebarMenuInWindowBar();
   if (isCompact) {
-    return <CompactHeader navigation="menu" title={title} actions={rightContent} />;
+    return (
+      <CompactHeader
+        navigation={navigationInBar ? null : "menu"}
+        title={title}
+        actions={rightContent}
+      />
+    );
   }
   return (
     <ScreenHeader

@@ -14,7 +14,11 @@ import {
   type InlinePathTarget,
 } from "@/assistant-file-links";
 import { useFileExplorerActions } from "@/hooks/use-file-explorer-actions";
-import { useWindowLayout, resolveWorkspaceActionPlacement } from "@/window-layout";
+import {
+  useWindowLayout,
+  resolveWorkspaceActionPlacement,
+  WindowLayoutActions,
+} from "@/window-layout";
 import { revealWorkspaceTab } from "@/workspace-tabs/navigation";
 import type { LayoutChangeEvent } from "react-native";
 import { ExplorerSidebarDock } from "@/screens/workspace/explorer-sidebar";
@@ -52,7 +56,6 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { Theme } from "@/styles/theme";
 import invariant from "tiny-invariant";
-import { SidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
 import { ScreenHeader } from "@/components/headers/screen-header";
 import { MenuHeader } from "@/components/headers/menu-header";
 import { FloatingHeaderLayout } from "@/components/floating-header";
@@ -3415,29 +3418,23 @@ function WorkspaceScreenContent({
   const renderWorkspaceScreenHeader = useCallback(
     () =>
       showScreenHeader ? (
-        <ScreenHeader
-          left={
-            <>
-              <SidebarMenuToggle />
-              <WorkspaceHeaderTitleBar
-                isLoading={isWorkspaceHeaderLoading}
-                title={workspaceHeaderTitle}
-                subtitle={workspaceHeaderSubtitle}
-                isSubtitleDistinct={isWorkspaceHeaderSubtitleDistinct}
-                currentBranchName={currentBranchName}
-                normalizedServerId={normalizedServerId}
-                showWorkspaceSetup={showWorkspaceSetup}
-                importAgentDisabled={!canOpenImportSheet}
-                copyPathDisabled={!workspaceDirectory}
-                onOpenImportSheet={openImportSheet}
-                onCopyWorkspacePath={handleCopyWorkspacePath}
-                onCopyBranchName={handleCopyBranchName}
-                onOpenSetupTab={handleOpenSetupTab}
-              />
-            </>
-          }
-          right={headerRight}
-        />
+        <ScreenHeader navigation="menu" right={headerRight}>
+          <WorkspaceHeaderTitleBar
+            isLoading={isWorkspaceHeaderLoading}
+            title={workspaceHeaderTitle}
+            subtitle={workspaceHeaderSubtitle}
+            isSubtitleDistinct={isWorkspaceHeaderSubtitleDistinct}
+            currentBranchName={currentBranchName}
+            normalizedServerId={normalizedServerId}
+            showWorkspaceSetup={showWorkspaceSetup}
+            importAgentDisabled={!canOpenImportSheet}
+            copyPathDisabled={!workspaceDirectory}
+            onOpenImportSheet={openImportSheet}
+            onCopyWorkspacePath={handleCopyWorkspacePath}
+            onCopyBranchName={handleCopyBranchName}
+            onOpenSetupTab={handleOpenSetupTab}
+          />
+        </ScreenHeader>
       ) : null,
     [
       canOpenImportSheet,
@@ -3542,7 +3539,7 @@ function WorkspaceScreenContent({
       return (
         <CompactWorkspaceHeader
           headerVariant={headerVariant}
-          actionsActive={isRouteFocused && (!isMobile || workspacePanelActive)}
+          actionsActive={isRouteFocused && workspacePanelActive}
           tabSwitcher={tabSwitcher}
           inlineTabRail={inlineTabRail}
           inlineTabsNaturalWidth={inlineTabsNaturalWidth}
@@ -3597,7 +3594,6 @@ function WorkspaceScreenContent({
       handleCreateTerminalWithProfile,
       handleOpenSetupTab,
       handleToggleExplorerSidebar,
-      isMobile,
       isRouteFocused,
       isWorkspaceHeaderLoading,
       isWorkspaceHeaderSubtitleDistinct,
@@ -3839,25 +3835,35 @@ function WorkspaceScreenContent({
         onExitFocusMode={toggleFocusMode}
         onReorderTabsInPane={handleReorderTabsInPane}
         buildPaneContentModel={buildDesktopPaneContentModel}
-        headerAction={renderExplorerSidebarHeaderAction()}
+        headerAction={
+          isMobile && workspaceActionsInBar ? null : renderExplorerSidebarHeaderAction()
+        }
       />
     );
     return (
-      <ExplorerFrame
-        presentation={isMobile ? "overlay" : "dock"}
-        isWorkspaceActive={isRouteFocused}
-        persistenceKey={persistenceKey}
-        containerWidth={explorerContainerWidth}
-        isOpen={isExplorerSidebarShowing && !desktopFocusModeEnabled}
-      >
-        {dock}
-      </ExplorerFrame>
+      <>
+        {isMobile && workspaceActionsInBar ? (
+          <WindowLayoutActions active={isRouteFocused && isExplorerSidebarShowing}>
+            {renderExplorerSidebarHeaderAction()}
+          </WindowLayoutActions>
+        ) : null}
+        <ExplorerFrame
+          presentation={isMobile ? "overlay" : "dock"}
+          isWorkspaceActive={isRouteFocused}
+          persistenceKey={persistenceKey}
+          containerWidth={explorerContainerWidth}
+          isOpen={isExplorerSidebarShowing && !desktopFocusModeEnabled}
+        >
+          {dock}
+        </ExplorerFrame>
+      </>
     );
   }, [
     workspaceLayout,
     explorerSidebarPaneId,
     persistenceKey,
     isMobile,
+    workspaceActionsInBar,
     uiTabs,
     normalizedServerId,
     normalizedWorkspaceId,

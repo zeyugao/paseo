@@ -2,7 +2,15 @@ import { Fragment, useCallback, useLayoutEffect, useMemo, useState, type ReactNo
 import { useTranslation } from "react-i18next";
 import { CompactHeader, CompactHeaderTitle } from "@/components/headers/compact-header";
 import { ScreenHeader } from "@/components/headers/screen-header";
-import { SidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
+import {
+  useSidebarMenuTogglePresentation,
+  useSidebarMenuInWindowBar,
+} from "@/components/headers/sidebar-menu-toggle";
+import {
+  HeaderLeading,
+  headerContentPaddingForLayout,
+  headerNavigationGapForLayout,
+} from "@/components/headers/header-leading";
 import { View, type LayoutChangeEvent } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useWindowChromeInlinePadding } from "@/utils/desktop-window";
@@ -93,11 +101,12 @@ function InlineHeaderLeading({
           : null,
       ];
   return (
-    <>
-      <SidebarMenuToggle
-        testID={measuring ? "workspace-header-sidebar-measurement" : undefined}
-        nativeID={measuring ? "workspace-header-sidebar-measurement" : undefined}
-      />
+    <HeaderLeading
+      navigation="menu"
+      navigationTestID={measuring ? "workspace-header-sidebar-measurement" : undefined}
+      navigationNativeID={measuring ? "workspace-header-sidebar-measurement" : undefined}
+      style={measuring ? styles.measuringTitle : undefined}
+    >
       <View
         style={measuring ? styles.measuringTitleText : styles.inlineContent}
         onLayout={measuring ? onTitleLayout : undefined}
@@ -114,7 +123,7 @@ function InlineHeaderLeading({
         </View>
         {children}
       </View>
-    </>
+    </HeaderLeading>
   );
 }
 
@@ -133,6 +142,7 @@ function InlineWorkspaceHeaderBase({
   const targetWidth = useWorkspaceHeaderWidth(geometry);
   const headerWidth = targetWidth;
   const chrome = useWindowChromeInlinePadding();
+  const navigationVisible = useSidebarMenuTogglePresentation() !== "hidden";
   const horizontalInset = chrome.paddingLeft + chrome.paddingRight + horizontalPadding * 2;
   const [leadingWidth, setLeadingWidth] = useState(0);
   const [preferredTitleWidth, setPreferredTitleWidth] = useState(0);
@@ -143,15 +153,15 @@ function InlineWorkspaceHeaderBase({
   const measureTitle = useCallback((event: LayoutChangeEvent) => {
     setPreferredTitleWidth(event.nativeEvent.layout.width);
   }, []);
-  // The hidden leading row measures navigation + gap + title. Subtracting the title
-  // keeps the navigation slot and its spacing out of the title reservation.
-  const navigationWidth = Math.max(0, leadingWidth - preferredTitleWidth - navigationGap);
+  const navigationWidth = navigationVisible
+    ? Math.max(0, leadingWidth - preferredTitleWidth - navigationGap)
+    : 0;
   const allocation = resolveInlineWorkspaceTabBudget({
     width: headerWidth,
     horizontalInset,
     navigationWidth,
     titleWidth: preferredTitleWidth,
-    navigationGap,
+    navigationGap: navigationVisible ? navigationGap : 0,
     gap: tabGap,
   });
   const presentation =
@@ -234,28 +244,26 @@ function InlineWorkspaceHeaderBase({
         importantForAccessibility="no-hide-descendants"
       >
         <ScreenHeader
-          left={measuredLeading}
           leftStyle={styles.measuringTitle}
           right={measuredRail}
           rightStyle={styles.inlineTabs}
           borderless
-        />
+        >
+          {measuredLeading}
+        </ScreenHeader>
       </View>
       <View style={styles.visibleHeader}>
-        <ScreenHeader
-          left={visibleLeading}
-          right={visibleSwitcher}
-          rightStyle={switcherStyle}
-          borderless
-        />
+        <ScreenHeader right={visibleSwitcher} rightStyle={switcherStyle} borderless>
+          {visibleLeading}
+        </ScreenHeader>
       </View>
     </View>
   );
 }
 
 const InlineWorkspaceHeader = withUnistyles(InlineWorkspaceHeaderBase, (theme) => ({
-  horizontalPadding: theme.spacing[3],
-  navigationGap: theme.spacing[2],
+  horizontalPadding: headerContentPaddingForLayout(false),
+  navigationGap: headerNavigationGapForLayout(false),
   tabGap: theme.spacing[4],
 }));
 
@@ -280,6 +288,7 @@ export function CompactWorkspaceHeader({
 }: CompactWorkspaceHeaderProps) {
   const { t } = useTranslation();
   const actionsInBar = resolveWorkspaceActionPlacement(useWindowLayout()) === "vertical-bar";
+  const navigationInBar = useSidebarMenuInWindowBar();
   const projectRow = useMemo(
     () => (
       <WorkspaceHeaderProjectRow
@@ -320,7 +329,7 @@ export function CompactWorkspaceHeader({
     <IconButtonChromeProvider value="header-island">
       {headerVariant === "compact" ? (
         <CompactHeader
-          navigation="menu"
+          navigation={navigationInBar ? null : "menu"}
           title={title}
           titleTestID="workspace-header-title"
           subtitle={projectRow}
@@ -356,7 +365,7 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 0,
     minWidth: 0,
   },
-  measuringLeading: { flexDirection: "row", alignItems: "center", gap: theme.spacing[2] },
+  measuringLeading: { flexDirection: "row", alignItems: "center" },
   measuringTitleText: {
     flexShrink: 1,
     minWidth: 0,

@@ -89,6 +89,7 @@ final class WindowLayoutView: ExpoView {
     didSet { updateStatusBarPreference() }
   }
   private let topChromeBand = TopChromeBandView()
+  private let headerCornerBand = TopChromeBandView()
   private var topChromeReservation: TopChromeReservation?
   private(set) var topInset: CGFloat = 0
   private(set) var hasTopBand = false
@@ -107,6 +108,8 @@ final class WindowLayoutView: ExpoView {
     super.init(appContext: appContext)
     topChromeBand.onChange = { [weak self] in self?.scheduleUpdate() }
     addSubview(topChromeBand)
+    headerCornerBand.onChange = { [weak self] in self?.scheduleUpdate() }
+    addSubview(headerCornerBand)
     #if compiler(>=6.4)
     if #available(iOS 27.1, *) {
       registerForTraitChanges(UITraitCollection.systemTraitsAffectingVerticalBarEdge) {
@@ -220,7 +223,7 @@ final class WindowLayoutView: ExpoView {
   }
 
   private func publish() {
-    guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+    guard let window, let scene = window.windowScene, bounds.width > 0, bounds.height > 0 else { return }
     // Resolve pending constraints and guides before pairing them with this view's insets.
     updateConstraintsIfNeeded()
     layoutIfNeeded()
@@ -256,14 +259,37 @@ final class WindowLayoutView: ExpoView {
       nextTopInset = max(0, frame.minY)
       nextHasTopBand = true
     }
+    // A vertical system bar disables reusable top chrome, but not the window's corners.
+    var headerCornerInsets: Any = NSNull()
+    if topChromeRowHeight > 0 {
+      headerCornerBand.frame = CGRect(
+        x: bounds.minX, y: bounds.minY + nextTopInset,
+        width: bounds.width, height: topChromeRowHeight
+      )
+      headerCornerBand.setNeedsLayout()
+      headerCornerBand.layoutIfNeeded()
+      headerCornerInsets = [
+        "left": headerCornerBand.horizontalInsets.left,
+        "right": headerCornerBand.horizontalInsets.right
+      ]
+    }
     if nextTopInset != topInset || nextHasTopBand != hasTopBand {
       topInset = nextTopInset
       hasTopBand = nextHasTopBand
       NotificationCenter.default.post(name: windowLayoutInsetsDidChange, object: self)
     }
+    // Compare in the scene's display coordinate space, not orientation-dependent window sizes.
+    let displayBounds = scene.screen.coordinateSpace.bounds
+    let windowOnDisplay = window.convert(window.bounds, to: scene.screen.coordinateSpace)
+    let tolerance = 1 / traitCollection.displayScale
+    let fillsDisplay = abs(windowOnDisplay.minX - displayBounds.minX) <= tolerance &&
+      abs(windowOnDisplay.minY - displayBounds.minY) <= tolerance &&
+      abs(windowOnDisplay.maxX - displayBounds.maxX) <= tolerance &&
+      abs(windowOnDisplay.maxY - displayBounds.maxY) <= tolerance
     let payload: [String: Any] = [
       "bounds": rect(bounds),
       "hingeStatus": hingeStatus,
+      "fillsDisplay": fillsDisplay,
       "insets": [
         "top": insets.top,
         "right": insets.right,
@@ -275,7 +301,8 @@ final class WindowLayoutView: ExpoView {
       "bottomClearance": bottomClearance,
       "topBar": topBar,
       "topChrome": topChromePayload,
-      "statusBarHidden": (window?.rootViewController as? WindowLayoutRootViewController)?
+      "headerCornerInsets": headerCornerInsets,
+      "statusBarHidden": (window.rootViewController as? WindowLayoutRootViewController)?
         .statusBarHiddenSettled ?? false,
       "occlusions": occlusions.map(rect),
       "divisions": divisions.map(rect)

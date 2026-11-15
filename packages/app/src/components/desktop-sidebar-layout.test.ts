@@ -27,7 +27,7 @@ describe("desktop sidebar layout", () => {
     divisions: [{ x: 465, y: 0, width: 21, height: 669 }],
   };
 
-  it("places workspace action symbols in the reported trailing bar", () => {
+  it("places workspace action symbols in either reported vertical bar", () => {
     expect(resolveWorkspaceActionPlacement(geometry)).toBe("vertical-bar");
     expect(resolveWorkspaceActionPlacement(null)).toBe("header");
     expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBarEdge: "none" })).toBe(
@@ -35,7 +35,7 @@ describe("desktop sidebar layout", () => {
     );
     expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBar: null })).toBe("header");
     expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBarEdge: "leading" })).toBe(
-      "header",
+      "vertical-bar",
     );
   });
 

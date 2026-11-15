@@ -12,7 +12,8 @@ import {
   getDesktopWindowControlsWidth,
 } from "@/desktop/window-chrome-presentation";
 import { isNative } from "@/constants/platform";
-import { useTopBand, type TopBand } from "@/window-layout";
+import { useTopBand, useWindowLayout, type TopBand } from "@/window-layout";
+import { resolveHeaderCornerInsets } from "@/window-layout/model";
 
 export type WindowChromeCorners = "none" | "top-left" | "top-right" | "both";
 type WindowChromeSafeAreaPlacement = "inline" | "below";
@@ -41,6 +42,7 @@ interface WindowChromeSafeAreaInput {
   corners: WindowChromeCorners;
   placement: WindowChromeSafeAreaPlacement;
   leadingInset?: number;
+  cornerInsets?: { left: number; right: number } | null;
 }
 
 const EMPTY_OBSTRUCTION: WindowChromeObstruction = { topLeft: null, topRight: null };
@@ -153,16 +155,18 @@ export function resolveWindowChromeSafeArea(
 export function resolveWindowChromeSafeArea(
   input: WindowChromeSafeAreaInput,
 ): WindowChromeSafeAreaStyle {
-  const ownsTopLeft = input.corners === "top-left" || input.corners === "both";
-  const ownsTopRight = input.corners === "top-right" || input.corners === "both";
+  const ownsTopLeft = windowChromeCornersInclude(input.corners, "top-left");
+  const ownsTopRight = windowChromeCornersInclude(input.corners, "top-right");
   const topLeft = ownsTopLeft ? input.obstruction.topLeft : null;
   const topRight = ownsTopRight ? input.obstruction.topRight : null;
   if (input.placement === "below") {
     return { height: Math.max(topLeft?.height ?? 0, topRight?.height ?? 0) };
   }
   return {
-    paddingLeft: ownsTopLeft ? Math.max(topLeft?.width ?? 0, input.leadingInset ?? 0) : 0,
-    paddingRight: topRight?.width ?? 0,
+    paddingLeft: ownsTopLeft
+      ? Math.max(topLeft?.width ?? 0, input.leadingInset ?? 0, input.cornerInsets?.left ?? 0)
+      : 0,
+    paddingRight: ownsTopRight ? Math.max(topRight?.width ?? 0, input.cornerInsets?.right ?? 0) : 0,
   };
 }
 
@@ -333,13 +337,26 @@ export function useHasOwnedWindowChromeObstruction(corner: WindowChromeCorner): 
   return resolveHasOwnedWindowChromeObstruction({ obstruction, corners, corner });
 }
 
+function useHeaderCornerInsets() {
+  const layout = useWindowLayout();
+  return useMemo(() => resolveHeaderCornerInsets(layout), [layout]);
+}
+
 export function useWindowChromeInlinePadding(): WindowChromeInlinePadding {
   const obstruction = useContext(WindowChromeContext);
   const corners = useContext(WindowChromeCornersContext);
   const leadingInset = useTopBand()?.leadingInset;
+  const cornerInsets = useHeaderCornerInsets();
   return useMemo(
-    () => resolveWindowChromeSafeArea({ obstruction, corners, placement: "inline", leadingInset }),
-    [obstruction, corners, leadingInset],
+    () =>
+      resolveWindowChromeSafeArea({
+        obstruction,
+        corners,
+        placement: "inline",
+        leadingInset,
+        cornerInsets,
+      }),
+    [obstruction, corners, leadingInset, cornerInsets],
   );
 }
 
@@ -357,8 +374,15 @@ export function WindowChromeSafeArea({
   const obstruction = useContext(WindowChromeContext);
   const corners = useContext(WindowChromeCornersContext);
   const leadingInset = useTopBand()?.leadingInset;
+  const cornerInsets = useHeaderCornerInsets();
   const safeAreaStyle = useMemo(() => {
-    const resolved = resolveWindowChromeSafeArea({ obstruction, corners, placement, leadingInset });
+    const resolved = resolveWindowChromeSafeArea({
+      obstruction,
+      corners,
+      placement,
+      leadingInset,
+      cornerInsets,
+    });
     if (placement === "below") return resolved;
     const paddingLeft = "paddingLeft" in resolved ? resolved.paddingLeft : 0;
     const paddingRight = "paddingRight" in resolved ? resolved.paddingRight : 0;
@@ -366,7 +390,7 @@ export function WindowChromeSafeArea({
       paddingLeft: paddingLeft + horizontalPadding,
       paddingRight: paddingRight + horizontalPadding,
     };
-  }, [corners, horizontalPadding, obstruction, placement, leadingInset]);
+  }, [corners, horizontalPadding, obstruction, placement, leadingInset, cornerInsets]);
   const combinedStyle = useMemo(() => [style, safeAreaStyle], [safeAreaStyle, style]);
   return <View {...props} style={combinedStyle} />;
 }

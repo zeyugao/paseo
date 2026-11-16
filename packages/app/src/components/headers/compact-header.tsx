@@ -110,11 +110,9 @@ export function CompactHeaderTitle({
   titleTestID,
   subtitle,
   fadeOverflow = false,
-  workspaceRow = false,
 }: Pick<CompactHeaderProps, "title" | "titleTestID" | "subtitle"> & {
   loading: boolean;
   fadeOverflow?: boolean;
-  workspaceRow?: boolean;
 }) {
   if (loading) {
     return <View style={styles.titleSkeleton} />;
@@ -122,10 +120,7 @@ export function CompactHeaderTitle({
   if (!title) {
     return subtitle ?? null;
   }
-  const titleStyle = [
-    subtitle ? styles.title : styles.singleLineTitle,
-    workspaceRow && styles.workspaceTitle,
-  ];
+  const titleStyle = subtitle ? styles.title : styles.singleLineTitle;
   return (
     <>
       {fadeOverflow ? (
@@ -257,10 +252,6 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foreground,
     textAlign: "left",
-  },
-  workspaceTitle: {
-    fontSize: theme.fontSize.sm,
-    lineHeight: theme.fontSize.sm * 1.25,
   },
   fadingTitle: {
     flexDirection: "row",

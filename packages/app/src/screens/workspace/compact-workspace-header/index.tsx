@@ -118,7 +118,6 @@ function InlineHeaderLeading({
             titleTestID={measuring ? undefined : "workspace-header-title"}
             subtitle={projectRow}
             fadeOverflow
-            workspaceRow
           />
         </View>
         {children}
@@ -295,10 +294,9 @@ export function CompactWorkspaceHeader({
         subtitle={subtitle}
         isSubtitleDistinct={isSubtitleDistinct}
         serverId={serverId}
-        size={headerVariant === "inline" ? "sm" : "md"}
       />
     ),
-    [subtitle, isSubtitleDistinct, serverId, headerVariant],
+    [subtitle, isSubtitleDistinct, serverId],
   );
   const symbols = {
     "tab-count": tabSwitcher,

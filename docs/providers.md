@@ -150,6 +150,8 @@ Pi import discovery reads Pi's persisted JSONL session files because Pi RPC does
 
 OMP is a first-class built-in provider, disabled by default. Its launch contract, typed runtime, agent/session behavior, history, permissions, imports, and test fake live under `providers/omp/`; only the provider-neutral JSONL child-process transport is shared with Pi. It launches `omp --mode rpc-ui`, uses OMP's `get_available_commands` RPC for slash-command discovery, bridges OMP `rpc-ui` approval dialogs into Paseo permissions, and imports terminal-started sessions from `~/.omp/agent/sessions` when enabled.
 
+OMP tool-result images appear after their tool row in both live turns and history replay. Keep image bytes out of tool details: materialize immutable attachments and use the shared [Markdown image path](markdown-renderer.md), so viewing an earlier read does not depend on the source file still existing or remaining unchanged.
+
 OMP rewind is a branch, not an edit: `branch` writes a new session file whose header names the
 previous file as `parentSession` and leaves that previous file untouched. A rewind chain therefore
 adds one file to `~/.omp/agent/sessions` per step, and `omp --resume` lists all of them. The

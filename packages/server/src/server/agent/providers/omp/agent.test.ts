@@ -1,9 +1,10 @@
 import { describe, expect, onTestFinished, test, vi } from "vitest";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
 import { rmSync } from "node:fs";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { AgentStreamEvent } from "../../agent-sdk-types.js";
 import type { PaseoToolCatalog } from "../../tools/types.js";
@@ -16,6 +17,7 @@ import { OmpHarness } from "./test-utils/omp-harness.js";
 import { OmpAgentClient, OmpAgentSession } from "./agent.js";
 import { FakeOmp } from "./test-utils/fake-omp.js";
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
+import { streamOmpHistory } from "./history.js";
 
 const TURN_LIFECYCLE_EVENTS = new Set<AgentStreamEvent["type"]>([
   "turn_started",
@@ -39,6 +41,119 @@ const ABORTED_TERMINAL_RESPONSE: OmpAgentMessage = {
   stopReason: "aborted",
   errorMessage: "Interrupted by user",
 };
+
+test.each([
+  { toolName: "read", isError: false, imageCount: 1 },
+  { toolName: "eval", isError: true, imageCount: 2 },
+])(
+  "renders $toolName images in order before completion and after durable replay",
+  async ({ toolName, isError, imageCount }) => {
+    const data =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X1r0AAAAASUVORK5CYII=";
+    const content = [
+      { type: "text" as const, text: isError ? "Partial output before failure" : "Image read" },
+      ...Array.from({ length: imageCount }, () => ({
+        type: "image" as const,
+        data,
+        mimeType: "image/png",
+      })),
+    ];
+    const runtime = new FakeOmp();
+    const session = await new OmpAgentClient({ logger: createTestLogger(), runtime }).createSession(
+      { provider: "omp", cwd: process.cwd() },
+    );
+    onTestFinished(() => session.close());
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    const native = runtime.latestSession();
+    const promptStarted = native.nextPrompt();
+    const run = session.run("Inspect the image");
+    await promptStarted;
+    native.beginTurn();
+    const args = toolName === "read" ? { path: "/missing/original.png" } : { code: "print(image)" };
+    native.emit({ type: "tool_execution_start", toolCallId: "image-read", toolName, args });
+    native.emit({
+      type: "tool_execution_update",
+      toolCallId: "image-read",
+      toolName,
+      partialResult: { content },
+    });
+    native.emit({
+      type: "tool_execution_end",
+      toolCallId: "image-read",
+      toolName,
+      result: { content },
+      isError,
+    });
+    native.streamAssistantText("Image inspected");
+    native.finishTurn();
+    await run;
+
+    const items = events.flatMap((event) => (event.type === "timeline" ? [event.item] : []));
+    const images = items.filter(
+      (item) => item.type === "assistant_message" && item.text.includes("![Image]"),
+    );
+    expect(images).toHaveLength(imageCount);
+    const settled = items.findIndex(
+      (item) => item.type === "tool_call" && item.status === (isError ? "failed" : "completed"),
+    );
+    expect(items.slice(settled + 1)).toEqual([
+      ...images,
+      expect.objectContaining({ type: "assistant_message", text: "Image inspected" }),
+    ]);
+    expect(events.at(-1)?.type).toBe("turn_completed");
+    expect(JSON.stringify(events)).not.toContain(data);
+    const paths = images.map((item) => {
+      if (item.type !== "assistant_message") throw new Error("Expected image message");
+      const source = /!\[Image\]\((.+)\)/.exec(item.text)?.[1];
+      if (!source) throw new Error("Missing image path");
+      return source.startsWith("file:") ? fileURLToPath(source) : source;
+    });
+    onTestFinished(async () => {
+      for (const file of new Set(paths)) await rm(file, { force: true });
+    });
+    for (const file of paths) expect(await readFile(file)).toEqual(Buffer.from(data, "base64"));
+
+    const directory = await mkdtemp(join(tmpdir(), "omp-image-replay-"));
+    onTestFinished(() => rm(directory, { recursive: true, force: true }));
+    const messages: OmpAgentMessage[] = [
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "image-read", name: toolName, arguments: args }],
+      },
+      { role: "toolResult", toolCallId: "image-read", toolName, content, isError },
+      { role: "assistant", content: [{ type: "text", text: "Image inspected" }] },
+    ];
+    const sessionFile = join(directory, "session.jsonl");
+    const entries = [
+      { type: "session", id: "root", parentId: null },
+      ...messages.map((message, index) => ({
+        type: "message",
+        id: `message-${index}`,
+        parentId: index === 0 ? "root" : `message-${index - 1}`,
+        message,
+      })),
+    ];
+    await writeFile(sessionFile, entries.map((entry) => JSON.stringify(entry)).join("\n"));
+    const replay: AgentStreamEvent[] = [];
+    for await (const event of streamOmpHistory({ provider: "omp", sessionFile }))
+      replay.push(event);
+    const replayItems = replay.flatMap((event) => (event.type === "timeline" ? [event.item] : []));
+    expect(
+      replayItems.filter(
+        (item) => item.type === "assistant_message" && item.text.includes("![Image]"),
+      ),
+    ).toEqual(images);
+    expect(replayItems.at(-1)).toMatchObject({
+      type: "assistant_message",
+      text: "Image inspected",
+    });
+    expect(
+      replayItems.find((item) => item.type === "tool_call" && item.status !== "running"),
+    ).toMatchObject({ status: isError ? "failed" : "completed" });
+    expect(JSON.stringify(replay)).not.toContain(data);
+  },
+);
 
 test("an idle follow-up is submitted as a prompt so OMP can start a turn", async () => {
   const runtime = new FakeOmp();
@@ -2842,7 +2957,6 @@ test.each([false, true])(
     else {
       const imagePath = prompt.message.match(/\[Image available at: (.+)\]/)?.[1];
       expect(imagePath).toBeTruthy();
-      const { readFile, rm } = await import("node:fs/promises");
       expect(await readFile(imagePath!)).toEqual(bytes);
       await rm(imagePath!);
     }

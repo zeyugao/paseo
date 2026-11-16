@@ -79,6 +79,7 @@ import { ompSkillPromptUserText, shouldDisplayOmpCustomMessage } from "./custom-
 import { getUserMessageText } from "./message-history.js";
 import { mapOmpSystemNoticeToToolCalls } from "./system-notice.js";
 import { materializeProviderImage } from "../provider-image-output.js";
+import { renderOmpToolResultImages, splitOmpToolResultImages } from "./tool-result-images.js";
 import { OmpCliRuntime } from "./cli-runtime.js";
 import { listOmpImportableSessions, readOmpImportSessionConfig } from "./session-descriptor.js";
 import type { OmpRuntime, OmpRuntimeSession, OmpStartSessionInput } from "./runtime.js";
@@ -739,6 +740,7 @@ export class OmpAgentSession implements AgentSession {
   private runtimeDead = false;
   private replacingRuntime: Promise<void> | null = null;
   private unsubscribeRuntime: (() => void) | null = null;
+  private pendingRuntimeEvents: Promise<void> | null = null;
   private readonly providerIdleScheduler: OmpProviderIdleScheduler;
   private readonly providerIdleDeadlineMs: number;
   private readonly noTurnScheduler: OmpNoTurnScheduler;
@@ -802,7 +804,21 @@ export class OmpAgentSession implements AgentSession {
 
   private attachRuntime(runtime: OmpRuntimeSession): void {
     this.unsubscribeRuntime = runtime.onEvent((event) => {
-      if (!this.closed && runtime === this.runtimeSession) this.handleRuntimeEvent(event);
+      const handle = () => {
+        if (!this.closed && runtime === this.runtimeSession) return this.handleRuntimeEvent(event);
+      };
+      const work = this.pendingRuntimeEvents ? this.pendingRuntimeEvents.then(handle) : handle();
+      if (work) {
+        const pending = work.catch((error: unknown) => {
+          this.logger.error({ err: error }, "OMP runtime event processing failed");
+          this.handleProcessExit(error instanceof Error ? error.message : String(error));
+        });
+        this.pendingRuntimeEvents = pending;
+        void pending.then(() => {
+          if (this.pendingRuntimeEvents === pending) this.pendingRuntimeEvents = null;
+          return undefined;
+        });
+      }
     });
     void runtime.setSubagentSubscription("events").catch((eventsError: unknown) => {
       this.logger.debug(
@@ -1898,7 +1914,7 @@ export class OmpAgentSession implements AgentSession {
     });
   }
 
-  private handleExtraRuntimeEvent(event: OmpRuntimeEvent): boolean {
+  private handleExtraRuntimeEvent(event: OmpRuntimeEvent): boolean | Promise<void> {
     if (event.type === "session_settled") {
       this.settlePendingSteerDrain([]);
       this.settleTurnAfterSessionSettled();
@@ -1947,10 +1963,10 @@ export class OmpAgentSession implements AgentSession {
     }
     if (event.type === "subagent_event") {
       const payload = (event as Extract<OmpRuntimeEvent, { type: "subagent_event" }>).payload;
-      for (const mapped of this.subagentIndex.handleEvent(this.runtimeSession, payload)) {
-        this.emit(mapped);
-      }
-      return true;
+      return this.subagentIndex.handleEvent(this.runtimeSession, payload).then((events) => {
+        for (const mapped of events) this.emit(mapped);
+        return undefined;
+      });
     }
     if (event.type === "todo_reminder") {
       const item = mapOmpTodoReminderEvent(event);
@@ -2013,7 +2029,7 @@ export class OmpAgentSession implements AgentSession {
     this.emit({ type: "timeline", provider: this.provider, turnId, item });
   }
 
-  private handleRuntimeEvent(event: OmpRuntimeEvent): void {
+  private handleRuntimeEvent(event: OmpRuntimeEvent): void | Promise<void> {
     if (isExtensionUiRequestEvent(event)) {
       this.handleExtensionUiRequest(event);
       return;
@@ -2048,8 +2064,9 @@ export class OmpAgentSession implements AgentSession {
       }
       return;
     }
-    if (this.handleExtraRuntimeEvent(event)) {
-      return;
+    const extra = this.handleExtraRuntimeEvent(event);
+    if (extra) {
+      return typeof extra === "boolean" ? undefined : extra;
     }
     if (isOmpAgentSessionEvent(event)) {
       if (event.type === "agent_start") {
@@ -2060,8 +2077,7 @@ export class OmpAgentSession implements AgentSession {
         // streamHistory, so replay must not re-enter the live timeline.
         return;
       }
-      this.handleSessionEvent(event);
-      return;
+      return this.handleSessionEvent(event);
     }
     this.logger.debug({ event }, "Dropped unknown OMP runtime event");
   }
@@ -2087,7 +2103,7 @@ export class OmpAgentSession implements AgentSession {
     });
   }
 
-  private handleSessionEvent(event: OmpAgentSessionEvent): void {
+  private handleSessionEvent(event: OmpAgentSessionEvent): void | Promise<void> {
     // OMP can be briefly idle between cycles while queued work is still scheduled.
     // Only its terminal agent_end may settle the turn or finish an interrupted drain.
     if (event.type === "agent_end" && event.isTerminal === false) {
@@ -2139,13 +2155,14 @@ export class OmpAgentSession implements AgentSession {
           return;
         }
 
-        const partialResult = parseToolResult(event.partialResult);
+        const { result: partialResult } = splitOmpToolResultImages(
+          parseToolResult(event.partialResult),
+        );
         this.emitToolCallEvent(event.toolCallId, toolCall, "running", partialResult, null);
         return;
       }
       case "tool_execution_end": {
-        this.handleToolExecutionEnd(event, turnId);
-        return;
+        return this.handleToolExecutionEnd(event, turnId);
       }
 
       case "agent_end": {
@@ -2199,14 +2216,14 @@ export class OmpAgentSession implements AgentSession {
   private handleToolExecutionEnd(
     event: Extract<OmpAgentSessionEvent, { type: "tool_execution_end" }>,
     turnId: string | undefined,
-  ): void {
+  ): void | Promise<void> {
     const toolCall =
       this.activeToolCalls.get(event.toolCallId) ?? parseToolArgs(event.toolName, null);
     this.activeToolCalls.delete(event.toolCallId);
 
     this.questionUi.finish(event.toolName);
 
-    const result = parseToolResult(event.result);
+    const { result, images } = splitOmpToolResultImages(parseToolResult(event.result));
     const failed = isOmpToolFailure(toolCall, result, Boolean(event.isError));
     const error = failed ? toolFailureMessage(result) : null;
     const status = failed ? "failed" : "completed";
@@ -2221,6 +2238,13 @@ export class OmpAgentSession implements AgentSession {
       } else {
         this.logger.debug({ event }, "Dropped malformed OMP todo tool result");
       }
+    }
+    if (images.length > 0) {
+      return renderOmpToolResultImages(images).then((items) => {
+        for (const item of items)
+          this.emit({ type: "timeline", provider: this.provider, turnId, item });
+        return undefined;
+      });
     }
   }
 

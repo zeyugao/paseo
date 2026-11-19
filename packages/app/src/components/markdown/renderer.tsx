@@ -1,5 +1,11 @@
 import { memo, useMemo, useState } from "react";
-import { EnrichedMarkdownText, type LinkPressEvent } from "react-native-enriched-markdown";
+import { ActionSheetIOS, Platform } from "react-native";
+import { useTranslation } from "react-i18next";
+import {
+  EnrichedMarkdownText,
+  type LinkContextMenuItem,
+  type LinkPressEvent,
+} from "react-native-enriched-markdown";
 import { withUnistyles } from "react-native-unistyles";
 import {
   useAssistantFileLinkActions,
@@ -10,6 +16,7 @@ import { matchCommandLink, useAgentCommandHints, type CommandHints } from "@/age
 import { useForgeShorthand } from "@/git/forge-shorthand";
 import { pluginOverviewUrl } from "@getpaseo/protocol/plugin-overview";
 import { openExternalUrl } from "@/utils/open-external-url";
+import { copyToClipboard } from "@/utils/copy-to-clipboard";
 import { AttachmentLightbox, type ImageLightboxSource } from "@/components/attachment-lightbox";
 import type { Theme } from "@/styles/theme";
 import { isWeb } from "@/constants/platform";
@@ -27,6 +34,9 @@ const ThemedMarkdown = withUnistyles(EnrichedMarkdownText);
 const MD4C_FLAGS = { latexMath: false, hardSoftBreaks: true, admonitions: true };
 // A README is written for its forge, where the lines of a paragraph join into one.
 const EXTERNAL_MD4C_FLAGS = { ...MD4C_FLAGS, hardSoftBreaks: false };
+
+const usesLinkActionSheet =
+  Platform.OS === "ios" && Number.parseInt(String(Platform.Version), 10) < 17;
 
 // Reading the breakpoint here makes Unistyles restyle the text when the layout crosses it.
 const markdownStyle =
@@ -99,6 +109,7 @@ const MarkdownPart = memo(function MarkdownPart({
   commandHints = null,
   ...imageContext
 }: MarkdownRendererProps & { commandHints?: CommandHints | null }) {
+  const { t } = useTranslation();
   const environment = useAssistantFileLinkEnvironment();
   const actions = useAssistantFileLinkActions();
   const workspaceForgeShorthand = useForgeShorthand();
@@ -144,6 +155,42 @@ const MarkdownPart = memo(function MarkdownPart({
     if (onLinkPress && !actions.canResolveFile(source)) onLinkPress(url);
     else actions.open(source, "preferred");
   });
+  const linkMenuItems = useMemo<LinkContextMenuItem[] | undefined>(
+    () =>
+      Platform.OS === "ios"
+        ? [
+            {
+              text: t("common.actions.copyLink"),
+              icon: "doc.on.doc",
+              onPress: ({ url }) => void copyToClipboard(url),
+            },
+            {
+              text: t("common.actions.openLink"),
+              icon: "arrow.up.right",
+              onPress: pressLink,
+            },
+          ]
+        : undefined,
+    [t, pressLink],
+  );
+  const linkContextMenuItems = useMemo(
+    () => (linkMenuItems && !usesLinkActionSheet ? { ".*": linkMenuItems } : undefined),
+    [linkMenuItems],
+  );
+  const handleLinkPress = useStableEvent((event: LinkPressEvent) => {
+    if (Platform.OS === "ios") return;
+    pressLink(event);
+  });
+  const longPressLink = useStableEvent((event: LinkPressEvent) => {
+    if (!linkMenuItems) return;
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        options: [...linkMenuItems.map((item) => item.text), t("common.actions.cancel")],
+        cancelButtonIndex: linkMenuItems.length,
+      },
+      (index) => linkMenuItems[index]?.onPress(event),
+    );
+  });
   const pressImage = useStableEvent(({ url }: { url: string }) => {
     if (url !== PENDING_MARKDOWN_IMAGE) setImage({ type: "uri", uri: url });
   });
@@ -173,7 +220,9 @@ const MarkdownPart = memo(function MarkdownPart({
               enableBlockContextMenu={false}
               // JS reveal owns pacing; native fade animation is a separate experiment.
               streamingAnimation={false}
-              onLinkPress={pressLink}
+              onLinkPress={handleLinkPress}
+              onLinkLongPress={usesLinkActionSheet ? longPressLink : undefined}
+              linkContextMenuItems={linkContextMenuItems}
               onImagePress={pressImage}
               renderers={isWeb ? WEB_RENDERERS : undefined}
             />

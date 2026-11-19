@@ -41,6 +41,8 @@ export const ja: TranslationResources = {
       cancel: "キャンセル",
       close: "閉じる",
       copy: "コピー",
+      copyLink: "リンクをコピー",
+      openLink: "リンクを開く",
       copyLine: "行をコピー",
       dismiss: "閉じる",
       reload: "再読み込み",

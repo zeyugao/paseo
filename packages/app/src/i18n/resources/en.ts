@@ -38,6 +38,8 @@ export const en = {
       cancel: "Cancel",
       close: "Close",
       copy: "Copy",
+      copyLink: "Copy link",
+      openLink: "Open link",
       copyLine: "Copy line",
       dismiss: "Dismiss",
       reload: "Reload",

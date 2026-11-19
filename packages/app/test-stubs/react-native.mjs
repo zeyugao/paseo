@@ -1,6 +1,5 @@
-// react-native-web has no ToastAndroid. The toast host imports it by name for its Android
-// branch; Metro and Node tolerate the missing binding, but browser tests load native ESM,
-// which rejects the import and fails every module that reaches the toast context.
+// Browser ESM validates named imports before platform guards run. Keep native-only
+// bindings available so importing shared components does not require their native branch.
 export * from "react-native-web/dist/index.js";
 
 export const ToastAndroid = {
@@ -11,4 +10,10 @@ export const ToastAndroid = {
   CENTER: 2,
   show() {},
   showWithGravity() {},
+};
+
+export const ActionSheetIOS = {
+  showActionSheetWithOptions() {
+    throw new Error("ActionSheetIOS cannot be used in browser tests");
+  },
 };

@@ -40,6 +40,8 @@ export const ko: TranslationResources = {
       cancel: "취소",
       close: "닫기",
       copy: "복사",
+      copyLink: "링크 복사",
+      openLink: "링크 열기",
       copyLine: "줄 복사",
       dismiss: "닫기",
       reload: "다시 로드",

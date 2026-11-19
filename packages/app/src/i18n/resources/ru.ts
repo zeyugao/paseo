@@ -41,6 +41,8 @@ export const ru: TranslationResources = {
       cancel: "Отмена",
       close: "Закрыть",
       copy: "Копировать",
+      copyLink: "Копировать ссылку",
+      openLink: "Открыть ссылку",
       copyLine: "Копировать строку",
       dismiss: "Отклонить",
       reload: "Перезагрузить",

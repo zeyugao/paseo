@@ -718,6 +718,7 @@ interface ComposerTextSurfaceProps {
   textReplacementKey: string;
   textInputRef: React.Ref<ComposerTextInputHandle>;
   textInputStyle: EditingTextInputProps["style"];
+  measuredHeightStyle: TextStyle;
   readOnlyTextStyle: React.ComponentProps<typeof Text>["style"];
   placeholder: string;
   accessibilityLabel: string;
@@ -780,6 +781,9 @@ function ComposerTextSurface(props: ComposerTextSurfaceProps): React.ReactElemen
       style={[
         styles.textInputScrollWrapper,
         props.fullscreen && styles.fullscreenTextSurface,
+        // withUnistyles drops animated-lane styles on the textarea. Size this View
+        // through its inline lane and let the textarea fill it without new CSS rules per height.
+        isWeb && !props.fullscreen && inlineUnistylesStyle(props.measuredHeightStyle),
         props.expandedMaxHeight == null
           ? undefined
           : inlineUnistylesStyle({
@@ -1177,6 +1181,7 @@ function resolveEditorSlotMaxHeight(windowHeight: number, compact: boolean, full
 
 function resolveEditorHeightStyle(fullscreen: boolean, heightStyle: TextStyle) {
   if (fullscreen) return styles.fullscreenTextInput;
+  if (isWeb) return styles.webInlineTextInput;
   if (Platform.OS === "ios") return styles.nativeEditorMinHeight;
   return inlineUnistylesStyle(heightStyle);
 }
@@ -2214,7 +2219,9 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
         styles.textInput,
         mode.isMonospace && styles.textInputMonospace,
         resolveEditorHeightStyle(isFullscreen, composerHeightStyle),
-        Platform.OS !== "ios" &&
+        isWeb && isCompact && !isFullscreen && styles.compactWebTextInput,
+        !isWeb &&
+          Platform.OS !== "ios" &&
           inlineUnistylesStyle({ paddingRight: isCompact && !isFullscreen && !collapsed ? 36 : 0 }),
       ],
       [composerHeightStyle, mode.isMonospace, isFullscreen, isCompact, collapsed],
@@ -2336,6 +2343,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
             textReplacementKey={textReplacement.key}
             textInputRef={assignTextInput}
             textInputStyle={textInputStyle}
+            measuredHeightStyle={composerHeightStyle}
             readOnlyTextStyle={readOnlyTextStyle}
             placeholder={placeholder ?? t("composer.placeholders.fallback")}
             accessibilityLabel={t(mode.accessibilityLabelKey)}
@@ -2368,6 +2376,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
         textReplacement,
         assignTextInput,
         textInputStyle,
+        composerHeightStyle,
         readOnlyTextStyle,
         placeholder,
         t,
@@ -2601,6 +2610,9 @@ const styles = StyleSheet.create((theme: Theme) => ({
   },
   fullscreenTextSurface: { flex: 1, minHeight: 0 },
   fullscreenTextInput: { flex: 1, height: "100%", textAlignVertical: "top" },
+  webInlineTextInput: { flex: 1, minHeight: 0 },
+  // Keep the reserved band inside the textarea so it places the caret even without the button.
+  compactWebTextInput: { paddingRight: 36 },
   nativeEditorMinHeight: { minHeight: MIN_INPUT_HEIGHT },
   lineMeasurement: {
     position: "absolute",

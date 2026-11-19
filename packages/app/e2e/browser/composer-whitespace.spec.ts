@@ -395,6 +395,11 @@ test("the reserved band beside the inline editor focuses it", async ({ page }) =
     await test.step("with the fullscreen button shown, the band under it focuses the editor", async () => {
       for (const point of await reservedBandPoints(page, bandX, button.y + button.height + 10)) {
         await blurComposer(page);
+        const hitsEditor = await composerLocator(page).evaluate(
+          (editor, { x, y }) => document.elementFromPoint(x, y) === editor,
+          point,
+        );
+        expect(hitsEditor, "The band below Fullscreen should hit the editor").toBe(true);
         await page.mouse.click(point.x, point.y);
         await expect(composerLocator(page)).toBeFocused();
         await expect(composerLocator(page)).toHaveValue(longDraft);

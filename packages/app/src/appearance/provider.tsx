@@ -7,7 +7,9 @@ import {
   useMemo,
   useState,
 } from "react";
+import { Appearance } from "react-native";
 import { UnistylesRuntime } from "react-native-unistyles";
+import { isNative } from "@/constants/platform";
 import {
   DEFAULT_THEME_PREFERENCE,
   resolveContentMaxWidth,
@@ -48,7 +50,10 @@ function applyTheme({ preference, contributedTheme }: ApplyThemeInput): void {
   const builtInPreference =
     preference === PLUGIN_THEME_PREFERENCE ? DEFAULT_THEME_PREFERENCE : preference;
   if (builtInPreference === "auto") {
-    UnistylesRuntime.setAdaptiveThemes(true);
+    UnistylesRuntime.setAdaptiveThemes(!isNative);
+    if (isNative) {
+      UnistylesRuntime.setTheme(Appearance.getColorScheme() === "dark" ? "dark" : "light");
+    }
     return;
   }
 
@@ -90,6 +95,19 @@ export function AppearanceProvider({ children }: { children: ReactNode }) {
     settings.contentMaxWidth,
     settings.syntaxTheme,
   ]);
+
+  useEffect(() => {
+    if (isLoading || !isNative || selected) return;
+    const preference =
+      settings.theme === PLUGIN_THEME_PREFERENCE ? DEFAULT_THEME_PREFERENCE : settings.theme;
+    if (preference !== "auto") return;
+
+    // RN receives system changes that Unistyles 3.2.4's UIScreen-based scheme can miss.
+    const subscription = Appearance.addChangeListener(({ colorScheme }) => {
+      UnistylesRuntime.setTheme(colorScheme === "dark" ? "dark" : "light");
+    });
+    return () => subscription.remove();
+  }, [isLoading, selected, settings.theme]);
 
   const select = useCallback(
     (option: PluginThemeOption) => {

@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import React, { createRef } from "react";
-import { act, render, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
 import { Text, View } from "react-native";
 import { AppWindowCompactContext } from "@/hooks/app-window-frame-context";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -67,6 +67,9 @@ describe("open menu placement", () => {
       act(() => updateViewport(951, 669));
       await waitFor(() => expect(result.current.position).toEqual({ left: 337, bottomEdge: 594 }));
     } finally {
+      // Unmount the open menu before restoring the viewport. Otherwise the
+      // reset resize starts a real measurement that can outlive jsdom.
+      cleanup();
       measurement.mockRestore();
       viewportWidth.mockRestore();
       viewportHeight.mockRestore();

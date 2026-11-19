@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { appendFile } from "node:fs/promises";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { expect, type Page } from "@playwright/test";
 import { openSettings } from "../../../app/e2e/support/helpers/app";
 import { getE2EDaemonPort } from "../../../app/e2e/support/helpers/daemon-port";
@@ -10,15 +12,12 @@ import {
   openSettingsSection,
 } from "../../../app/e2e/support/helpers/settings";
 
+const execFileAsync = promisify(execFile);
+
 interface DaemonApiStatus {
   version: string;
   serverId: string;
   hostname: string;
-}
-
-interface PidFileContent {
-  pid: number;
-  desktopManaged: boolean;
 }
 
 export interface RealDaemonState {
@@ -27,11 +26,7 @@ export interface RealDaemonState {
   logPath: string;
 }
 
-/**
- * Reads live state from the running E2E test daemon: version from the HTTP
- * status endpoint, PID from the paseo.pid lock file, log path from the
- * E2E_PASEO_HOME directory. Call this in Node test code (not in the browser).
- */
+/** Reads the worker fixture's live version and identity-selected process state. */
 export async function loadRealDaemonState(): Promise<RealDaemonState> {
   const port = getE2EDaemonPort();
   const paseoHome = process.env.E2E_PASEO_HOME;
@@ -40,17 +35,20 @@ export async function loadRealDaemonState(): Promise<RealDaemonState> {
   const resp = await fetch(`http://127.0.0.1:${port}/api/status`);
   const data: DaemonApiStatus = await resp.json();
 
-  let pid: number | null = null;
-  try {
-    const raw = readFileSync(`${paseoHome}/paseo.pid`, "utf8");
-    const pidContent: PidFileContent = JSON.parse(raw);
-    pid = pidContent.pid ?? null;
-  } catch (err) {
-    // PID file may not be present yet on a very fresh daemon start
-    console.warn("[desktop-updates] paseo.pid not found:", err);
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [join(__dirname, "../../../cli/bin/paseo"), "daemon", "status", "--home", paseoHome, "--json"],
+    {
+      env: { ...process.env, PASEO_HOME: paseoHome, PASEO_SERVER_ID: data.serverId },
+      timeout: 15_000,
+    },
+  );
+  const status = JSON.parse(stdout) as { pid?: number | null; logPath?: string };
+  if (typeof status.pid !== "number" || typeof status.logPath !== "string") {
+    throw new Error(`E2E daemon status is incomplete: ${stdout}`);
   }
 
-  return { version: data.version, pid, logPath: `${paseoHome}/daemon.log` };
+  return { version: data.version, pid: status.pid, logPath: status.logPath };
 }
 
 export interface DesktopRuntimeConfig {
@@ -399,12 +397,6 @@ export async function interceptDaemonManagementConfirmDialog(
 ): Promise<ConfirmDialogCall> {
   await page.getByRole("switch", { name: "Manage built-in daemon" }).click();
   await page.waitForFunction(() => !!window.__capturedDialogCall, { timeout: 5_000 });
-  return page.evaluate(() => window.__capturedDialogCall!);
-}
-
-export async function interceptDaemonStopConfirmDialog(page: Page): Promise<ConfirmDialogCall> {
-  await page.getByRole("button", { name: "Stop daemon", exact: true }).click();
-  await page.waitForFunction(() => !!window.__capturedDialogCall);
   return page.evaluate(() => window.__capturedDialogCall!);
 }
 

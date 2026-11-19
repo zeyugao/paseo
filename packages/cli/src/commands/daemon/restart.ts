@@ -40,7 +40,8 @@ export async function runRestartCommand(options: CommandOptions, _command: Comma
   const confirmTerminalsClosed = async (status: DaemonStatus) => {
     if (!killTerminals) return;
     if (target.kind === "instance") {
-      await retryUnconfirmedTerminalCleanup(target.home);
+      if (!serverId) throw new Error("Cannot confirm terminal cleanup without daemon identity");
+      await retryUnconfirmedTerminalCleanup(target.home, serverId);
       return;
     }
     // Absent on daemons without terminalsSurviveRestart, which have no terminal cleanup.

@@ -92,10 +92,7 @@ import {
 } from "./window/desktop-window-owner.js";
 import { getDesktopSettingsStore } from "./settings/desktop-settings-electron.js";
 import { clampWindowStateToWorkAreas, createWindowStateStore } from "./settings/window-state.js";
-import {
-  isDesktopManagedDaemonRunningSync,
-  stopDesktopDaemonViaCli,
-} from "./daemon/daemon-manager.js";
+import { isDesktopManagedDaemonRunning, stopDesktopDaemonViaCli } from "./daemon/daemon-manager.js";
 import {
   createQuitLifecycle,
   registerExternalQuitSignals,
@@ -1038,7 +1035,7 @@ const quitLifecycle = createQuitLifecycle({
   stopDesktopManagedDaemonIfNeeded: () =>
     stopDesktopManagedDaemonOnQuitIfNeeded({
       settingsStore: getDesktopSettingsStore(),
-      isDesktopManagedDaemonRunning: isDesktopManagedDaemonRunningSync,
+      isDesktopManagedDaemonRunning,
       stopDaemon: () => stopDesktopDaemonViaCli("quit"),
       showShutdownFeedback: showDaemonShutdownDialog,
     }),

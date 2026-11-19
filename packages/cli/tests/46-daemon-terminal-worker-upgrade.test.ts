@@ -6,7 +6,8 @@
  * node-pty, every other dependency a symlink into this repo) each get their own CLI shim, so
  * each daemon's PASEO_CLI is a distinct path:
  *
- * 1. A daemon from A runs its worker from a copy in $PASEO_HOME/terminal-worker/. After
+ * 1. A daemon from A runs its worker from a copy in
+ *    $PASEO_HOME/daemons/<serverId>/terminal-worker/. After
  *    `stop --keep-terminals` and moving A's node-pty, worker bundle and shell integration away,
  *    a daemon from B adopts the same worker and opens a new, working terminal in it with B's
  *    environment and CLI, while the first terminal keeps A's.
@@ -304,8 +305,13 @@ interface WorkerRecordFile {
   terminals: Array<{ id: string; pid: number }>;
 }
 
+function workerStateDirectory(): string {
+  const serverId = readFileSync(join(paseoHome, "server-id"), "utf8").trim();
+  return join(paseoHome, "daemons", serverId, "terminal-worker");
+}
+
 function workerRecords(): WorkerRecordFile[] {
-  const dir = join(paseoHome, "terminal-worker");
+  const dir = workerStateDirectory();
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
     .filter((name) => /^\d+\.json$/.test(name))
@@ -313,7 +319,7 @@ function workerRecords(): WorkerRecordFile[] {
 }
 
 function runtimeCopies(): string[] {
-  const dir = join(paseoHome, "terminal-worker");
+  const dir = workerStateDirectory();
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter((name) =>
     existsSync(join(dir, name, "paseo-terminal-worker-runtime.json")),
@@ -403,7 +409,7 @@ try {
   assert(firstWorker, "one worker runs");
   assert.equal(firstWorker.protocolVersion, currentProtocolVersion, "the current wire is adopted");
   assert.match(firstWorker.runtime ?? "", /^0\.98\.0-[0-9a-f]{12}$/);
-  const copyA = join(paseoHome, "terminal-worker", firstWorker.runtime!);
+  const copyA = join(workerStateDirectory(), firstWorker.runtime!);
   assert(
     (await commandLineOf(firstWorker.pid)).includes(join(copyA, "terminal-worker.mjs")),
     "the worker runs the copy's bundle",

@@ -90,6 +90,7 @@ export interface TerminalSessionControllerOptions {
   subscribeTerminalMetadata?: (listener: () => void) => () => void;
   listTerminalWorkspaceRefs?: () => Promise<readonly TerminalWorkspaceRef[]>;
   listTerminalWorkspaceRoots?: () => Promise<readonly string[]>;
+  assertCwdWorkspaceOwnedByThisServer?: (cwd: string) => Promise<void>;
   // Drives the snapshot catch-up fallback: a keeping-up client reports ~0 and
   // keeps streaming; a backed-up client trips the snapshot path. Defaults to a
   // constant 0 (no backpressure signal) so callers without a transport always
@@ -142,6 +143,7 @@ export class TerminalSessionController {
   private readonly sessionLogger: pino.Logger;
   private readonly listTerminalWorkspaceRefs: () => Promise<readonly TerminalWorkspaceRef[]>;
   private readonly listTerminalWorkspaceRoots: () => Promise<readonly string[]>;
+  private readonly assertCwdWorkspaceOwnedByThisServer: ((cwd: string) => Promise<void>) | null;
   private readonly getClientBufferedAmount: (source: object) => number | null;
 
   private readonly subscribedDirectories = new Map<string, TerminalDirectorySubscription>();
@@ -159,6 +161,7 @@ export class TerminalSessionController {
     this.listTerminalWorkspaceRoots =
       options.listTerminalWorkspaceRoots ??
       (async () => (await this.listTerminalWorkspaceRefs()).map((workspace) => workspace.cwd));
+    this.assertCwdWorkspaceOwnedByThisServer = options.assertCwdWorkspaceOwnedByThisServer ?? null;
     this.getClientBufferedAmount = options.getClientBufferedAmount ?? (() => 0);
   }
 
@@ -612,6 +615,7 @@ export class TerminalSessionController {
       if (!workspaces.some((workspace) => workspace.workspaceId === workspaceId)) {
         throw new Error(`Workspace ${workspaceId} is not active or does not exist`);
       }
+      await this.assertCwdWorkspaceOwnedByThisServer?.(msg.cwd);
 
       const session = await this.terminalManager.createTerminal({
         cwd: msg.cwd,

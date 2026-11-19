@@ -167,7 +167,9 @@ function createHarness(input: {
       },
       archive: async (id: string, archivedAt: string) => {
         const w = workspaces.get(id);
-        if (w) workspaces.set(id, { ...w, archivedAt });
+        if (!w || w.archivedAt) return false;
+        workspaces.set(id, { ...w, archivedAt, updatedAt: archivedAt });
+        return true;
       },
       remove: async (id: string) => {
         workspaces.delete(id);

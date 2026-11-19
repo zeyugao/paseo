@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 
+import type { AgentProvider } from "./agent-sdk-types.js";
 import {
   ProviderSnapshotManager,
   type ProviderSnapshotManagerOptions,
@@ -10,7 +11,7 @@ import type { PaseoToolCatalog } from "./tools/types.js";
 export interface AgentProviderRuntime {
   snapshotManager: ProviderSnapshotManager;
   setPaseoToolCatalog(catalog: Pick<PaseoToolCatalog, "tools"> | null): void;
-  shutdown(): Promise<void>;
+  shutdown(): Promise<ReadonlySet<AgentProvider>>;
 }
 
 interface CreateAgentProviderRuntimeOptions {
@@ -35,7 +36,7 @@ export async function createAgentProviderRuntime(
       logger: options.logger.child({ module: "provider-snapshot-manager" }),
       openCodeBridge: bridge,
     });
-    let shutdownPromise: Promise<void> | null = null;
+    let shutdownPromise: Promise<ReadonlySet<AgentProvider>> | null = null;
     return {
       snapshotManager,
       setPaseoToolCatalog: (catalog) => bridge.setManifestCatalog(catalog),
@@ -53,9 +54,9 @@ export async function createAgentProviderRuntime(
 async function shutdownProviderRuntime(
   snapshotManager: ProviderSnapshotManager,
   bridge: OpenCodeBridge,
-): Promise<void> {
+): Promise<ReadonlySet<AgentProvider>> {
   try {
-    await snapshotManager.shutdown();
+    return await snapshotManager.shutdown();
   } finally {
     await bridge.close();
   }

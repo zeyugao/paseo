@@ -9454,9 +9454,10 @@ test("archive_workspace_request allows a local target with a foreign path siblin
     expect(findByType(emitted, "archive_workspace_response")?.payload).toMatchObject({
       requestId: "req-retry-local-overlap",
       workspaceId: local.workspaceId,
-      archivedAt,
-      error: null,
+      archivedAt: null,
+      error: expect.stringContaining("owned by host srv-other"),
     });
+    expect((await workspaceRegistry.get(local.workspaceId))?.archivedAt).toBe(archivedAt);
     expect(await workspaceRegistry.get(foreign.workspaceId)).toEqual(foreign);
     expect(existsSync(cwd)).toBe(true);
 

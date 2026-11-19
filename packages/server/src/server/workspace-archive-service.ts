@@ -174,9 +174,7 @@ async function archiveByScopeWithPriority(
 
   checkpoint();
   const target = await resolveArchiveTarget(dependencies, request.scope);
-  if (request.scope.kind === "worktree") {
-    await assertArchivePathsOwned(dependencies, target);
-  }
+  await assertArchivePathsOwned(dependencies, target);
   const targetWorkspaceIds = target.workspaceIds;
 
   await stopWorkspaceSetups(dependencies, target.setupWorkspaceIds, request.requestId);

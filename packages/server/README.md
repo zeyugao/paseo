@@ -26,6 +26,12 @@ npm run dev
 - **Agent** - STT → LLM → TTS pipeline with terminal control
 - **Daemon** - tmux-based terminal management (in-process)
 
+### Timeline response backpressure
+
+Timeline requests wait before producing their response, so reconnect bursts do not retain history
+faster than the socket drains it. See [timeline sync](../../docs/timeline-sync.md#gap-recovery-is-paged-but-complete)
+for source admission, framing and send deadlines.
+
 ## Development
 
 ```bash

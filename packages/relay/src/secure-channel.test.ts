@@ -12,7 +12,12 @@ import {
   type TransportMessage,
 } from "./encrypted-channel.js";
 import { exportPublicKey, generateKeyPair } from "./crypto.js";
-import { MAX_CHUNK_DATA_BYTES } from "./protected-records.js";
+import {
+  decodeProtectedRecord,
+  MAX_CHUNK_DATA_BYTES,
+  protectedRecordByteLength,
+} from "./protected-records.js";
+import { createNoiseInitiator } from "./noise/index.js";
 
 interface Frame {
   data: string | ArrayBuffer;
@@ -169,6 +174,72 @@ describe("secure channel: protected mode", () => {
     expect(pair.link.recordedToDaemon[0].data).not.toContain("text");
     expect(pair.client.outboundWireByteLength(bytes(3))).toBe(3 + 2 + 6 + 16);
     expect(pair.client.outboundWireByteLength("text")).toBe(4 * Math.ceil((4 + 24) / 3));
+  });
+
+  it.each(["", JSON.stringify({ text: '网络\\"\n'.repeat(MAX_CHUNK_DATA_BYTES / 3) })])(
+    "delivers daemon text unchanged through negotiated binary ciphertext (%#)",
+    async (text) => {
+      const pair = await openProtectedPair();
+      pair.link.recordedToClient.length = 0;
+      await pair.daemon.send(text);
+      await settle();
+
+      expect(pair.clientReceived).toEqual([text]);
+      expect(pair.link.recordedToClient.map((frame) => frame.isBinary)).toEqual([true]);
+      const wireBytes = protectedRecordByteLength(Buffer.byteLength(text));
+      expect(pair.link.recordedToClient[0].data).toBeInstanceOf(ArrayBuffer);
+      expect((pair.link.recordedToClient[0].data as ArrayBuffer).byteLength).toBe(wireBytes);
+      expect(pair.daemon.outboundWireByteLength(text)).toBe(wireBytes);
+    },
+  );
+
+  it("keeps daemon records base64 encoded when binary ciphertext was not negotiated", async () => {
+    const link = createLink();
+    const daemonKeyPair = generateKeyPair();
+    const initiator = createNoiseInitiator({
+      remoteStatic: daemonKeyPair.publicKey,
+      prologue: new TextEncoder().encode("paseo-relay-e2ee/1"),
+    });
+    const hello = initiator.writeMessage(new Uint8Array([1, 0]));
+    const daemonPromise = openDaemonSecureChannel(link.daemon, { daemonKeyPair });
+    link.client.send(
+      JSON.stringify({
+        type: "e2ee_hello",
+        key: exportPublicKey(generateKeyPair().publicKey),
+        protected: { v: 1, message: Buffer.from(hello).toString("base64") },
+      }),
+    );
+    const daemon = await daemonPromise;
+    const ready = JSON.parse(String(link.recordedToClient[0].data));
+    const selected = initiator.readMessage(
+      new Uint8Array(Buffer.from(ready.protected.message, "base64")),
+    );
+    expect(selected).toEqual(new Uint8Array([1, 0]));
+    const keys = initiator.split();
+    link.recordedToClient.length = 0;
+
+    const text = '网络\\"\n';
+    const binary = bytes(3);
+    await daemon.send(text);
+    await daemon.send(binary);
+
+    expect(link.recordedToClient.map((frame) => frame.isBinary)).toEqual([false, false]);
+    const textWire = String(link.recordedToClient[0].data);
+    const binaryWire = String(link.recordedToClient[1].data);
+    const decodedText = decodeProtectedRecord(
+      new Uint8Array(Buffer.from(textWire, "base64")),
+      keys.receive,
+    );
+    const decodedBinary = decodeProtectedRecord(
+      new Uint8Array(Buffer.from(binaryWire, "base64")),
+      keys.receive,
+    );
+    expect(decodedText.kind).toBe("text");
+    expect(new TextDecoder().decode(decodedText.data)).toBe(text);
+    expect(decodedBinary.kind).toBe("binary");
+    expect(decodedBinary.data).toEqual(new Uint8Array(binary));
+    expect(daemon.outboundWireByteLength(text)).toBe(Buffer.byteLength(textWire));
+    expect(daemon.outboundWireByteLength(binary)).toBe(Buffer.byteLength(binaryWire));
   });
 
   it("carries frames larger than one Noise message", async () => {

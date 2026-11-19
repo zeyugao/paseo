@@ -3,7 +3,7 @@
 // to keep the module graph importable.
 const Stub = () => null;
 const PassThrough = ({ children }: { children?: unknown }) => children;
-const sharedValue = (value: unknown) => ({ get: () => value });
+const sharedValue = (value: unknown) => ({ value, get: () => value });
 
 export default Stub;
 export const BottomSheetModal = Stub;

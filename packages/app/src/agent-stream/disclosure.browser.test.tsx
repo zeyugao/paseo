@@ -327,6 +327,7 @@ const overviewGroups = [20, 6].map((count, groupIndex) => {
 const ignoreOverviewToggle = () => {};
 
 it("keeps a nested tool trigger in place while multiple summaries are open", async () => {
+  await page.viewport(1280, 900);
   container.style.width = "500px";
   const groups = overviewGroups.map((group, groupIndex) => (
     <OverviewToolCallGroupView

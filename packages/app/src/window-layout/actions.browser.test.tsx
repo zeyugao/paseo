@@ -254,6 +254,7 @@ it("replaces the top navigation control before sidebar animation settlement", as
 });
 
 it("moves left navigation between the leading header and a split window's bar without duplicates", async () => {
+  await page.viewport(1280, 900);
   const previousPanels = usePanelStore.getState();
   usePanelStore.getState().showMobileAgent();
   async function renderPlacement(windowLayout: WindowLayout) {

@@ -386,10 +386,11 @@ export function setupCommandOutput(detail: { commands: Array<{ log: string }> })
 /** Hold this isolated daemon's terminal worker so script exit cannot race a layout change. */
 export async function pauseWorkspaceTerminalWorker(terminalId: string): Promise<() => void> {
   const home = process.env.E2E_PASEO_HOME;
-  if (!home) throw new Error("Missing isolated E2E home");
-  const directory = path.join(home, "terminal-worker");
+  const serverId = process.env.E2E_SERVER_ID;
+  if (!home || !serverId) throw new Error("Missing isolated E2E home or server identity");
+  const directory = path.join(home, "daemons", serverId, "terminal-worker");
   for (const name of await readdir(directory)) {
-    if (!name.endsWith(".json")) continue;
+    if (!/^\d+\.json$/.test(name)) continue;
     const record = JSON.parse(await readFile(path.join(directory, name), "utf8")) as {
       pid: number;
       terminals: Array<{ id: string }>;

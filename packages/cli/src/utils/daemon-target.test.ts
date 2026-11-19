@@ -7,8 +7,10 @@ import {
   buildDaemonConnectionCommandError,
 } from "./client.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { acquirePidLock, updatePidLock } from "../../../server/src/server/pid-lock.js";
+import { getDaemonInstancePath } from "../../../server/src/server/daemon-instance-registry.js";
 
 test("explicit selectors win over both environment selectors", () => {
   const env = { PASEO_HOME: "/tmp/a", PASEO_HOST: "unused:12345" };
@@ -77,23 +79,30 @@ test("malformed endpoint diagnostics never expose the supplied credential", () =
 test("CLI selects an explicit password before a matching local credential and never sends the latter remotely", async () => {
   const home = await mkdtemp(join(tmpdir(), "paseo-cli-credential-"));
   const previousPassword = process.env.PASEO_PASSWORD;
+  const previousServerId = process.env.PASEO_SERVER_ID;
+  const serverId = "srv_cli_credential";
+  process.env.PASEO_SERVER_ID = serverId;
   delete process.env.PASEO_PASSWORD;
   try {
     const token = "a".repeat(43);
-    await writeFile(join(home, "paseo.pid"), JSON.stringify({ listen: "127.0.0.1:6767" }));
-    await writeFile(join(home, "local-credential"), token);
-    expect(resolveDaemonCredential("tcp://localhost:6767", home)).toEqual({
+    const instanceHome = dirname(getDaemonInstancePath(home, serverId));
+    await acquirePidLock(instanceHome, null);
+    await updatePidLock(instanceHome, { listen: "127.0.0.1:6767", serverId });
+    await writeFile(join(instanceHome, "local-credential"), token);
+    expect(await resolveDaemonCredential("tcp://localhost:6767", home)).toEqual({
       kind: "localCredential",
       token,
     });
-    expect(resolveDaemonCredential("tcp://remote.example:6767", home)).toBeNull();
-    expect(resolveDaemonCredential("tcp://localhost:6767?password=explicit", home)).toEqual({
+    expect(await resolveDaemonCredential("tcp://remote.example:6767", home)).toBeNull();
+    expect(await resolveDaemonCredential("tcp://localhost:6767?password=explicit", home)).toEqual({
       kind: "password",
       password: "explicit",
     });
   } finally {
     if (previousPassword === undefined) delete process.env.PASEO_PASSWORD;
     else process.env.PASEO_PASSWORD = previousPassword;
+    if (previousServerId === undefined) delete process.env.PASEO_SERVER_ID;
+    else process.env.PASEO_SERVER_ID = previousServerId;
     await rm(home, { recursive: true, force: true });
   }
 });

@@ -15,6 +15,18 @@ See [agent targets and deferred opens](expo-router.md#agent-targets) for route
 ownership and workspace recovery. Notification generation, presence, and push
 eligibility remain daemon concerns.
 
+## Daemon push delivery
+
+A host can register devices from several Expo projects, including official Paseo and a fork.
+Send each token in its own Expo request: a mixed-project batch is rejected before Expo returns
+per-device tickets, so one stale registration can prevent every device from receiving a push.
+
+Treat `DeviceNotRegistered` and `InvalidCredentials` tickets as terminal subscription failures.
+Revoke through the token store. Every delivery reads the current shared file; renewals,
+revocations and pruning re-read under a cross-process lock before an atomic write, so one
+daemon cannot overwrite another's registration. Transport, HTTP and rate-limit failures
+leave registrations intact. A client can register a revoked token again.
+
 ## Native delivery
 
 Keep the router instance at module scope. Android's `singleTask` Activity can

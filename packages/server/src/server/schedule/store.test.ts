@@ -246,6 +246,89 @@ describe("ScheduleStore", () => {
     });
   });
 
+  test("upserts by name and target only within the requesting host", async () => {
+    const target = {
+      type: "new-agent" as const,
+      config: { provider: "claude" as const, cwd: tempDir },
+    };
+    const base = {
+      cadence: { type: "cron" as const, expression: "0 3 * * *" },
+      target,
+      status: "active" as const,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      nextRunAt: "2026-01-02T03:00:00.000Z",
+      lastRunAt: null,
+      pausedAt: null,
+      expiresAt: null,
+      maxRuns: null,
+      runs: [],
+    };
+    const foreign = await store.create({
+      ...base,
+      hostId: "srv-foreign",
+      name: "owned elsewhere",
+      prompt: "foreign",
+    });
+    let foreignUpdateCalls = 0;
+    const created = await store.upsertByNameAndTarget("owned elsewhere", target, {
+      hostId: "srv-local",
+      create: () => ({ ...base, hostId: "srv-local", name: "owned elsewhere", prompt: "local" }),
+      update: () => {
+        foreignUpdateCalls += 1;
+        throw new Error("must not rewrite a foreign schedule");
+      },
+    });
+
+    expect(foreignUpdateCalls).toBe(0);
+    expect(created.id).not.toBe(foreign.id);
+    expect(created).toMatchObject({ hostId: "srv-local", prompt: "local" });
+    await expect(store.get(foreign.id)).resolves.toMatchObject({
+      hostId: "srv-foreign",
+      prompt: "foreign",
+    });
+
+    const legacy = await store.create({ ...base, name: "legacy", prompt: "before" });
+    const adopted = await store.upsertByNameAndTarget("legacy", target, {
+      hostId: "srv-local",
+      create: () => {
+        throw new Error("legacy record should match");
+      },
+      update: (schedule) => ({ ...schedule, hostId: "srv-local", prompt: "after" }),
+    });
+    expect(adopted.id).toBe(legacy.id);
+    expect(adopted).toMatchObject({ hostId: "srv-local", prompt: "after" });
+  });
+
+  test("preserves an existing host owner when an updater drops the field", async () => {
+    const created = await store.create({
+      hostId: "srv-a",
+      name: "owned",
+      prompt: "before",
+      cadence: { type: "cron", expression: "0 3 * * *" },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+      status: "active",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      nextRunAt: "2026-01-02T03:00:00.000Z",
+      lastRunAt: null,
+      pausedAt: null,
+      expiresAt: null,
+      maxRuns: null,
+      runs: [],
+    });
+
+    const updated = await store.update(created.id, (schedule) => {
+      const { hostId: _hostId, ...rest } = schedule;
+      return { ...rest, prompt: "after" };
+    });
+
+    expect(updated).toMatchObject({ hostId: "srv-a", prompt: "after" });
+    await expect(
+      new ScheduleStore(tempDir, createTestLogger()).get(created.id),
+    ).resolves.toMatchObject({ hostId: "srv-a", prompt: "after" });
+  });
+
   test("revalidates a named target match after waiting for the schedule update queue", async () => {
     class GatedListScheduleStore extends ScheduleStore {
       private listGate: {

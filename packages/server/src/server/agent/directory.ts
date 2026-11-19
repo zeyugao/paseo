@@ -1,6 +1,6 @@
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import type { AgentSnapshotPayload } from "../messages.js";
-import type { WorkspaceRegistry } from "../workspace-registry.js";
+import { isWorkspaceVisibleToServer, type WorkspaceRegistry } from "../workspace-registry.js";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent-storage.js";
 
@@ -22,7 +22,7 @@ interface DiscoverableAgent {
   background?: boolean;
 }
 
-/** Public agent discovery owns background visibility for live and durable records. */
+/** Public agent discovery owns workspace and background visibility for live and durable records. */
 export class AgentDirectory {
   constructor(
     private readonly deps: {
@@ -32,6 +32,7 @@ export class AgentDirectory {
         "get" | "listActive" | "listByWorkspaces" | "lastUserMessageAtByWorkspace"
       >;
       workspaces: Pick<WorkspaceRegistry, "get">;
+      serverId?: string;
       projectLive(agent: ManagedAgent): Promise<AgentSnapshotPayload>;
       projectStored(record: StoredAgentRecord): AgentSnapshotPayload;
       isProviderVisible(provider: string): boolean;
@@ -65,6 +66,7 @@ export class AgentDirectory {
     visibility: BackgroundVisibility = false,
   ): Promise<boolean> {
     const workspace = agent.workspaceId ? await this.deps.workspaces.get(agent.workspaceId) : null;
+    if (workspace && !isWorkspaceVisibleToServer(workspace, this.deps.serverId)) return false;
     return admits(agent, workspace?.background === true, visibility);
   }
 
@@ -123,15 +125,19 @@ export class AgentDirectory {
         agent.workspaceId ? [agent.workspaceId] : [],
       ),
     );
+    const hiddenWorkspaceIds = new Set<string>();
     const backgroundWorkspaceIds = new Set<string>();
-    if (visibility !== true) {
-      for (const id of workspaceIds) {
-        if ((await this.deps.workspaces.get(id))?.background) backgroundWorkspaceIds.add(id);
+    for (const id of workspaceIds) {
+      const workspace = await this.deps.workspaces.get(id);
+      if (workspace && !isWorkspaceVisibleToServer(workspace, this.deps.serverId)) {
+        hiddenWorkspaceIds.add(id);
       }
+      if (workspace?.background) backgroundWorkspaceIds.add(id);
     }
     const matches = (
       agent: DiscoverableAgent & { archivedAt?: string | null; labels?: Record<string, string> },
     ) =>
+      (!agent.workspaceId || !hiddenWorkspaceIds.has(agent.workspaceId)) &&
       (filter?.includeArchived || !agent.archivedAt) &&
       admits(
         agent,

@@ -1,6 +1,6 @@
 import { formatSystemNotificationPrompt } from "../agent/agent-messages/index.js";
 import { randomUUID } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { open, readFile, readdir, stat, unlink, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import type { Logger } from "pino";
 import type { AgentManager } from "../agent/agent-manager.js";
@@ -11,9 +11,10 @@ import { ensureAgentLoaded } from "../agent/agent-loading.js";
 import { startAgentRun, type AgentRunController } from "../agent/agent-prompt.js";
 import { resolveCreateAgentTitles } from "../agent/create-agent-title.js";
 import { type BoundCreateAgentCommand, formatProviderModel } from "../agent/create-agent/create.js";
+import { withReclaimLock } from "../pid-lock.js";
 import type { PersistedWorkspaceRecord } from "../workspace-registry.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../worktree-session.js";
-import { ScheduleStore } from "./store.js";
+import { ScheduleStore, type StoredSchedule } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
 import { foldFeatureValues } from "../agent/option-controls.js";
 import type {
@@ -21,13 +22,22 @@ import type {
   ScheduleExecutionResult,
   ScheduleRun,
   ScheduleTarget,
-  StoredSchedule,
   UpdateScheduleInput,
   UpdateScheduleNewAgentConfig,
 } from "@getpaseo/protocol/schedule/types";
 import type { FirstAgentContext } from "@getpaseo/protocol/messages";
 
 const SCHEDULE_TICK_INTERVAL_MS = 1000;
+const SCHEDULE_CLAIM_STALE_MS = 60 * 60 * 1000;
+const SCHEDULE_CLAIM_RENEW_INTERVAL_MS = 30_000;
+
+interface ScheduleReservation {
+  runId: string;
+  generation: number;
+  claimPath: string | null;
+  lost: boolean;
+  committed: boolean;
+}
 
 // A run failed because its target no longer exists: the agent was deleted or
 // archived, or a new-agent cwd was removed. These are permanent, so the schedule
@@ -43,6 +53,13 @@ export class ScheduleNotFoundError extends Error {
   constructor(id: string) {
     super(`Schedule not found: ${id}`);
     this.name = "ScheduleNotFoundError";
+  }
+}
+
+export class ScheduleOwnershipError extends Error {
+  constructor(id: string, hostId: string) {
+    super(`Schedule ${id} is owned by host ${hostId}`);
+    this.name = "ScheduleOwnershipError";
   }
 }
 
@@ -237,6 +254,8 @@ type ScheduleAgentManager = Pick<
   Pick<
     AgentManager,
     | "createAgentFromRecord"
+    | "serverId"
+    | "createAgent"
     | "getRegisteredProviderIds"
     | "hydrateTimelineFromProvider"
     | "resumeAgentFromPersistence"
@@ -254,6 +273,7 @@ interface ScheduleWorkspaceCreateInput {
 
 export interface ScheduleServiceOptions {
   paseoHome: string;
+  serverId?: string;
   logger: Logger;
   agentManager: ScheduleAgentManager;
   agentStorage: AgentStorage;
@@ -265,12 +285,17 @@ export interface ScheduleServiceOptions {
     input: ScheduleWorkspaceCreateInput,
   ) => Promise<CreatePaseoWorktreeWorkflowResult>;
   archiveWorkspace: (workspaceId: string) => Promise<void>;
+  assertCwdWorkspaceOwnedByThisServer?: (cwd: string) => Promise<void>;
+  /** Infers the single host owning workspace records overlapping a cwd. */
+  resolveCwdWorkspaceHost?: (cwd: string) => Promise<string | null>;
   now?: () => Date;
   runner?: (schedule: StoredSchedule, runId: string) => Promise<ScheduleExecutionResult>;
 }
 
 export class ScheduleService {
   private readonly store: ScheduleStore;
+  private readonly claimsDir: string;
+  private readonly serverId: string | undefined;
   private readonly logger: Logger;
   private readonly agentManager: ScheduleAgentManager;
   private readonly agentStorage: AgentStorage;
@@ -282,66 +307,209 @@ export class ScheduleService {
     input: ScheduleWorkspaceCreateInput,
   ) => Promise<CreatePaseoWorktreeWorkflowResult>;
   private readonly archiveWorkspace: (workspaceId: string) => Promise<void>;
-  private readonly now: () => Date;
+  private readonly assertCwdWorkspaceOwnedByThisServer: ((cwd: string) => Promise<void>) | null;
+  private readonly resolveCwdWorkspaceHost: ((cwd: string) => Promise<string | null>) | null;
   private readonly runner: (
     schedule: StoredSchedule,
     runId: string,
   ) => Promise<ScheduleExecutionResult>;
-  private readonly runningScheduleIds = new Set<string>();
+  private readonly reservations = new Map<string, ScheduleReservation>();
+  private readonly runningClaims = new Map<string, ScheduleReservation>();
+  private readonly tasks = new Set<Promise<void>>();
   private readonly heartbeatStops = new Map<string, () => Promise<void>>();
   private recovering = false;
-  private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private tickTimer: NodeJS.Timeout | undefined;
+  private renewalTimer: NodeJS.Timeout | undefined;
+  private dispatchPass: Promise<Promise<void>[]> | null = null;
+  private readonly claimRenewals = new Map<string, Promise<void>>();
+  private startup: Promise<void> | null = null;
+  private stopping: Promise<void> | null = null;
+  private stopped = false;
+  private generation = 0;
+  private acquisition = new AbortController();
+  private renewalAcquisition = new AbortController();
+  private readonly now: () => Date;
 
   constructor(options: ScheduleServiceOptions) {
     this.logger = options.logger.child({ module: "schedule-service" });
+    this.claimsDir = join(options.paseoHome, "schedules");
+    this.serverId = options.serverId;
     this.agentManager = options.agentManager;
-    this.store = new ScheduleStore(
-      join(options.paseoHome, "schedules"),
-      this.logger,
-      (schedule, change) => this.syncHeartbeat(schedule, change),
+    this.store = new ScheduleStore(this.claimsDir, this.logger, (schedule, change) =>
+      this.syncHeartbeat(schedule, change),
     );
     this.agentStorage = options.agentStorage;
     this.createAgent = options.createAgent;
     this.createDirectoryWorkspace = options.createDirectoryWorkspace;
     this.createPaseoWorktreeWorkspace = options.createPaseoWorktreeWorkspace;
     this.archiveWorkspace = options.archiveWorkspace;
+    this.assertCwdWorkspaceOwnedByThisServer = options.assertCwdWorkspaceOwnedByThisServer ?? null;
+    this.resolveCwdWorkspaceHost = options.resolveCwdWorkspaceHost ?? null;
     this.now = options.now ?? (() => new Date());
     this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
   }
 
-  async start(): Promise<void> {
-    if (this.tickTimer) {
-      return;
-    }
-    this.recovering = true;
-    try {
-      await this.recoverInterruptedRuns();
-      await this.sweepOrphanedSchedules();
-    } finally {
-      this.recovering = false;
-    }
-    for (const schedule of await this.store.list()) {
-      this.syncHeartbeat(schedule, "write");
-    }
-    const timer = setInterval(() => {
-      void this.tick().catch((error) => {
-        this.logger.error({ err: error }, "Failed to process schedule tick");
-      });
-    }, SCHEDULE_TICK_INTERVAL_MS);
-    (timer as unknown as { unref?: () => void }).unref?.();
-    this.tickTimer = timer;
+  private claimLockPath(scheduleId: string): string {
+    return join(this.claimsDir, `${scheduleId}.claim.lock`);
   }
 
-  async stop(): Promise<void> {
-    if (this.tickTimer) {
-      clearInterval(this.tickTimer);
-      this.tickTimer = null;
+  start(): Promise<void> {
+    if (this.stopping) return this.stopping.then(() => this.start());
+    if (
+      this.stopped &&
+      (this.startup || this.tasks.size > 0 || this.dispatchPass || this.claimRenewals.size > 0)
+    ) {
+      return this.stop().then(() => this.start());
+    }
+    if (this.startup) return this.startup;
+    if (this.stopped) {
+      this.stopped = false;
+      this.generation += 1;
+      this.acquisition = new AbortController();
+      this.renewalAcquisition = new AbortController();
+    }
+    const generation = this.generation;
+    const startup = this.initialize(generation);
+    this.startup = startup;
+    return startup;
+  }
+
+  private async initialize(generation: number): Promise<void> {
+    try {
+      this.recovering = true;
+      try {
+        await this.recoverInterruptedRuns();
+        if (this.stopped || generation !== this.generation) return;
+        await this.sweepStaleScheduleClaims();
+        if (this.stopped || generation !== this.generation) return;
+        await this.reconcileScheduleOwnership();
+        if (this.stopped || generation !== this.generation) return;
+        await this.sweepOrphanedSchedules();
+      } finally {
+        this.recovering = false;
+      }
+      if (this.stopped || generation !== this.generation) return;
+      const schedules = await this.store.list();
+      if (this.stopped || generation !== this.generation) return;
+      for (const schedule of schedules) {
+        this.syncHeartbeat(schedule, "write");
+      }
+      if (this.stopped || generation !== this.generation) return;
+      this.tickTimer = setInterval(() => {
+        if (this.dispatchPass || this.stopped) return;
+        void this.beginDispatchPass().catch((error) => {
+          this.logger.error({ err: error }, "Failed to process schedule tick");
+        });
+      }, SCHEDULE_TICK_INTERVAL_MS);
+      this.tickTimer.unref();
+      this.ensureRenewalTimer();
+    } catch (error) {
+      if (!this.acquisition.signal.aborted) throw error;
+    }
+  }
+
+  stopScheduling(): void {
+    this.stopped = true;
+    this.acquisition.abort();
+    clearInterval(this.tickTimer);
+    this.tickTimer = undefined;
+  }
+
+  stop(): Promise<void> {
+    this.stopScheduling();
+    if (this.stopping) return this.stopping;
+    const stopping = this.drain();
+    this.stopping = stopping;
+    return stopping;
+  }
+
+  private async drain(): Promise<void> {
+    await Promise.allSettled([this.startup, this.dispatchPass]);
+    await Promise.allSettled(this.tasks);
+    clearInterval(this.renewalTimer);
+    this.renewalTimer = undefined;
+    this.renewalAcquisition.abort();
+    await Promise.allSettled(this.claimRenewals.values());
+    this.startup = null;
+    this.stopping = null;
+  }
+
+  private ensureRenewalTimer(): void {
+    if (this.renewalTimer || this.stopped) return;
+    this.renewalTimer = setInterval(() => {
+      void this.beginRenewalPass().catch((error) => {
+        this.logger.warn({ err: error }, "Failed to renew schedule claims");
+      });
+    }, SCHEDULE_CLAIM_RENEW_INTERVAL_MS);
+    this.renewalTimer.unref();
+  }
+
+  // Ownership follows the target. A legacy record is adopted when its agent or cwd
+  // identifies exactly one host; a new-agent record is reassigned when its cwd's
+  // sole owning host has changed. Ambiguous host-less records keep the legacy
+  // shared/claim-based behavior, ambiguous owned records keep their owner, and a
+  // live claim is left alone until its run finishes.
+  private async reconcileScheduleOwnership(): Promise<void> {
+    if (this.serverId === undefined) return;
+    const schedules = await this.store.list();
+    await Promise.all(
+      schedules.map((schedule) => this.trackTask(this.reconcileUnclaimedSchedule(schedule.id))),
+    );
+  }
+
+  private async reconcileUnclaimedSchedule(scheduleId: string): Promise<void> {
+    if (this.stopped) return;
+    await withReclaimLock(
+      this.claimLockPath(scheduleId),
+      async () => {
+        if (this.stopped) return;
+        const claimStat = await stat(join(this.claimsDir, `${scheduleId}.claim`)).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return null;
+            throw error;
+          },
+        );
+        if (!claimStat) await this.reconcileScheduleOwnershipFor(scheduleId);
+      },
+      { signal: this.acquisition.signal },
+    );
+  }
+
+  private async inferScheduleOwner(schedule: StoredSchedule): Promise<string | null> {
+    if (schedule.target.type === "agent") {
+      return (
+        (await this.agentStorage.getFresh(schedule.target.agentId))?.hostId ??
+        this.agentManager.getAgent(schedule.target.agentId)?.hostId ??
+        null
+      );
+    }
+    return this.resolveCwdWorkspaceHost
+      ? this.resolveCwdWorkspaceHost(schedule.target.config.cwd)
+      : null;
+  }
+
+  private async reconcileScheduleOwnershipFor(scheduleId: string): Promise<void> {
+    if (this.serverId === undefined) return;
+    try {
+      const schedule = await this.store.get(scheduleId);
+      if (!schedule) return;
+      const hostId = await this.inferScheduleOwner(schedule);
+      if (hostId === null || hostId === schedule.hostId) return;
+      await this.store.update(scheduleId, (current) =>
+        current.hostId === schedule.hostId ? { ...current, hostId } : current,
+      );
+    } catch (error) {
+      this.logger.warn(
+        { err: error, scheduleId },
+        "Failed to reconcile schedule host ownership after run",
+      );
     }
   }
 
   async create(input: CreateScheduleInput): Promise<StoredSchedule> {
     const prompt = normalizePrompt(input.prompt);
     validateScheduleCadence(input.cadence);
+    await this.assertScheduleTargetOwnedByThisHost(input.target);
     return this.createScheduleRecord(input, {
       name: trimOptionalName(input.name),
       prompt,
@@ -364,6 +532,7 @@ export class ScheduleService {
     const runOnCreate = input.runOnCreate ?? input.cadence.type === "every";
     const nextRunAt = runOnCreate ? now : computeNextRunAt(input.cadence, now);
     return {
+      hostId: this.serverId,
       name: fields.name,
       prompt: fields.prompt,
       cadence: input.cadence,
@@ -387,12 +556,14 @@ export class ScheduleService {
     const name = trimOptionalName(input.name);
     const prompt = normalizePrompt(input.prompt);
     validateScheduleCadence(input.cadence);
+    await this.assertScheduleTargetOwnedByThisHost(input.target);
     if (name === null) {
       return this.createScheduleRecord(input, { name, prompt, target: input.target });
     }
 
     const inputTarget = input.target;
     return this.store.upsertByNameAndTarget(name, inputTarget, {
+      hostId: this.serverId,
       create: async () => {
         return this.buildScheduleRecord(input, { name, prompt, target: inputTarget });
       },
@@ -403,6 +574,7 @@ export class ScheduleService {
         const nextRunAt = runOnCreate ? now : computeNextRunAt(cadence, now);
         return {
           ...current,
+          hostId: current.hostId ?? this.serverId,
           name,
           prompt,
           cadence,
@@ -419,12 +591,34 @@ export class ScheduleService {
   }
 
   async list(): Promise<StoredSchedule[]> {
-    return this.store.list();
+    const schedules = await this.store.list();
+    if (this.serverId === undefined) return schedules;
+    return schedules.filter(
+      (schedule) => schedule.hostId === undefined || schedule.hostId === this.serverId,
+    );
   }
 
   async inspect(id: string): Promise<StoredSchedule> {
     const schedule = await this.store.get(id);
     return requireSchedule(schedule, id);
+  }
+
+  private assertOwnedByThisServer(schedule: Pick<StoredSchedule, "id" | "hostId">): void {
+    const foreignHost = this.foreignScheduleHost(schedule);
+    if (foreignHost !== null) {
+      throw new ScheduleOwnershipError(schedule.id, foreignHost);
+    }
+  }
+
+  private foreignScheduleHost(schedule: Pick<StoredSchedule, "hostId">): string | null {
+    if (
+      this.serverId === undefined ||
+      schedule.hostId === undefined ||
+      schedule.hostId === this.serverId
+    ) {
+      return null;
+    }
+    return schedule.hostId;
   }
 
   async logs(id: string): Promise<ScheduleRun[]> {
@@ -434,6 +628,7 @@ export class ScheduleService {
 
   async pause(id: string): Promise<StoredSchedule> {
     const paused = await this.store.update(id, (schedule) => {
+      this.assertOwnedByThisServer(schedule);
       if (schedule.status === "completed") {
         throw new ScheduleStateConflictError(`Schedule ${id} is already completed`);
       }
@@ -454,6 +649,7 @@ export class ScheduleService {
 
   async resume(id: string): Promise<StoredSchedule> {
     const resumed = await this.store.update(id, (schedule) => {
+      this.assertOwnedByThisServer(schedule);
       if (schedule.status === "completed") {
         throw new ScheduleStateConflictError(`Schedule ${id} is already completed`);
       }
@@ -474,6 +670,7 @@ export class ScheduleService {
 
   async update(input: UpdateScheduleInput): Promise<StoredSchedule> {
     const next = await this.store.update(input.id, async (schedule) => {
+      this.assertOwnedByThisServer(schedule);
       const now = this.now();
       let updated: StoredSchedule = schedule;
 
@@ -498,6 +695,9 @@ export class ScheduleService {
           throw new Error("new-agent config updates are only valid for new-agent target schedules");
         }
         const patchedTarget = applyNewAgentConfig(updated.target, input.newAgentConfig);
+        if (input.newAgentConfig.cwd !== undefined && this.assertCwdWorkspaceOwnedByThisServer) {
+          await this.assertCwdWorkspaceOwnedByThisServer(patchedTarget.config.cwd);
+        }
         updated = {
           ...updated,
           target: patchedTarget,
@@ -518,7 +718,19 @@ export class ScheduleService {
   }
 
   async delete(id: string): Promise<void> {
-    await this.store.delete(id);
+    await this.deleteSchedule(id);
+  }
+
+  private async deleteSchedule(
+    id: string,
+    assertDeletable?: (schedule: StoredSchedule | null) => void,
+  ): Promise<void> {
+    await withReclaimLock(this.claimLockPath(id), async () => {
+      await this.store.delete(id, (schedule) => {
+        if (schedule) this.assertOwnedByThisServer(schedule);
+        assertDeletable?.(schedule);
+      });
+    });
   }
 
   private syncHeartbeat(schedule: StoredSchedule, change: "write" | "delete"): void {
@@ -527,7 +739,11 @@ export class ScheduleService {
     }
     const { agentId } = schedule.target;
     const { id, name, createdAt } = schedule;
-    if (change === "delete" || schedule.status !== "active") {
+    if (
+      change === "delete" ||
+      schedule.status !== "active" ||
+      this.foreignScheduleHost(schedule) !== null
+    ) {
       this.heartbeatStops.delete(id);
       this.agentManager.removeHeartbeatBackgroundWork(agentId, id);
       return;
@@ -538,7 +754,7 @@ export class ScheduleService {
     let stop = this.heartbeatStops.get(id);
     if (!stop) {
       const stopHeartbeat = () =>
-        this.store.delete(id, (current) => {
+        this.deleteSchedule(id, (current) => {
           // A queued Stop can reach the store after a pause and resume replaced its row.
           if (
             current?.status !== "active" ||
@@ -563,7 +779,7 @@ export class ScheduleService {
 
   async completeForAgent(agentId: string): Promise<number> {
     const now = this.now();
-    const schedules = await this.store.list();
+    const schedules = await this.list();
     const matches = schedules.filter(
       (schedule) =>
         schedule.target.type === "agent" &&
@@ -613,40 +829,422 @@ export class ScheduleService {
   }
 
   async runOnce(id: string): Promise<StoredSchedule> {
-    const schedule = await this.inspect(id);
-    if (schedule.status === "completed") {
-      throw new ScheduleStateConflictError(`Schedule ${id} is already completed`);
-    }
-    if (this.runningScheduleIds.has(id)) {
+    if (this.stopped) throw new ScheduleStateConflictError("Scheduler is stopping");
+    const reservation = this.reserve(id);
+    if (!reservation) {
       throw new ScheduleStateConflictError(`Schedule ${id} is already running`);
     }
-    await this.runSchedule(schedule, this.now(), { manual: true });
+    await this.trackTask(this.runReservedSchedule(id, reservation, "manual"));
     return this.inspect(id);
   }
 
+  private async runReservedSchedule(
+    id: string,
+    reservation: ScheduleReservation,
+    kind: "manual" | "due",
+    expectedNextRunAt?: string,
+  ): Promise<void> {
+    const tasks = await this.admitSchedule(id, reservation, kind, expectedNextRunAt);
+    await Promise.all(tasks);
+  }
+
   async tick(): Promise<void> {
+    if (this.stopped) return;
+    const renewal = this.beginRenewalPass();
+    // Only the caller starting a pass waits for its newly dispatched executions.
+    // Timer ticks use the short pass directly and never retain execution waiters.
+    const dispatch = this.dispatchPass ? null : this.beginDispatchPass();
+    const [tasks] = await Promise.all([dispatch ?? Promise.resolve([]), renewal]);
+    await Promise.all(tasks);
+  }
+
+  private reserve(id: string): ScheduleReservation | null {
+    if (this.stopped || this.reservations.has(id)) return null;
+    const reservation: ScheduleReservation = {
+      runId: randomUUID(),
+      generation: this.generation,
+      claimPath: null,
+      lost: false,
+      committed: false,
+    };
+    this.reservations.set(id, reservation);
+    return reservation;
+  }
+
+  private trackTask(task: Promise<void>): Promise<void> {
+    this.tasks.add(task);
+    void task.then(
+      () => this.tasks.delete(task),
+      () => this.tasks.delete(task),
+    );
+    return task;
+  }
+
+  private beginDispatchPass(): Promise<Promise<void>[]> {
+    const pass = this.dispatchSchedules();
+    this.dispatchPass = pass;
+    void pass.then(
+      () => {
+        if (this.dispatchPass === pass) this.dispatchPass = null;
+        return;
+      },
+      () => {
+        if (this.dispatchPass === pass) this.dispatchPass = null;
+      },
+    );
+    return pass;
+  }
+
+  private async dispatchSchedules(): Promise<Promise<void>[]> {
+    if (this.startup) await this.startup;
+    if (this.stopped) return [];
+    const schedules = await this.list();
     const now = this.now();
-    const schedules = await this.store.list();
+    const tasks: Promise<void>[] = [];
     for (const schedule of schedules) {
-      if (schedule.status !== "active" || !schedule.nextRunAt) {
-        continue;
-      }
-      if (this.runningScheduleIds.has(schedule.id)) {
-        continue;
-      }
-      if (shouldCompleteSchedule(schedule, now)) {
-        await this.completeScheduleIfDue(schedule.id, now);
-        continue;
-      }
-      if (new Date(schedule.nextRunAt).getTime() > now.getTime()) {
-        continue;
-      }
-      await this.runSchedule(schedule, now);
+      if (this.stopped) break;
+      if (schedule.status !== "active" || !schedule.nextRunAt) continue;
+      const due = new Date(schedule.nextRunAt).getTime() <= now.getTime();
+      if (!due && !shouldCompleteSchedule(schedule, now)) continue;
+      const reservation = this.reserve(schedule.id);
+      if (!reservation) continue;
+      const task = this.trackTask(
+        this.runReservedSchedule(schedule.id, reservation, "due", schedule.nextRunAt),
+      );
+      void task.catch((error) => {
+        this.logger.error({ err: error, scheduleId: schedule.id }, "Scheduled run failed");
+      });
+      tasks.push(task);
     }
+    return tasks;
+  }
+
+  // A schedule targeting an agent is executed by the host that owns the agent; other
+  // hosts sharing PASEO_HOME must not claim, run, or advance it. Legacy agents (no
+  // hostId) remain runnable everywhere.
+  private async foreignAgentTargetHost(
+    schedule: Pick<StoredSchedule, "target">,
+  ): Promise<string | null> {
+    if (schedule.target.type !== "agent") return null;
+    const record = await this.agentStorage.getFresh(schedule.target.agentId);
+    const hostId = record?.hostId ?? this.agentManager.getAgent(schedule.target.agentId)?.hostId;
+    return hostId !== undefined && hostId !== this.serverId ? hostId : null;
+  }
+
+  private async assertAgentTargetOwnedByThisHost(target: ScheduleTarget): Promise<void> {
+    const foreignHost = await this.foreignAgentTargetHost({ target });
+    if (foreignHost !== null) {
+      throw new Error(`agent is owned by host ${foreignHost}`);
+    }
+  }
+
+  private async assertScheduleTargetOwnedByThisHost(target: ScheduleTarget): Promise<void> {
+    await this.assertAgentTargetOwnedByThisHost(target);
+    if (target.type === "new-agent" && this.assertCwdWorkspaceOwnedByThisServer) {
+      await this.assertCwdWorkspaceOwnedByThisServer(target.config.cwd);
+    }
+  }
+
+  private async isAgentTargetOwnedByAnotherHost(schedule: StoredSchedule): Promise<boolean> {
+    return (await this.foreignAgentTargetHost(schedule)) !== null;
+  }
+
+  private async isScheduleTargetOwnedByAnotherHost(schedule: StoredSchedule): Promise<boolean> {
+    if (await this.isAgentTargetOwnedByAnotherHost(schedule)) return true;
+    if (schedule.target.type !== "new-agent" || !this.assertCwdWorkspaceOwnedByThisServer) {
+      return false;
+    }
+    try {
+      await this.assertCwdWorkspaceOwnedByThisServer(schedule.target.config.cwd);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  private beginRenewalPass(): Promise<void> {
+    const pending: Promise<void>[] = [];
+    for (const [id, reservation] of this.runningClaims) {
+      const existing = this.claimRenewals.get(id);
+      if (existing) {
+        pending.push(existing);
+        continue;
+      }
+      const renewal = this.renewRunningClaim(id, reservation);
+      this.claimRenewals.set(id, renewal);
+      const clear = () => {
+        if (this.claimRenewals.get(id) === renewal) this.claimRenewals.delete(id);
+      };
+      void renewal.then(clear, clear);
+      pending.push(renewal);
+    }
+    return Promise.all(pending).then(() => undefined);
+  }
+
+  private async renewRunningClaim(id: string, reservation: ScheduleReservation): Promise<void> {
+    try {
+      await withReclaimLock(
+        this.claimLockPath(id),
+        async () => {
+          if (!(await this.ownsClaim(id, reservation))) return;
+          const claimPath = reservation.claimPath;
+          if (!claimPath) return;
+          const now = this.now();
+          try {
+            // A stale lease with the same identity can still renew before takeover.
+            await utimes(claimPath, now, now);
+          } catch (error) {
+            reservation.lost = true;
+            throw error;
+          }
+        },
+        { signal: this.renewalAcquisition.signal },
+      );
+    } catch (error) {
+      this.logger.warn({ err: error, scheduleId: id }, "Failed to renew schedule claim");
+    }
+  }
+
+  private async ownsClaim(id: string, reservation: ScheduleReservation): Promise<boolean> {
+    const current = this.reservations.get(id);
+    if (current !== reservation || reservation.generation !== this.generation || reservation.lost) {
+      return false;
+    }
+    if (reservation.claimPath === null) return this.serverId === undefined;
+    const claim = await this.readScheduleClaim(reservation.claimPath);
+    if (claim?.runId === reservation.runId && claim.serverId === this.serverId) return true;
+    reservation.lost = true;
+    return false;
+  }
+
+  private assertExecutionAllowed(id: string, runId: string): ScheduleReservation {
+    const reservation = this.reservations.get(id);
+    const unavailable =
+      !reservation ||
+      reservation.runId !== runId ||
+      reservation.lost ||
+      reservation.generation !== this.generation;
+    if (this.stopped || unavailable) {
+      throw new ScheduleStateConflictError("Scheduled run stopped or lost its claim");
+    }
+    return reservation;
+  }
+
+  private async prepareRun(
+    id: string,
+    reservation: ScheduleReservation,
+    kind: "manual" | "due",
+    expectedNextRunAt?: string,
+  ): Promise<StoredSchedule | null> {
+    if (this.startup) await this.startup;
+    return withReclaimLock(
+      this.claimLockPath(id),
+      async () => {
+        this.assertExecutionAllowed(id, reservation.runId);
+        const schedule = await this.store.get(id);
+        if (!schedule) {
+          if (kind === "manual") throw new ScheduleNotFoundError(id);
+          return null;
+        }
+        if (kind === "manual") {
+          this.assertOwnedByThisServer(schedule);
+          if (schedule.status === "completed") {
+            throw new ScheduleStateConflictError(`Schedule ${id} is already completed`);
+          }
+          await this.assertScheduleTargetOwnedByThisHost(schedule.target);
+        } else {
+          if (this.foreignScheduleHost(schedule) !== null) return null;
+          if (schedule.status !== "active" || schedule.nextRunAt !== expectedNextRunAt) return null;
+          if (await this.isScheduleTargetOwnedByAnotherHost(schedule)) return null;
+        }
+        this.assertExecutionAllowed(id, reservation.runId);
+        const now = this.now();
+        if (kind === "due" && shouldCompleteSchedule(schedule, now)) {
+          await this.completeScheduleIfDue(id, now);
+          return null;
+        }
+        if (kind === "due" && (!schedule.nextRunAt || new Date(schedule.nextRunAt) > now))
+          return null;
+        if (!(await this.claimScheduleLocked(schedule, reservation, now, kind))) {
+          if (kind === "manual")
+            throw new Error(`Schedule ${id} is already running on another host`);
+          return null;
+        }
+        try {
+          this.assertExecutionAllowed(id, reservation.runId);
+          if (kind === "due") {
+            const claimed = await this.claimDueRun(id, reservation.runId, schedule.nextRunAt);
+            reservation.committed = claimed !== null;
+            return claimed;
+          }
+          const appended = await this.appendRunningRun(id, {
+            id: reservation.runId,
+            scheduledFor: now.toISOString(),
+            startedAt: now.toISOString(),
+            endedAt: null,
+            status: "running",
+            agentId: null,
+            output: null,
+            error: null,
+          });
+          reservation.committed = true;
+          return appended;
+        } catch (error) {
+          if (reservation.claimPath) {
+            await this.removeClaimLocked(reservation.claimPath, reservation.runId);
+            reservation.claimPath = null;
+          }
+          throw error;
+        }
+      },
+      { signal: this.acquisition.signal },
+    );
+  }
+
+  private async claimScheduleLocked(
+    schedule: StoredSchedule,
+    reservation: ScheduleReservation,
+    now: Date,
+    kind: "manual" | "due",
+  ): Promise<boolean> {
+    if (this.serverId === undefined) return true;
+    const claimPath = join(this.claimsDir, `${schedule.id}.claim`);
+    const existing = await stat(claimPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existing && now.getTime() - existing.mtimeMs <= SCHEDULE_CLAIM_STALE_MS) return false;
+    if (existing) {
+      const abandonedClaim = await this.readScheduleClaim(claimPath);
+      await this.failAbandonedRunningRuns(schedule.id, abandonedClaim?.runId, now);
+      await unlink(claimPath);
+    }
+    this.assertExecutionAllowed(schedule.id, reservation.runId);
+    const claimFile = await open(claimPath, "wx", 0o600);
+    try {
+      try {
+        await claimFile.writeFile(
+          JSON.stringify({
+            runId: reservation.runId,
+            kind,
+            serverId: this.serverId,
+            scheduledFor: schedule.nextRunAt ?? now.toISOString(),
+            claimedAt: now.toISOString(),
+          }),
+          "utf8",
+        );
+      } finally {
+        await claimFile.close();
+      }
+    } catch (error) {
+      await unlink(claimPath);
+      throw error;
+    }
+    reservation.claimPath = claimPath;
+    this.runningClaims.set(schedule.id, reservation);
+    this.ensureRenewalTimer();
+    return true;
+  }
+
+  private async failAbandonedRunningRuns(
+    scheduleId: string,
+    abandonedRunId: unknown,
+    now: Date,
+  ): Promise<void> {
+    await this.store.update(scheduleId, (schedule) => {
+      const runs = schedule.runs.map((run) => {
+        if (
+          run.status !== "running" ||
+          (typeof abandonedRunId === "string" && run.id !== abandonedRunId)
+        ) {
+          return run;
+        }
+        return {
+          ...run,
+          status: "failed" as const,
+          endedAt: now.toISOString(),
+          error: "Schedule claim became stale before the run completed",
+        };
+      });
+      return runs.some((run, index) => run !== schedule.runs[index])
+        ? { ...schedule, runs, lastRunAt: now.toISOString(), updatedAt: now.toISOString() }
+        : schedule;
+    });
+  }
+
+  private async removeClaimLocked(claimPath: string, runId: string): Promise<void> {
+    const claim = await this.readScheduleClaim(claimPath);
+    if (claim?.runId !== runId || claim.serverId !== this.serverId) return;
+    await unlink(claimPath);
+  }
+
+  // Returns null when the claim file is missing, empty, or corrupt: an
+  // unreadable claim cannot be matched to a live run and is reclaimable.
+  private async readScheduleClaim(
+    claimPath: string,
+  ): Promise<{ runId?: unknown; serverId?: unknown } | null> {
+    try {
+      const claim: unknown = JSON.parse(await readFile(claimPath, "utf8"));
+      if (claim === null || typeof claim !== "object" || !("runId" in claim)) return null;
+      return {
+        runId: claim.runId,
+        serverId: "serverId" in claim ? claim.serverId : undefined,
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return null;
+      }
+      this.logger.warn({ err: error, claimPath }, "Failed to parse schedule claim; reclaiming");
+      return null;
+    }
+  }
+
+  private async sweepStaleScheduleClaims(): Promise<void> {
+    if (this.stopped) return;
+    const entries = await readdir(this.claimsDir, { withFileTypes: true });
+    const claims = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".claim"));
+    await Promise.all(
+      claims.map((entry) =>
+        this.trackTask(this.sweepStaleScheduleClaim(entry.name.slice(0, -".claim".length))),
+      ),
+    );
+  }
+
+  private async sweepStaleScheduleClaim(scheduleId: string): Promise<void> {
+    if (this.stopped) return;
+    await withReclaimLock(
+      this.claimLockPath(scheduleId),
+      async () => {
+        if (this.stopped) return;
+        const claimPath = join(this.claimsDir, `${scheduleId}.claim`);
+        const claimStat = await stat(claimPath).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
+        const now = this.now();
+        if (!claimStat || now.getTime() - claimStat.mtimeMs <= SCHEDULE_CLAIM_STALE_MS) return;
+        const claim = await this.readScheduleClaim(claimPath);
+        if (this.reservations.get(scheduleId)?.committed) return;
+        try {
+          await this.failAbandonedRunningRuns(scheduleId, claim?.runId, now);
+        } catch (error) {
+          this.logger.warn(
+            { err: error, claimPath, scheduleId },
+            "Failed to fail an abandoned schedule run while sweeping a stale claim",
+          );
+          return;
+        }
+        await unlink(claimPath).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+      },
+      { signal: this.acquisition.signal },
+    );
   }
 
   private async completeScheduleIfDue(scheduleId: string, now: Date): Promise<void> {
     await this.store.update(scheduleId, (schedule) => {
+      if (this.stopped || this.foreignScheduleHost(schedule) !== null) return schedule;
       if (
         schedule.status !== "active" ||
         !schedule.nextRunAt ||
@@ -659,76 +1257,109 @@ export class ScheduleService {
   }
 
   private async recoverInterruptedRuns(): Promise<void> {
-    const schedules = await this.store.list();
-    const now = this.now();
+    const schedules = await this.list();
     await Promise.all(
-      schedules.map((schedule) => this.recoverInterruptedSchedule(schedule.id, now)),
+      schedules.map((schedule) => this.trackTask(this.recoverInterruptedSchedule(schedule.id))),
     );
   }
 
-  private async recoverInterruptedSchedule(scheduleId: string, now: Date): Promise<void> {
+  private async recoverInterruptedSchedule(scheduleId: string): Promise<void> {
     const interruptedWorkspaces: Array<{
       workspaceId: string;
       agentId: string | null;
       runId: string;
     }> = [];
-    await this.store.update(scheduleId, (current) => {
-      let updated = { ...current };
-      let dirty = false;
-
-      const runningIndex = updated.runs.findIndex((run) => run.status === "running");
-      if (runningIndex !== -1) {
-        const runs = [...updated.runs];
-        const runningRun = runs[runningIndex];
-        if (
-          updated.target.type === "new-agent" &&
-          runningRun.workspaceId &&
-          shouldArchiveScheduleRunWorkspace({
-            agentId: runningRun.agentId,
-            archiveOnFinish: updated.target.config.archiveOnFinish,
-          })
-        ) {
-          interruptedWorkspaces.push({
-            workspaceId: runningRun.workspaceId,
-            agentId: runningRun.agentId,
-            runId: runningRun.id,
+    let shouldForceArchiveInterruptedWorkspace = false;
+    await withReclaimLock(
+      this.claimLockPath(scheduleId),
+      async () => {
+        if (this.stopped || this.reservations.get(scheduleId)?.committed) return;
+        const now = this.now();
+        const claimPath = join(this.claimsDir, `${scheduleId}.claim`);
+        const claimStat = await stat(claimPath).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        });
+        if (claimStat) {
+          const claim = await this.readScheduleClaim(claimPath);
+          const current = await this.store.get(scheduleId);
+          const hasMatchingRunningRun =
+            claim !== null &&
+            current?.runs.some((run) => run.status === "running" && run.id === claim.runId);
+          const ownedByThisServer =
+            this.serverId !== undefined && claim?.serverId === this.serverId;
+          shouldForceArchiveInterruptedWorkspace = ownedByThisServer;
+          const isFresh = now.getTime() - claimStat.mtimeMs <= SCHEDULE_CLAIM_STALE_MS;
+          if (isFresh && hasMatchingRunningRun && !ownedByThisServer) {
+            return;
+          }
+          // A claim from this server is a crash leftover even while its lease is
+          // fresh. Unmatched, unreadable, and stale claims are also reclaimable.
+          await unlink(claimPath).catch((error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
           });
         }
-        runs[runningIndex] = {
-          ...runningRun,
-          status: "failed",
-          endedAt: now.toISOString(),
-          error: "Daemon restarted before the scheduled run completed",
-        };
-        updated = { ...updated, runs };
-        dirty = true;
-      }
+        await this.store.update(scheduleId, (current) => {
+          let updated = { ...current };
+          let dirty = false;
 
-      if (
-        (updated.status === "active" || runningIndex !== -1) &&
-        shouldCompleteSchedule(updated, now)
-      ) {
-        return completeSchedule(updated, now);
-      }
+          const runningIndex = updated.runs.findIndex((run) => run.status === "running");
+          if (runningIndex !== -1) {
+            const runs = [...updated.runs];
+            const runningRun = runs[runningIndex];
+            if (
+              updated.target.type === "new-agent" &&
+              runningRun.workspaceId &&
+              (shouldForceArchiveInterruptedWorkspace ||
+                shouldArchiveScheduleRunWorkspace({
+                  agentId: runningRun.agentId,
+                  archiveOnFinish: updated.target.config.archiveOnFinish,
+                }))
+            ) {
+              interruptedWorkspaces.push({
+                workspaceId: runningRun.workspaceId,
+                agentId: runningRun.agentId,
+                runId: runningRun.id,
+              });
+            }
+            runs[runningIndex] = {
+              ...runningRun,
+              status: "failed",
+              endedAt: now.toISOString(),
+              error: "Daemon restarted before the scheduled run completed",
+            };
+            updated = { ...updated, runs };
+            dirty = true;
+          }
 
-      if (
-        updated.status === "active" &&
-        updated.nextRunAt &&
-        new Date(updated.nextRunAt).getTime() <= now.getTime()
-      ) {
-        let nextRunAt = computeNextRunAt(updated.cadence, new Date(updated.nextRunAt));
-        while (nextRunAt.getTime() <= now.getTime()) {
-          nextRunAt = computeNextRunAt(updated.cadence, nextRunAt);
-        }
-        updated = { ...updated, nextRunAt: nextRunAt.toISOString() };
-        dirty = true;
-      }
+          if (
+            (updated.status === "active" || runningIndex !== -1) &&
+            shouldCompleteSchedule(updated, now)
+          ) {
+            return completeSchedule(updated, now);
+          }
 
-      if (dirty) {
-        return { ...updated, updatedAt: now.toISOString() };
-      }
-      return current;
-    });
+          if (
+            updated.status === "active" &&
+            updated.nextRunAt &&
+            new Date(updated.nextRunAt).getTime() <= now.getTime()
+          ) {
+            let nextRunAt = computeNextRunAt(updated.cadence, new Date(updated.nextRunAt));
+            while (nextRunAt.getTime() <= now.getTime()) {
+              nextRunAt = computeNextRunAt(updated.cadence, nextRunAt);
+            }
+            updated = { ...updated, nextRunAt: nextRunAt.toISOString() };
+            dirty = true;
+          }
+
+          if (dirty) {
+            return { ...updated, updatedAt: now.toISOString() };
+          }
+          return current;
+        });
+      },
+      { signal: this.acquisition.signal },
+    );
     const interruptedWorkspace = interruptedWorkspaces[0];
     if (!interruptedWorkspace) {
       return;
@@ -754,7 +1385,7 @@ export class ScheduleService {
   // them on startup so they stop ticking and surface as ended in the UI.
   private async sweepOrphanedSchedules(): Promise<void> {
     const now = this.now();
-    const schedules = await this.store.list();
+    const schedules = await this.list();
     await Promise.all(schedules.map((schedule) => this.sweepOrphanedSchedule(schedule.id, now)));
   }
 
@@ -771,50 +1402,59 @@ export class ScheduleService {
     });
   }
 
+  private async admitSchedule(
+    id: string,
+    reservation: ScheduleReservation,
+    kind: "manual" | "due",
+    expectedNextRunAt?: string,
+  ): Promise<Promise<void>[]> {
+    try {
+      const schedule = await this.prepareRun(id, reservation, kind, expectedNextRunAt);
+      if (!schedule) {
+        await this.releaseReservation(id, reservation);
+        return [];
+      }
+      const task = this.trackTask(this.runSchedule(schedule, reservation, kind === "manual"));
+      return [task];
+    } catch (error) {
+      await this.releaseReservation(id, reservation);
+      if (kind === "due" && this.stopped) return [];
+      throw error;
+    }
+  }
+
+  private async releaseReservation(id: string, reservation: ScheduleReservation): Promise<void> {
+    try {
+      if (!reservation.committed && !reservation.claimPath) return;
+      await withReclaimLock(this.claimLockPath(id), async () => {
+        if (!(await this.ownsClaim(id, reservation))) return;
+        if (reservation.claimPath) {
+          await this.removeClaimLocked(reservation.claimPath, reservation.runId);
+        }
+        await this.reconcileScheduleOwnershipFor(id);
+      });
+    } finally {
+      if (this.runningClaims.get(id) === reservation) this.runningClaims.delete(id);
+      if (this.reservations.get(id) === reservation) this.reservations.delete(id);
+      if (this.runningClaims.size === 0 && !this.startup) {
+        clearInterval(this.renewalTimer);
+        this.renewalTimer = undefined;
+      }
+    }
+  }
+
   private async runSchedule(
     schedule: StoredSchedule,
-    now: Date,
-    options?: { manual?: boolean },
+    reservation: ScheduleReservation,
+    manual: boolean,
   ): Promise<void> {
-    const manual = options?.manual === true;
-    // Reserve before store I/O; persisted history cannot prove a run is still alive.
-    this.runningScheduleIds.add(schedule.id);
+    const runId = reservation.runId;
     try {
-      let runId: string;
-      let scheduleWithRun: StoredSchedule;
-      if (manual) {
-        runId = randomUUID();
-        const runningRun: ScheduleRun = {
-          id: runId,
-          scheduledFor: now.toISOString(),
-          startedAt: now.toISOString(),
-          endedAt: null,
-          status: "running",
-          agentId: null,
-          output: null,
-          error: null,
-        };
-        scheduleWithRun = await this.appendRunningRun(schedule.id, runningRun);
-      } else {
-        const claimed = await this.claimDueRun(schedule.id, now);
-        if (!claimed) {
-          return;
-        }
-        ({ schedule: scheduleWithRun, runId } = claimed);
-      }
-
+      let result: ScheduleExecutionResult;
       try {
-        const result = await this.runner(scheduleWithRun, runId);
-        await this.finishRun({
-          scheduleId: schedule.id,
-          runId,
-          status: "succeeded",
-          agentId: result.agentId,
-          output: result.output,
-          error: null,
-          targetGone: false,
-          manual,
-        });
+        await this.assertRunCanDispatch(schedule.id, runId);
+        this.assertExecutionAllowed(schedule.id, runId);
+        result = await this.runner(schedule, runId);
       } catch (error) {
         await this.finishRun({
           scheduleId: schedule.id,
@@ -826,18 +1466,39 @@ export class ScheduleService {
           targetGone: error instanceof ScheduleTargetGoneError,
           manual,
         });
+        return;
       }
+      await this.finishRun({
+        scheduleId: schedule.id,
+        runId,
+        status: "succeeded",
+        agentId: result.agentId,
+        output: result.output,
+        error: null,
+        targetGone: false,
+        manual,
+      });
     } finally {
-      this.runningScheduleIds.delete(schedule.id);
+      await this.releaseReservation(schedule.id, reservation);
     }
   }
 
+  // Claims the due slot and advances its cursor in the same serialized update.
+  // A tick can hold a stale list while another tick finishes this schedule, and
+  // a claim whose outcome write later fails must not re-fire the same slot.
   private async claimDueRun(
     scheduleId: string,
-    now: Date,
-  ): Promise<{ schedule: StoredSchedule; runId: string } | null> {
-    let claimed: { schedule: StoredSchedule; runId: string } | null = null;
-    await this.store.update(scheduleId, (schedule) => {
+    runId: string,
+    expectedNextRunAt: string | null,
+  ): Promise<StoredSchedule | null> {
+    let claimed: StoredSchedule | null = null;
+    await this.store.update(scheduleId, async (schedule) => {
+      this.assertExecutionAllowed(scheduleId, runId);
+      if (this.foreignScheduleHost(schedule) !== null) return schedule;
+      if (schedule.nextRunAt !== expectedNextRunAt) return schedule;
+      if (await this.isScheduleTargetOwnedByAnotherHost(schedule)) return schedule;
+      this.assertExecutionAllowed(scheduleId, runId);
+      const now = this.now();
       if (
         schedule.status !== "active" ||
         !schedule.nextRunAt ||
@@ -858,9 +1519,6 @@ export class ScheduleService {
             now,
           ).toISOString();
 
-      // Claim the due slot and advance its cursor in the same serialized update.
-      // A tick can hold a stale list while another tick finishes this schedule.
-      const runId = randomUUID();
       const runningRun: ScheduleRun = {
         id: runId,
         scheduledFor,
@@ -877,7 +1535,7 @@ export class ScheduleService {
         updatedAt: now.toISOString(),
         runs: [...schedule.runs, runningRun],
       };
-      claimed = { schedule: updated, runId };
+      claimed = updated;
       return updated;
     });
     return claimed;
@@ -887,12 +1545,23 @@ export class ScheduleService {
     scheduleId: string,
     runningRun: ScheduleRun,
   ): Promise<StoredSchedule> {
-    const updated = await this.store.update(scheduleId, (schedule) => ({
-      ...schedule,
-      updatedAt: runningRun.startedAt,
-      runs: [...schedule.runs, runningRun],
-    }));
-    return requireSchedule(updated, scheduleId);
+    const updated = await this.store.update(scheduleId, async (schedule) => {
+      this.assertOwnedByThisServer(schedule);
+      if (schedule.status === "completed") {
+        throw new ScheduleStateConflictError(`Schedule ${scheduleId} is already completed`);
+      }
+      await this.assertScheduleTargetOwnedByThisHost(schedule.target);
+      this.assertExecutionAllowed(scheduleId, runningRun.id);
+      return {
+        ...schedule,
+        updatedAt: runningRun.startedAt,
+        runs: [...schedule.runs, runningRun],
+      };
+    });
+    if (!updated) throw new ScheduleNotFoundError(scheduleId);
+    const foreignHost = this.foreignScheduleHost(updated);
+    if (foreignHost !== null) throw new ScheduleOwnershipError(scheduleId, foreignHost);
+    return updated;
   }
 
   private async finishRun(params: {
@@ -906,10 +1575,10 @@ export class ScheduleService {
     manual: boolean;
   }): Promise<void> {
     // A Stop can delete the schedule while its already launched turn is still running.
-    await this.store.update(params.scheduleId, (schedule) => {
+    await this.mutateRun(params.scheduleId, params.runId, (schedule) => {
       const now = this.now();
       const completedRuns = schedule.runs.map((run) =>
-        run.id === params.runId
+        run.id === params.runId && run.status === "running"
           ? {
               ...run,
               status: params.status,
@@ -967,7 +1636,7 @@ export class ScheduleService {
     workspaceId: string;
     agentId: string | null;
   }): Promise<void> {
-    const updatedSchedule = await this.store.update(params.scheduleId, (schedule) => ({
+    const recorded = await this.mutateRun(params.scheduleId, params.runId, (schedule) => ({
       ...schedule,
       updatedAt: this.now().toISOString(),
       runs: schedule.runs.map((run) =>
@@ -980,7 +1649,46 @@ export class ScheduleService {
           : run,
       ),
     }));
-    requireSchedule(updatedSchedule, params.scheduleId);
+    if (!recorded) throw new ScheduleStateConflictError("Scheduled run lost its claim");
+  }
+
+  private async mutateRun(
+    scheduleId: string,
+    runId: string,
+    update: (schedule: StoredSchedule) => StoredSchedule,
+  ): Promise<boolean> {
+    return withReclaimLock(this.claimLockPath(scheduleId), async () => {
+      const reservation = this.reservations.get(scheduleId);
+      if (!reservation || reservation.runId !== runId || !reservation.committed) return false;
+      if (!(await this.ownsClaim(scheduleId, reservation))) return false;
+      let written = false;
+      await this.store.update(scheduleId, (schedule) => {
+        if (!schedule.runs.some((run) => run.id === runId && run.status === "running"))
+          return schedule;
+        written = true;
+        return update(schedule);
+      });
+      return written;
+    });
+  }
+
+  private async assertRunCanDispatch(scheduleId: string, runId: string): Promise<void> {
+    const reservation = this.assertExecutionAllowed(scheduleId, runId);
+    await withReclaimLock(
+      this.claimLockPath(scheduleId),
+      async () => {
+        if (!(await this.ownsClaim(scheduleId, reservation))) {
+          throw new ScheduleStateConflictError("Scheduled run lost its claim");
+        }
+        const schedule = await this.store.get(scheduleId);
+        if (!schedule?.runs.some((run) => run.id === runId && run.status === "running")) {
+          throw new ScheduleStateConflictError("Scheduled run is no longer running");
+        }
+        this.assertExecutionAllowed(scheduleId, runId);
+      },
+      { signal: this.acquisition.signal },
+    );
+    this.assertExecutionAllowed(scheduleId, runId);
   }
 
   private async executeSchedule(
@@ -1002,6 +1710,7 @@ export class ScheduleService {
         agentStorage: this.agentStorage,
         logger: this.logger,
       });
+      await this.assertRunCanDispatch(schedule.id, runId);
       if (this.agentManager.hasInFlightRun(agent.id)) {
         throw new Error(`Agent ${agent.id} already has an active run`);
       }
@@ -1012,11 +1721,12 @@ export class ScheduleService {
       const waitResult = await this.agentManager.waitForAgentEvent(agent.id, {
         waitForActive: true,
       });
+      if (waitResult.status === "closed") throw new Error(`Scheduled agent ${agent.id} was closed`);
       if (waitResult.permission) {
         throw new Error(`Scheduled agent ${agent.id} is waiting for permission`);
       }
       if (waitResult.status === "error") {
-        throw new Error(waitResult.lastMessage ?? `Scheduled agent ${agent.id} failed`);
+        throw new Error(resolveScheduledRunFailure(this.agentManager, agent.id));
       }
       return {
         agentId: agent.id,
@@ -1036,6 +1746,7 @@ export class ScheduleService {
     let workspace: PersistedWorkspaceRecord | null = null;
     let agentId: string | null = null;
     try {
+      await this.assertRunCanDispatch(schedule.id, runId);
       workspace = await this.createScheduleRunWorkspace(config, schedule.prompt);
       await this.recordRunWorkspace({
         scheduleId: schedule.id,
@@ -1043,6 +1754,7 @@ export class ScheduleService {
         workspaceId: workspace.workspaceId,
         agentId: null,
       });
+      await this.assertRunCanDispatch(schedule.id, runId);
       const runConfig = { ...config, cwd: workspace.cwd };
       const created = await this.createAgent({
         kind: "mcp",
@@ -1072,10 +1784,12 @@ export class ScheduleService {
       if (created.initialPromptError) {
         throw created.initialPromptError;
       }
+      await this.assertRunCanDispatch(schedule.id, runId);
       const result = await this.agentManager.runAgent(agent.id, schedule.prompt);
       const waitResult = await this.agentManager.waitForAgentEvent(agent.id, {
         waitForActive: true,
       });
+      if (waitResult.status === "closed") throw new Error(`Scheduled agent ${agent.id} was closed`);
       if (result.canceled) {
         throw new Error(`Scheduled agent ${agent.id} was canceled`);
       }
@@ -1083,7 +1797,7 @@ export class ScheduleService {
         throw new Error(`Scheduled agent ${agent.id} is waiting for permission`);
       }
       if (waitResult.status === "error") {
-        throw new Error(waitResult.lastMessage ?? `Scheduled agent ${agent.id} failed`);
+        throw new Error(resolveScheduledRunFailure(this.agentManager, agent.id));
       }
       const timelineText = curateAgentActivity(result.timeline);
       return {
@@ -1144,6 +1858,14 @@ export class ScheduleService {
       throw error;
     }
   }
+}
+
+// The last assistant message can include partial model output before the failure.
+// lastError is the provider failure, including its code and diagnostic.
+function resolveScheduledRunFailure(agentManager: ScheduleAgentManager, agentId: string): string {
+  const snapshot = agentManager.getAgent(agentId);
+  const lastError = snapshot?.lifecycle === "error" ? snapshot.lastError.trim() : "";
+  return lastError || `Scheduled agent ${agentId} failed`;
 }
 
 function buildScheduleAgentConfig(

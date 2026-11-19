@@ -6,9 +6,12 @@ Projects are allocated for the exact root selected by the caller, normalized lex
 
 `projectKey` is a persisted, opaque equivalence key used only to group the same logical project
 across hosts. It is separate from the host-local `projectId`; today's producer prefers a normalized
-Git remote and otherwise uses the local project root. Consumers never derive it from live Git.
-Creation persists it with the project, and normal boot reconciliation fills it for
-older records where the field is absent—there is no migration.
+Git remote. Without a remote the key names the local root under every daemon that has observed it
+(`host:srv_a+srv_b:/path`), sorted and joined with `+`: each daemon unions its own `serverId` in
+during reconciliation instead of replacing the list, so several daemons on one home converge on a
+single key instead of rewriting the record for each other. Consumers never derive it from live Git.
+Creation persists it with the project, and normal boot reconciliation fills it for older records
+where the field is absent—there is no migration.
 
 `kind` and `projectKey` are mutable metadata, not identity. Workspace reconciliation watches active project roots and
 updates those fields and `updatedAt` when Git facts change, preserving the project's ID, root path,
@@ -34,7 +37,7 @@ Workspace archive runs lifecycle teardown from the exact `cwd` but removes only 
 `worktreeRoot` after its last active reference disappears. Worktree recovery recreates that backing
 checkout from `mainRepoRoot`, then restores the relative path from `worktreeRoot` to `cwd`.
 
-Paseo uses **file-based JSON persistence** instead of a traditional database. All data is validated at runtime with Zod schemas. Most stores write atomically (write to temp file, then rename); a few still use plain `writeFile` — see each section. There is no schema-versioning/migration framework — schemas rely on optional fields with defaults for forward compatibility, with a small amount of inline normalization in `persisted-config.ts` for legacy provider/speech entries.
+Paseo uses **file-based JSON persistence** instead of a traditional database. All data is validated at runtime with Zod schemas. Most stores write atomically (write to temp file, then rename); a few still use plain `writeFile` — see each section. Server JSON stores that use the atomic helpers preserve an existing symlink at the final path component by replacing its resolved target in the target's directory. A dangling symlink makes the write fail and is never replaced. There is no schema-versioning/migration framework — schemas rely on optional fields with defaults for forward compatibility, with a small amount of inline normalization in `persisted-config.ts` for legacy provider/speech entries. On a shared home, cross-daemon visibility is pull-based: the project/workspace registries reload when the backing file's mtime or size changes underneath them, and agent storage rescans `agents/` at most every 5 seconds (see [shared-home.md](./shared-home.md)).
 
 All server-side stores live under `$PASEO_HOME` (defaults to `~/.paseo`).
 
@@ -50,10 +53,12 @@ Store APIs own persistence atomicity and should not make services coordinate raw
 $PASEO_HOME/
 ├── config.json                          # Daemon configuration
 ├── server-id                            # Stable daemon identifier (plain text, "srv_<base64url>")
-├── daemon-keypair.json                  # E2EE keypair for relay (mode 0600)
-├── paseo.pid                            # Daemon PID lock file
-├── local-credential                     # Per-run local client credential (mode 0600)
+├── daemon-keypair.json                  # Legacy E2EE keypair; per-daemon copies live under daemons/
+├── paseo.pid                            # CLI discovery pointer held by one daemon (JSON {pid, startedAt, ...})
+├── local-credential                     # CLI credential mirrored by the paseo.pid owner (mode 0600)
 ├── daemon.log                           # Default log file (path configurable)
+├── daemons/
+│   └── {serverId}/                      # Instance lease, keypair, credential and terminal-worker state
 ├── agents/
 │   └── {sanitized-cwd}/
 │       └── {agentId}.json               # One file per agent
@@ -63,7 +68,7 @@ $PASEO_HOME/
 │   ├── projects.json                    # Project registry
 │   ├── workspaces.json                  # Workspace registry
 │   ├── workspace-labels.json            # Shared host-local label catalog
-│   ├── workspace-labels.transaction.json # Recoverable catalog/assignment compound commit
+│   ├── workspace-labels.transaction.{txId}.json # Recoverable catalog/assignment compound commit (one per transaction)
 │   └── icons/                           # Host-local custom project icon images
 ├── runtime/
 │   └── managed-processes/
@@ -88,6 +93,7 @@ Each agent is stored as a separate JSON file, grouped by project directory.
 | -------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `id`                 | `string`                                 | UUID, primary key                                                                                                                                                                                                                                                                                                                                                                   |
 | `provider`           | `string`                                 | Agent provider (`"claude"`, `"codex"`, `"opencode"`, etc.)                                                                                                                                                                                                                                                                                                                          |
+| `hostId`             | `string?`                                | Owning daemon's serverId. Absent = legacy record; workspace ownership still constrains execution. See [shared-home.md](./shared-home.md) for cross-host loading and mutation rules.                                                                                                                                                                                                 |
 | `cwd`                | `string`                                 | Working directory the agent operates in                                                                                                                                                                                                                                                                                                                                             |
 | `workspaceId`        | `string?`                                | Owning workspace id — the single source of ownership. Every agent is stamped with one at create time; legacy cwd-only records are backfilled once by `migrations/backfill-workspace-id.migration.ts` (the only place a cwd→id mapping exists). Runtime code never infers ownership or status from cwd: status is computed per `workspaceId`, and same-cwd siblings are independent. |
 | `createdAt`          | `string` (ISO 8601)                      | Creation timestamp                                                                                                                                                                                                                                                                                                                                                                  |
@@ -198,6 +204,9 @@ fields and their removal/default semantics; session handlers and the CLI only re
 result. Normal config patches persist only the requested fields, so launch overrides and resolved
 defaults never leak into the file. Startup-only fields remain compared with the daemon's launch
 snapshot so a mixed edit can apply its live subset and still name the paths that require restart.
+
+Configuration saves use the JSON symlink rule described above, so a symbolic link at `config.json`
+is preserved while its target is replaced atomically.
 
 ```
 {
@@ -388,24 +397,41 @@ options from the previous variant.
 
 **Path:** `$PASEO_HOME/schedules/{id}.json`
 
-One file per schedule. ID is 8 hex characters.
+One file per schedule. ID is 8 hex characters. Each record carries the owning daemon's
+`serverId` in `hostId` — the creating or replacing daemon, unless startup reconciliation
+assigned a different owner. A daemon lists and mutates only its own records plus legacy
+host-less ones; `inspect` and `logs` stay readable cross-host. Before a run executes, the
+daemon O_EXCL-creates `schedules/{scheduleId}.claim` so two daemons sharing a home fire
+that occurrence once; the lease renews while the run is live and is reclaimed when stale
+for over an hour, failing the run it left behind. The claim suffix keeps it out of the
+store's `*.json` enumeration.
+Startup reconciliation adopts a host-less record when its target agent or cwd workspace
+identifies exactly one host, and reassigns a new-agent record when its cwd's sole owning
+host changed. It skips records with a claim file; an ambiguous host-less record stays
+shared and keeps claim-based execution, while an ambiguous owned record keeps its current
+owner.
 
-| Field       | Type                                  | Description                      |
-| ----------- | ------------------------------------- | -------------------------------- |
-| `id`        | `string`                              | 8-char hex ID                    |
-| `name`      | `string?`                             | Human-readable name              |
-| `prompt`    | `string`                              | The prompt to send               |
-| `cadence`   | `ScheduleCadence`                     | Timing (see below)               |
-| `target`    | `ScheduleTarget`                      | What to run (see below)          |
-| `status`    | `"active" \| "paused" \| "completed"` | Current state                    |
-| `createdAt` | `string` (ISO 8601)                   |                                  |
-| `updatedAt` | `string` (ISO 8601)                   |                                  |
-| `nextRunAt` | `string?` (ISO 8601)                  | Next scheduled execution         |
-| `lastRunAt` | `string?` (ISO 8601)                  | Last execution time              |
-| `pausedAt`  | `string?` (ISO 8601)                  | When paused                      |
-| `expiresAt` | `string?` (ISO 8601)                  | Auto-expire time                 |
-| `maxRuns`   | `number?`                             | Max executions before completing |
-| `runs`      | `ScheduleRun[]`                       | Execution history                |
+`hostId` is server-private persistence metadata: `schedule/store.ts` extends the unchanged
+protocol schedule schema locally. RPC summaries/full records and MCP structured outputs
+are projected through the public protocol schemas, which strip ownership metadata.
+
+| Field       | Type                                  | Description                                                 |
+| ----------- | ------------------------------------- | ----------------------------------------------------------- |
+| `id`        | `string`                              | 8-char hex ID                                               |
+| `hostId`    | `string?`                             | Owning daemon's `serverId`; absent on legacy shared records |
+| `name`      | `string?`                             | Human-readable name                                         |
+| `prompt`    | `string`                              | The prompt to send                                          |
+| `cadence`   | `ScheduleCadence`                     | Timing (see below)                                          |
+| `target`    | `ScheduleTarget`                      | What to run (see below)                                     |
+| `status`    | `"active" \| "paused" \| "completed"` | Current state                                               |
+| `createdAt` | `string` (ISO 8601)                   |                                                             |
+| `updatedAt` | `string` (ISO 8601)                   |                                                             |
+| `nextRunAt` | `string?` (ISO 8601)                  | Next scheduled execution                                    |
+| `lastRunAt` | `string?` (ISO 8601)                  | Last execution time                                         |
+| `pausedAt`  | `string?` (ISO 8601)                  | When paused                                                 |
+| `expiresAt` | `string?` (ISO 8601)                  | Auto-expire time                                            |
+| `maxRuns`   | `number?`                             | Max executions before completing                            |
+| `runs`      | `ScheduleRun[]`                       | Execution history                                           |
 
 ### Nested: ScheduleCadence (discriminated union on `type`)
 
@@ -473,27 +499,28 @@ workspace together with its owning project.
 
 Array of workspace records. A workspace is a specific working directory within a project.
 
-| Field                          | Type                                                         | Description                                                                                                                                                                                   |
-| ------------------------------ | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workspaceId`                  | `string`                                                     | Opaque stable identifier (`wks_<hex>`), generated independently of the directory. MUST NOT be treated as a path; compare by exact equality. Use the `cwd` field for directory access.         |
-| `projectId`                    | `string`                                                     | FK to Project.projectId; the workspace's stable project membership                                                                                                                            |
-| `cwd`                          | `string`                                                     | Exact execution directory selected for agents, files, scripts, and setup                                                                                                                      |
-| `kind`                         | `"local_checkout" \| "worktree" \| "directory"`              | Mutable checkout classification                                                                                                                                                               |
-| `displayName`                  | `string`                                                     | The human name (the generated/derived title). Decoupled from `branch` by construction.                                                                                                        |
-| `title`                        | `string \| null`                                             | User-set name override layered over `displayName`. Null means "use `displayName`".                                                                                                            |
-| `branch`                       | `string \| null`                                             | The current Git branch for git-backed workspaces. Separate from `displayName`/`title`; a background branch refresh never rewrites the name.                                                   |
-| `worktreeRoot`                 | `string \| null`                                             | Backing checkout/worktree root. May differ from `cwd` for exact subprojects and remains persisted after the worktree is deleted so restore can reproduce the placement.                       |
-| `baseBranch`                   | `string \| null`                                             | Current base retained across archive and restore. Explicit selections and branch-off creation store exact refs; older records may store branch names. Null means no recorded base.            |
-| `isPaseoOwnedWorktree`         | `boolean`                                                    | Whether Paseo owns and may remove/recreate the backing `worktreeRoot`                                                                                                                         |
-| `mainRepoRoot`                 | `string \| null`                                             | Main repository root for worktree checkouts, independent of both exact `cwd` and backing `worktreeRoot`                                                                                       |
-| `createdAt`                    | `string` (ISO 8601)                                          |                                                                                                                                                                                               |
-| `updatedAt`                    | `string` (ISO 8601)                                          |                                                                                                                                                                                               |
-| `archivedAt`                   | `string \| null` (ISO 8601)                                  | Soft-delete; required nullable                                                                                                                                                                |
-| `autoArchivedChangeRequestUrl` | `string \| null`                                             | Change request whose merged state triggered auto-archive. Restore replaces it with the current merged change request, when present, so repeated snapshots cannot archive the workspace again. |
-| `labels`                       | `string[]?`                                                  | Normalized display names assigned from this host's shared label catalog. Missing means unlabelled.                                                                                            |
-| `metadata`                     | `Record<string, JsonValue>`                                  | Plugin-owned data (default `{}`). Paseo stores and forwards it and never reads a key. Set at creation or through `workspace.metadata.update.request`.                                         |
-| `pinnedAt`                     | `string \| null` (ISO 8601)                                  | Pinned-to-top-of-sidebar timestamp; null means "not pinned"                                                                                                                                   |
-| `untrustedSource`              | `{ kind: "change_request", forge, number, headRepository }?` | Provenance captured when a cross-repository change request creates the workspace. Missing means repository automation is allowed; explicit setup removes the field.                           |
+| Field                          | Type                                                         | Description                                                                                                                                                                                    |
+| ------------------------------ | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workspaceId`                  | `string`                                                     | Opaque stable identifier (`wks_<hex>`), generated independently of the directory. MUST NOT be treated as a path; compare by exact equality. Use the `cwd` field for directory access.          |
+| `projectId`                    | `string`                                                     | FK to Project.projectId; the workspace's stable project membership                                                                                                                             |
+| `hostId`                       | `string?`                                                    | Creating daemon's serverId. A daemon lists only workspaces whose `hostId` is absent (legacy) or its own; updates and reconciliation preserve the field. See [shared-home.md](./shared-home.md) |
+| `cwd`                          | `string`                                                     | Exact execution directory selected for agents, files, scripts, and setup                                                                                                                       |
+| `kind`                         | `"local_checkout" \| "worktree" \| "directory"`              | Mutable checkout classification                                                                                                                                                                |
+| `displayName`                  | `string`                                                     | The human name (the generated/derived title). Decoupled from `branch` by construction.                                                                                                         |
+| `title`                        | `string \| null`                                             | User-set name override layered over `displayName`. Null means "use `displayName`".                                                                                                             |
+| `branch`                       | `string \| null`                                             | The current Git branch for git-backed workspaces. Separate from `displayName`/`title`; a background branch refresh never rewrites the name.                                                    |
+| `worktreeRoot`                 | `string \| null`                                             | Backing checkout/worktree root. May differ from `cwd` for exact subprojects and remains persisted after the worktree is deleted so restore can reproduce the placement.                        |
+| `baseBranch`                   | `string \| null`                                             | Current base retained across archive and restore. Explicit selections and branch-off creation store exact refs; older records may store branch names. Null means no recorded base.             |
+| `isPaseoOwnedWorktree`         | `boolean`                                                    | Whether Paseo owns and may remove/recreate the backing `worktreeRoot`                                                                                                                          |
+| `mainRepoRoot`                 | `string \| null`                                             | Main repository root for worktree checkouts, independent of both exact `cwd` and backing `worktreeRoot`                                                                                        |
+| `createdAt`                    | `string` (ISO 8601)                                          |                                                                                                                                                                                                |
+| `updatedAt`                    | `string` (ISO 8601)                                          |                                                                                                                                                                                                |
+| `archivedAt`                   | `string \| null` (ISO 8601)                                  | Soft-delete; required nullable                                                                                                                                                                 |
+| `autoArchivedChangeRequestUrl` | `string \| null`                                             | Change request whose merged state triggered auto-archive. Restore replaces it with the current merged change request, when present, so repeated snapshots cannot archive the workspace again.  |
+| `labels`                       | `string[]?`                                                  | Normalized display names assigned from this host's shared label catalog. Missing means unlabelled.                                                                                             |
+| `metadata`                     | `Record<string, JsonValue>`                                  | Plugin-owned data (default `{}`). Paseo stores and forwards it and never reads a key. Set at creation or through `workspace.metadata.update.request`.                                          |
+| `pinnedAt`                     | `string \| null` (ISO 8601)                                  | Pinned-to-top-of-sidebar timestamp; null means "not pinned"                                                                                                                                    |
+| `untrustedSource`              | `{ kind: "change_request", forge, number, headRepository }?` | Provenance captured when a cross-repository change request creates the workspace. Missing means repository automation is allowed; explicit setup removes the field.                            |
 
 > **Opaque-ID invariant:** `workspaceId` is opaque identity, never a filesystem path. Filesystem and git operations take `cwd`/`workspaceDirectory` only — never the id. A compatibility-only first-materialization bootstrap still groups pre-registry agent records by path and Git remote so existing installs retain their legacy records. That grouping never runs against a live registry, and its keys are not runtime project or workspace identity.
 
@@ -509,7 +536,7 @@ last assignment. Editing a label takes a new name, a new colour, or both in one 
 fields cannot land half-applied. Workspaces store label names, so a rename and a delete rewrite
 workspace assignments through one serialized compound commit while a recolour is catalog-only; a
 rename onto a name the host already has is refused rather than merged. A prepared
-`workspace-labels.transaction.json` contains both before and after images. The daemon writes the
+`workspace-labels.transaction.{txId}.json` contains both before and after images. The daemon writes the
 catalog and workspace files, then atomically changes the transaction to committed; that phase
 change is the durable commit point. Recovery rolls prepared transactions back before either
 directory is served. A committed marker proves both data files were already written, so recovery
@@ -532,13 +559,10 @@ than treating it as valid.
 
 **Path:** `$PASEO_HOME/push-tokens.json`
 
-```json
-{
-  "tokens": ["ExponentPushToken[...]", ...]
-}
-```
-
-Simple set of Expo push notification tokens. Loaded with permissive parsing (filters non-string entries). Persisted with atomic temp-file rename.
+The file stores leased subscriptions (`token`, `expiresAt`); the old `tokens` array is
+accepted and migrated on the next read. Delivery and mutation re-read disk under the
+same cross-process lock. See [daemon push delivery](notifications.md#daemon-push-delivery)
+for shared-home consistency and terminal Expo error handling.
 
 ---
 
@@ -546,13 +570,13 @@ Simple set of Expo push notification tokens. Loaded with permissive parsing (fil
 
 These small files are not validated as full Zod schemas but are persisted under `$PASEO_HOME` for daemon identity and runtime coordination.
 
-| Path                  | Format                                                         | Notes                                                                             |
-| --------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `server-id`           | Plain text, e.g. `srv_<base64url>`                             | Stable per-`$PASEO_HOME` daemon ID. Overridable via `PASEO_SERVER_ID` env.        |
-| `daemon-keypair.json` | `{ v: 2, publicKeyB64, secretKeyB64 }` (libsodium box keypair) | E2EE relay identity. Written with mode `0600`. Regenerated if file is unreadable. |
-| `paseo.pid`           | JSON `{ pid, startedAt, ... }`                                 | PID lock; prevents two daemons sharing one `$PASEO_HOME`.                         |
-| `local-credential`    | 32 random bytes encoded as base64url text                      | Rotated before each listen and deleted on shutdown; mode `0600`.                  |
-| `daemon.log`          | Pino log output                                                | Default location; path/rotation configurable via `log.file` in `config.json`.     |
+| Path                  | Format                                                         | Notes                                                                                                                                                                                                    |
+| --------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server-id`           | Plain text, e.g. `srv_<base64url>`                             | Stable per-`$PASEO_HOME` daemon ID. Overridable via `PASEO_SERVER_ID` env.                                                                                                                               |
+| `daemon-keypair.json` | `{ v: 2, publicKeyB64, secretKeyB64 }` (libsodium box keypair) | Legacy E2EE keypair. Each daemon keeps its own under `daemons/{serverId}/`, adopting the legacy copy only when its serverId matches the legacy `server-id` file. Mode `0600`; regenerated if unreadable. |
+| `paseo.pid`           | JSON `{ pid, startedAt, ... }`                                 | Legacy discovery pointer. Verified per-instance discovery and lease rules are in [shared-home.md](shared-home.md#identity-and-per-instance-state).                                                       |
+| `local-credential`    | 32 random bytes encoded as base64url text                      | Per-daemon copy under `daemons/{serverId}/`; the pid owner also mirrors the legacy path. Mode `0600`.                                                                                                    |
+| `daemon.log`          | Pino log output                                                | Default location; `daemon.{serverId}.log` when `PASEO_SERVER_ID` is set. Path/rotation configurable via `log.file` in `config.json`.                                                                     |
 
 ---
 

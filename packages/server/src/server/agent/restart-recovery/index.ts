@@ -2,6 +2,7 @@ import type { AgentStorage, StoredAgentRecord } from "../agent-storage.js";
 interface Dependencies {
   storage: AgentStorage;
   settings(): { enabled: boolean; prompt: string };
+  mutable(record: StoredAgentRecord): Promise<boolean>;
   eligible(record: StoredAgentRecord): Promise<boolean>;
   dispatch(agentId: string, prompt: string): Promise<unknown>;
   report(agentId: string, error: unknown): void;
@@ -12,8 +13,8 @@ export function createRestartRecovery(deps: Dependencies) {
   const eligible = async (record: StoredAgentRecord) =>
     !record.archivedAt && !record.internal && !record.owner && (await deps.eligible(record));
   async function resume(agentId: string) {
-    const record = await deps.storage.get(agentId);
-    if (!record?.resumeOnStartup) return;
+    const record = await deps.storage.getFresh(agentId);
+    if (!record?.resumeOnStartup || !(await deps.mutable(record))) return;
     await deps.storage.upsert({ ...record, resumeOnStartup: false });
     if (!deps.settings().enabled || !(await eligible(record))) return;
     await deps.dispatch(agentId, deps.settings().prompt);
@@ -22,7 +23,9 @@ export function createRestartRecovery(deps: Dependencies) {
     /** Choose candidates before anything else reads or repairs persisted running status. */
     async prepareStartup() {
       // Startup recovery repairs persisted running status once before agents are restored.
-      for (const record of await deps.storage.listAll()) {
+      for (const candidate of await deps.storage.listAll()) {
+        const record = await deps.storage.getFresh(candidate.id);
+        if (!record || !(await deps.mutable(record))) continue;
         const pending =
           deps.settings().enabled &&
           (record.resumeOnStartup === true || record.lastStatus === "running") &&
@@ -47,7 +50,9 @@ export function createRestartRecovery(deps: Dependencies) {
     async captureRunningAgents() {
       await deps.storage.flush();
       // Shutdown recovery captures running state once before the daemon exits.
-      for (const record of await deps.storage.listAll()) {
+      for (const candidate of await deps.storage.listAll()) {
+        const record = await deps.storage.getFresh(candidate.id);
+        if (!record || !(await deps.mutable(record))) continue;
         if (record.lastStatus === "running" && (await eligible(record)))
           await deps.storage.upsert({ ...record, resumeOnStartup: deps.settings().enabled });
       }

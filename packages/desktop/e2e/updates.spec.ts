@@ -18,7 +18,6 @@ import {
   clickInstallUpdate,
   expectInstallInProgress,
   interceptDaemonManagementConfirmDialog,
-  interceptDaemonStopConfirmDialog,
   toggleDaemonManagement,
   expectDaemonManagementConfirmDialog,
   expectDaemonManagementEnabled,
@@ -146,35 +145,4 @@ test.describe("Desktop daemon management", () => {
     await expectDaemonStatusPid(page, realState.pid);
     await expectDaemonStatusLogPath(page, realState.logPath);
   });
-
-  for (const confirmShouldAccept of [false, true]) {
-    test(`${confirmShouldAccept ? "confirming" : "cancelling"} Stop identifies the owned daemon`, async ({
-      page,
-    }) => {
-      const serverId = getServerId();
-      const realState = await loadRealDaemonState();
-      const daemonHome = process.env.E2E_PASEO_HOME!;
-      await installDesktopRuntime(page, {
-        serverId,
-        daemonPid: realState.pid,
-        daemonHome,
-        ownedByDesktop: true,
-        confirmShouldAccept,
-      });
-      await gotoAppShell(page);
-      await openDesktopSettings(page, serverId);
-
-      const dialog = await interceptDaemonStopConfirmDialog(page);
-      expect(dialog).toEqual({
-        title: "Stop local daemon?",
-        message: [
-          "This daemon was launched by this Desktop session.",
-          `Home: ${daemonHome}`,
-          `Supervisor PID: ${realState.pid}`,
-          "Running agent work will be interrupted.",
-        ].join("\n"),
-      });
-      await expectDaemonStatusPid(page, confirmShouldAccept ? null : realState.pid);
-    });
-  }
 });

@@ -80,7 +80,7 @@ async function waitForServer(
       );
     }
     try {
-      const serverId = await readServerId(port, identity.paseoHome);
+      const serverId = await readServerId(port, identity);
       if (serverId === identity.serverId) return;
       lastError = new Error(`Port ${port} is served by ${serverId}, not ${identity.serverId}`);
     } catch (error) {
@@ -98,11 +98,17 @@ async function waitForServer(
 
 /**
  * Reads the server id from the daemon's status route. The route needs a bearer
- * on a password-protected daemon; the daemon accepts the local credential it
- * writes into its home before listening, as the CLI does for local status.
+ * on a password-protected daemon; supervised workers write a per-instance
+ * local credential before listening and do not mirror it to the home root.
  */
-async function readServerId(port: number, paseoHome: string): Promise<string> {
-  const localCredential = await readFile(path.join(paseoHome, "local-credential"), "utf8").then(
+async function readServerId(
+  port: number,
+  { serverId, paseoHome }: { serverId: string; paseoHome: string },
+): Promise<string> {
+  const localCredential = await readFile(
+    path.join(paseoHome, "daemons", serverId, "local-credential"),
+    "utf8",
+  ).then(
     (token) => token.trim(),
     () => null,
   );

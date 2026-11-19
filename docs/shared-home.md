@@ -1,0 +1,158 @@
+# Shared PASEO_HOME
+
+Run one Paseo daemon on each machine with the same `PASEO_HOME` on shared storage
+(NFS-class). Project and agent records are shared; execution, workspaces and terminals
+stay with their owning daemon.
+
+This is server-side behavior. Clients need no changes: each daemon has its own
+`serverId`, so the app's existing multi-host support shows one host per machine.
+
+Schedule ownership is persisted privately by the server and is omitted from RPC and MCP
+schedule responses. Startup acquires the instance lease before activating terminal
+workers, repairing running statuses or recording resume intent. Foreign agent records,
+including records in foreign workspaces, are never repaired or resumed as writers here.
+
+## Setup
+
+1. Set a distinct, machine-stable `PASEO_SERVER_ID` on every machine (for example
+   `srv_desktop`, `srv_laptop`). Two daemons with the same serverId on one home fail to
+   start — the per-instance registry rejects the collision. Path separators, `+`, `:`,
+   `..`, and whitespace are rejected: the id also names the per-instance directory, the
+   `daemon.{serverId}.log` file, and one entry in a host-local `projectKey`.
+2. For cross-machine agent history reads, point the provider session directories at the
+   shared volume too (for example `CLAUDE_CONFIG_DIR`, `CODEX_HOME`). Provider transcripts
+   live outside PASEO_HOME. Explicit agent-ID reads can load foreign history without
+   starting its provider, but client directories omit agents whose workspace belongs to
+   another host: the unchanged app cannot open that host's workspace on this connection.
+3. Prefer per-machine settings for machine-local config: `log.file.path` (the default
+   becomes `daemon.{serverId}.log` when `PASEO_SERVER_ID` is set), `worktrees.root`, and
+   `providers.local.modelsDir`.
+
+## What is shared and what is not
+
+| State                                                 | Sharing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Projects, agents, push tokens, labels catalog, config | Shared home data                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Workspaces                                            | Host-scoped: each record carries the creating daemon's `hostId`; every daemon lists only its own (and legacy `hostId`-less) workspaces. Archived records retain ownership of foreign-only backing paths; an archived local record does not authorize access to them.                                                                                                                                                                                                                                        |
+| Agent execution                                       | Shared records, single owner: foreign agents always load with `purpose: "history"` (read-only, no provider process, no record writes, status projected from `lastStatus`), including when `closed`. Loading never transfers ownership. Mutations (send, stop, reload, mode, rewind) are rejected with `agent is owned by host <id>`. Writable runtimes must run on the owning workspace's host.                                                                                                             |
+| Provider session transcripts                          | Wherever the provider puts them; share via provider env for cross-host reads. Read-only foreign history is supported for claude, codex, and omp; other providers reject cross-host history loads and stay writable only on their owning host                                                                                                                                                                                                                                                                |
+| Schedules and heartbeats                              | Host-scoped: each record carries the owning daemon's `serverId` in `hostId`; every daemon lists and edits only its own (and legacy `hostId`-less) schedules. Ownership follows the target: startup reconciliation adopts a host-less record from its single owning agent/cwd host and reassigns a new-agent record when its cwd's sole owning host changed. Agent-target schedules fire only on the host owning the agent. See [schedule execution](#schedule-execution) for execution leases and shutdown. |
+| Managed helper processes                              | Ledger records carry `hostId`; each daemon reaps only its own records                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Attention push notifications                          | Sent only by the owning daemon, so a shared token list does not double-notify                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Workspace label edits                                 | Serialized across daemons by a cross-process file lock (`projects/.labels.lock`) with an on-disk catalog re-read inside the lock, so concurrent edits from two daemons both survive. Assignment writes are host-scoped; a rename or delete is rejected when it would rewrite an assignment on another host's workspace.                                                                                                                                                                                     |
+
+Archiving by workspace ID changes only that host's workspace record and its contents, even if
+another host has a record for the same directory. Worktree teardown and removal still require
+access to the backing path; archiving a local record does not grant access to a foreign-only path.
+
+The original home owner (the persisted root `server-id`) adopts host-less legacy
+workspaces at startup unless an agent record attributes that workspace or cwd to another
+host. This restores missing-directory cleanup for single-host upgrades. Other hosts and
+ambiguous records stay unclaimed; a missing path alone never proves ownership.
+
+## Identity and per-instance state
+
+`$PASEO_HOME/daemons/{serverId}/` holds per-daemon state: the supervisor's `paseo.pid`,
+the worker's `instance.json` lease, `daemon-keypair.json`, and `local-credential`.
+Supervisor and worker ownership both use a 30s mtime heartbeat. A daemon adopting a legacy single-machine home keeps the legacy
+keypair only when its serverId matches the legacy `server-id` file; every other serverId
+generates a fresh keypair, so relay identities and pairing stays per-machine.
+The reverse also holds: a pairing offer generated after the first daemon boot mirrors
+that daemon's keypair to the legacy root `daemon-keypair.json`, so the CLI keeps reading
+the home root and offers always carry the live daemon's public key.
+
+Supervisors acquire, renew and release only their own directory's PID lock. Different
+serverIds never contend for the root `paseo.pid`, even when cloned machines share a
+system machine ID. A duplicate serverId is rejected before spawning its worker.
+Local discovery reads the selected instance's supervisor pointer during startup, then
+its worker registration, verifying machine and process birth identities and using its
+own credential. During upgrades, discovery also accepts a legacy root pointer when no
+scoped pointer exists and its identity matches the selected serverId; normal local-owner
+checks still apply. Isolated supervisors never acquire or renew the root PID lock or
+mirror credentials to the root.
+Registrations publish their listen address only after startup succeeds. Status reads do
+not create server or machine identities.
+
+On macOS, keep a previously persisted fallback machine ID even when the corrected
+hardware UUID query starts working. Changing that identity during an upgrade would
+invalidate the live local registrations and legacy-worker ownership receipts.
+
+Cross-daemon visibility is pull-based: the project/workspace registries reload when the
+file's mtime or size changes underneath them, and agent storage rescans the `agents/`
+tree at most every 5 seconds. The workspace-labels recovery journal uses per-transaction
+file names (`workspace-labels.transaction.{txId}.json`) so two daemons never fight over
+one journal.
+
+## Schedule execution
+
+Schedule claims are execution leases, not an exactly-once guarantee for provider prompts or
+external tool effects. A run keeps its claim through execution and cleanup. Another daemon
+can reclaim a claim stale for over an hour; the original owner can still renew an expired,
+unchanged claim if it acquires the lock first. Once a different run takes over, the old run
+cannot renew that claim or overwrite the replacement's schedule state.
+
+A blocked schedule must not stop admission or lease renewal for another schedule. Coalesce
+overlapping work per schedule rather than queue missed timer callbacks: slow shared storage
+must not turn a renewal timer into an unbounded queue of lock helpers.
+
+Execution claims use `schedules/{scheduleId}.claim.lock`. Stop every daemon sharing a home
+before upgrading from the old directory-wide `schedules/.claims.lock`: the two lock schemes
+do not coordinate. Start only upgraded daemons against that home; do not perform a rolling
+mixed-version cutover. Lock files remain after release and must not be deleted while daemons run.
+
+Cross-process locks remain necessary even with local admission limits. An acquisition
+timeout cancels waiting, not an action already modifying shared state. A helper that has
+not exited still occupies its local admission slot, including when filesystem I/O cannot
+be interrupted. A lock error does not prove that no write committed; do not automatically
+retry the whole mutation.
+
+Shutdown stops new schedule admission before closing agent runtimes. Active executions
+keep their leases until they settle; drain schedule writes and claim cleanup before
+releasing the daemon instance lease. Cancelling a completion waiter alone does not stop
+the provider executing its prompt.
+
+## Known limitations
+
+- Remote instance/pid leases use file mtime. Keep machine clocks NTP-synced and mount
+  with normal attribute caching; clock skew or aggressive `actimeo` can make a remote
+  daemon look stale. A verified live local process is not reclaimed for stale mtime alone.
+- The shared storage must provide cross-client `flock`/`lockf` semantics (stock NFS
+  with network locking; not `local_lock=local`). Instance and pid reclaims, schedule
+  claim release, and label commits all rely on it.
+- A legacy host-less schedule keeps the shared behavior until startup reconciliation
+  resolves a single owner from its target agent or cwd workspace records, and
+  reconciliation is skipped while a run holds its claim. Until then every daemon lists
+  it, so the app can render the same schedule once per connected host, and editing it on
+  one host while it runs on another can still lose the edit; only execution claims are
+  serialized, not definition writes.
+- Mixed daemon versions on one home downgrade schedule ownership: a daemon that predates
+  `hostId` drops the field when it rewrites a record and still lists and mutates every
+  schedule. Run one version on all hosts sharing a home. Restarting the upgraded host
+  re-adopts stripped records only while the target agent or cwd still resolves to a
+  single host.
+- Managed-process ledger records written before the shared-home upgrade carry no
+  `hostId` and are reaped by every daemon. Stop the old daemon before moving a home to
+  shared use, and let the first new daemon reconcile the legacy ledger.
+- Creation and message receipts have no cross-daemon mutex. Today's clients never send
+  the same idempotency key or message id to two hosts, so this is latent; if a future
+  client adds cross-host retries, the receipts directories need a claim file first.
+- Local speech models download and extract directly into the shared home; prefer a
+  per-machine `providers.local.modelsDir` when two hosts might enable voice at the
+  same time.
+- Plugins with platform-specific dependencies (native modules) only load on machines
+  matching the installing machine's OS/arch, and a plugin update requires restarting
+  the other machines' daemons to pick up the new path.
+- The Hub relationship is per-home and single-connection. A blocked daemon retries
+  the `hub-connection.lock` lease with bounded backoff and takes over after release or
+  expiry. Stopping cancels takeover; losing the lease fences the former connection.
+- A client-supplied `agentId` in a create request can collide with a foreign record
+  written by another host within the local 5-second rescan window. Today's clients
+  generate IDs server-side; if a future client retries a create with the same ID
+  against a different host, the foreign check may not see the record yet.
+
+## Not supported
+
+File-sync replication (Syncthing/Dropbox) is not supported. O_EXCL claims, mtime
+leases, and rename atomicity do not hold across independent local copies, and conflict
+copies of agent and schedule files would be parsed as data. Use real shared storage, or
+stop the daemon before moving the home between machines (handoff).

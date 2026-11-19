@@ -1,5 +1,6 @@
 import path from "node:path";
 import { statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 
 import type { Logger } from "pino";
 
@@ -85,6 +86,7 @@ export async function bootstrapWorkspaceRegistries(options: {
 
   if (projectsExists && workspacesExists) {
     await backfillWorkspaceIdForLegacyAgents(options);
+    await adoptLegacyWorkspaceOwnership(options);
     return;
   }
 
@@ -208,6 +210,7 @@ export async function bootstrapWorkspaceRegistries(options: {
   );
 
   await backfillWorkspaceIdForLegacyAgents(options);
+  await adoptLegacyWorkspaceOwnership(options);
 
   options.logger.info(
     {
@@ -218,4 +221,47 @@ export async function bootstrapWorkspaceRegistries(options: {
     },
     "Workspace registries bootstrapped from existing agent storage",
   );
+}
+
+// COMPAT(legacy-workspace-owner): added in v0.15.0; remove after 2027-05-04
+// once supported homes have had their original owner's workspaces backfilled.
+async function adoptLegacyWorkspaceOwnership(
+  options: Parameters<typeof bootstrapWorkspaceRegistries>[0],
+): Promise<void> {
+  const { serverId } = options;
+  if (!serverId) return;
+  let originalOwner: string;
+  try {
+    originalOwner = (await readFile(path.join(options.paseoHome, "server-id"), "utf8")).trim();
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+    throw error;
+  }
+  if (originalOwner !== serverId) return;
+
+  const records = await options.agentStorage.listAll();
+  const foreignWorkspaceIds = new Set<string>();
+  const foreignDirectories = new Set<string>();
+  for (const record of records) {
+    if (record.hostId === undefined || record.hostId === serverId) continue;
+    if (record.workspaceId) foreignWorkspaceIds.add(record.workspaceId);
+    foreignDirectories.add(path.resolve(record.cwd));
+  }
+  for (const workspace of await options.workspaceRegistry.listAll()) {
+    if (
+      workspace.hostId !== undefined ||
+      foreignWorkspaceIds.has(workspace.workspaceId) ||
+      foreignDirectories.has(path.resolve(workspace.cwd))
+    )
+      continue;
+    await options.workspaceRegistry.update(workspace.workspaceId, (current) => {
+      if (
+        current.hostId !== undefined ||
+        current.cwd !== workspace.cwd ||
+        current.projectId !== workspace.projectId
+      )
+        return current;
+      return { ...current, hostId: serverId };
+    });
+  }
 }

@@ -23,6 +23,11 @@ import {
   WorkspaceArchiveCanceledError,
 } from "./workspace-archive-service.js";
 import { WorkspaceAutomationBlockedError } from "./workspace-automation-gate.js";
+import {
+  assertCwdWorkspaceOwnedByThisServer,
+  createPersistedWorkspaceRecord,
+  FileBackedWorkspaceRegistry,
+} from "./workspace-registry.js";
 
 const cleanupPaths: string[] = [];
 
@@ -164,6 +169,8 @@ function createArchiveDeps(input: ArchiveDepsInput): ArchiveTestDependencies {
     findWorkspaceIdForCwd: input.findWorkspaceIdForCwd ?? vi.fn(async () => null),
     listActiveWorkspaces: async () =>
       active.filter((workspace) => !archivedWorkspaceIds.has(workspace.workspaceId)),
+    listAllActiveWorkspaces: async () =>
+      active.filter((workspace) => !archivedWorkspaceIds.has(workspace.workspaceId)),
     archiveWorkspaceRecord: async (workspaceId: string) => {
       archivedWorkspaceIds.add(workspaceId);
       const index = active.findIndex((workspace) => workspace.workspaceId === workspaceId);
@@ -175,6 +182,7 @@ function createArchiveDeps(input: ArchiveDepsInput): ArchiveTestDependencies {
     markWorkspaceArchiving: vi.fn(),
     clearWorkspaceArchiving: vi.fn(),
     killTerminalsForWorkspace: vi.fn(async () => {}),
+    assertCwdWorkspaceOwnedByThisServer: vi.fn(async () => {}),
     sessionLogger: createLogger(),
     activeWorkspaces: active,
     archivedAgentIds,
@@ -248,28 +256,27 @@ describe("archiveByScope", () => {
     const worktree = await createPaseoOwnedWorktree(repoDir, paseoHome, "last-ref-workspace");
     const workspaceId = "ws-last-ref";
 
-    const result = await archiveByScope(
-      createArchiveDeps({
-        paseoHome,
-        activeWorkspaces: [
-          {
-            workspaceId,
-            cwd: worktree.worktreePath,
-            kind: "worktree",
-          },
-        ],
-      }),
-      {
-        scope: { kind: "workspace", workspaceId },
-        requestId: "req-last-ref-workspace",
-      },
-    );
+    const deps = createArchiveDeps({
+      paseoHome,
+      activeWorkspaces: [
+        {
+          workspaceId,
+          cwd: worktree.worktreePath,
+          kind: "worktree",
+        },
+      ],
+    });
+    const result = await archiveByScope(deps, {
+      scope: { kind: "workspace", workspaceId },
+      requestId: "req-last-ref-workspace",
+    });
 
     assertArchiveResult(result, {
       archivedWorkspaceIds: [workspaceId],
       removedDirectory: true,
     });
     expect(existsSync(worktree.worktreePath)).toBe(false);
+    expect(deps.assertCwdWorkspaceOwnedByThisServer).toHaveBeenCalledWith(worktree.worktreePath);
   });
 
   test("workspace scope archives the record but leaves a plugin-placed directory whose marker is gone", async () => {
@@ -428,6 +435,40 @@ describe("archiveByScope", () => {
     });
     expect(existsSync(worktree.worktreePath)).toBe(true);
     expect(readFileSync(path.join(repoDir, "shared-teardown.log"), "utf8")).toBe("ok");
+  });
+
+  test("keeps a directory referenced only by a workspace outside the visible registry view", async () => {
+    const { tempDir, repoDir } = createGitRepo();
+    const paseoHome = path.join(tempDir, ".paseo");
+    const worktree = await createPaseoOwnedWorktree(repoDir, paseoHome, "foreign-reference");
+    const localWorkspaceId = "ws-local-reference";
+    const foreignWorkspaceId = "ws-foreign-reference";
+    const localWorkspace = {
+      workspaceId: localWorkspaceId,
+      cwd: worktree.worktreePath,
+      kind: "worktree" as const,
+    };
+    const foreignWorkspace = {
+      workspaceId: foreignWorkspaceId,
+      cwd: worktree.worktreePath,
+      kind: "local_checkout" as const,
+    };
+    const deps = createArchiveDeps({
+      paseoHome,
+      activeWorkspaces: [localWorkspace],
+    });
+    deps.listAllActiveWorkspaces = async () => [localWorkspace, foreignWorkspace];
+
+    const result = await archiveByScope(deps, {
+      scope: { kind: "workspace", workspaceId: localWorkspaceId },
+      requestId: "req-foreign-reference",
+    });
+
+    assertArchiveResult(result, {
+      archivedWorkspaceIds: [localWorkspaceId],
+      removedDirectory: false,
+    });
+    expect(existsSync(worktree.worktreePath)).toBe(true);
   });
 
   test("workspace scope skips teardown while repository automation is blocked", async () => {
@@ -815,6 +856,95 @@ describe("archiveByScope", () => {
       expect(invalidateWorktrees).toHaveBeenCalledTimes(1);
     },
   );
+
+  test("archives only the local record without mutating an archived foreign backing path", async () => {
+    const { tempDir, repoDir } = createGitRepo();
+    const paseoHome = path.join(tempDir, ".paseo");
+    const teardownMarker = path.join(repoDir, "foreign-teardown.log");
+    writeFileSync(
+      path.join(repoDir, "paseo.json"),
+      JSON.stringify({
+        worktree: {
+          teardown: [
+            "node -e \"require('fs').writeFileSync(process.env.PASEO_SOURCE_CHECKOUT_PATH + '/foreign-teardown.log', 'unsafe')\"",
+          ],
+        },
+      }),
+    );
+    execFileSync("git", ["add", "paseo.json"], { cwd: repoDir, stdio: "pipe" });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "foreign teardown"], {
+      cwd: repoDir,
+      stdio: "pipe",
+    });
+    const worktree = await createPaseoOwnedWorktree(repoDir, paseoHome, "archived-foreign");
+    const archivedWorkspace = createPersistedWorkspaceRecord({
+      workspaceId: "ws-archived-foreign",
+      projectId: "prj-foreign",
+      cwd: worktree.worktreePath,
+      kind: "worktree",
+      displayName: "archived foreign",
+      hostId: "srv-other",
+      worktreeRoot: worktree.worktreePath,
+      isPaseoOwnedWorktree: true,
+      mainRepoRoot: repoDir,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T01:00:00.000Z",
+      archivedAt: "2026-09-01T01:00:00.000Z",
+    });
+    const localWorkspace = createPersistedWorkspaceRecord({
+      ...archivedWorkspace,
+      workspaceId: "ws-local-shared-backing",
+      hostId: "srv-local",
+      archivedAt: null,
+    });
+    const registry = new FileBackedWorkspaceRegistry(
+      path.join(tempDir, "workspaces.json"),
+      createLogger(),
+    );
+    await registry.upsert(archivedWorkspace);
+    await registry.upsert(localWorkspace);
+    const deps = createArchiveDeps({ paseoHome, activeWorkspaces: [localWorkspace] });
+    deps.serverId = "srv-local";
+    deps.getWorkspace = (id) => registry.get(id);
+    deps.archiveWorkspaceRecord = async (id, archivedAt) => {
+      await registry.archive(id, archivedAt);
+    };
+    deps.listActiveWorkspaces = deps.listAllActiveWorkspaces = () => registry.listActive();
+    deps.assertCwdWorkspaceOwnedByThisServer = (cwd) =>
+      assertCwdWorkspaceOwnedByThisServer(cwd, registry, deps.serverId);
+
+    await expect(
+      archiveByScope(deps, {
+        scope: { kind: "workspace", workspaceId: archivedWorkspace.workspaceId },
+        requestId: "req-archived-foreign",
+      }),
+    ).rejects.toThrow("owned by host srv-other");
+
+    const result = await archiveByScope(deps, {
+      scope: { kind: "workspace", workspaceId: localWorkspace.workspaceId },
+      requestId: "req-archive-local-shared-backing",
+    });
+
+    assertArchiveResult(result, {
+      archivedWorkspaceIds: [localWorkspace.workspaceId],
+      removedDirectory: false,
+    });
+    expect((await registry.get(localWorkspace.workspaceId))?.archivedAt).toEqual(
+      expect.any(String),
+    );
+    expect(await registry.get(archivedWorkspace.workspaceId)).toEqual(archivedWorkspace);
+    expect(existsSync(worktree.worktreePath)).toBe(true);
+    expect(existsSync(teardownMarker)).toBe(false);
+
+    await expect(
+      archiveByScope(deps, {
+        scope: { kind: "worktree", targetPath: worktree.worktreePath },
+        requestId: "req-archive-foreign-backing-path",
+      }),
+    ).rejects.toThrow("owned by host srv-other");
+    expect(existsSync(worktree.worktreePath)).toBe(true);
+    expect(existsSync(teardownMarker)).toBe(false);
+  });
 
   test("marks archiving, emits an upsert carrying the archiving state, then clears it and emits a remove", async () => {
     const { tempDir, repoDir } = createGitRepo();

@@ -36,6 +36,10 @@ The daemon stores directory sources under the root `plugins` object:
 }
 ```
 
+`path` may be relative, which resolves against `$PASEO_HOME`. Point one hand-written `config.json` at
+a home-relative path when the plugin lives inside the home — symlinked to a checkout elsewhere, for
+instance — and the same config works on every machine.
+
 Installed plugins are disabled unless `pluginsEnabled` is `true`. Built-in plugins remain active.
 Changing that root field is
 runtime-safe: run `paseo reload` after editing `config.json`. Enabling starts every configured,
@@ -630,9 +634,9 @@ The [public reference](../public-docs/plugins/reference.md#workspace-row-badge-i
 The host lives in `packages/app/src/plugins/workspace-row-badge-items/`; `WorkspaceMetaRow` draws a host's
 items after its own.
 
-- Plugin items render with no wrapper view. The meta line spaces children with `gap`, so an empty
-  wrapper would leave a gap on rows the plugin has nothing to say about. That is also why
-  the row adds no separator around plugin items; a plugin renders its slot.
+- Plugin hosts add no wrapper view. Layout participation belongs to the rendered `WorkspaceRowBadge`,
+  so returning `null` leaves no gap. Badge text shares the built-in metadata's width budget; plugins
+  do not need to measure the sidebar or implement their own collapse thresholds.
 - A row only renders items from plugins on its own host. The Show menu coalesces items across hosts
   by `<pluginId>/<itemId>`, the key in the `sidebarPluginRowBadgeItems` setting, and places them in
   their own group below a separator. A missing key is visible.

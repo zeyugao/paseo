@@ -22,6 +22,7 @@ import {
 } from "./terminal-worker-runtime.js";
 import {
   terminalWorkerDirectory,
+  terminalWorkerHome,
   writeTerminalWorkerRecord,
   type TerminalWorkerRecord,
 } from "./terminal-worker-record.js";
@@ -178,6 +179,32 @@ describe("terminal worker runtime copy", () => {
     expect(result.removed).toEqual([path.join(terminalWorkerDirectory(home), unused.runtime!)]);
     expect(existsSync(path.dirname(used.scriptPath))).toBe(true);
     expect(existsSync(socketDirectory)).toBe(true);
+  });
+
+  it("keeps runtime copies and pruning independent for IDs sharing one home", async () => {
+    const root = makeDir("tw-runtime-shared-home-");
+    const alpha = terminalWorkerHome(root, "srv_alpha");
+    const beta = terminalWorkerHome(root, "srv_beta");
+    const sources = makeSources();
+    const first = prepareTerminalWorkerRuntime({
+      paseoHome: alpha,
+      paseoVersion: "1.0.0",
+      ...sources,
+    });
+    const second = prepareTerminalWorkerRuntime({
+      paseoHome: beta,
+      paseoVersion: "1.0.0",
+      ...sources,
+    });
+    expect(first.runtime).toBe(second.runtime);
+    expect(first.scriptPath).not.toBe(second.scriptPath);
+    writeTerminalWorkerRecord(beta, recordNaming(second.runtime));
+
+    expect((await pruneTerminalWorkerRuntimes(alpha)).removed).toEqual([
+      path.dirname(first.scriptPath),
+    ]);
+    expect(existsSync(second.scriptPath)).toBe(true);
+    expect((await pruneTerminalWorkerRuntimes(beta)).removed).toEqual([]);
   });
 
   it("removes nothing while a record cannot be read", async () => {

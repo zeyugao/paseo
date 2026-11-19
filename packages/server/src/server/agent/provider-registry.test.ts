@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import type { ToolPolicy } from "@getpaseo/protocol/agent-types";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
+import { createTestAgentClient } from "../test-utils/fake-agent-client.js";
 import type {
   AgentClient,
   AgentDraftControls,
@@ -510,6 +511,7 @@ import {
   AGENT_PROVIDER_DEFINITIONS,
   buildProviderRegistry,
   createAllClients,
+  shutdownAgentClients,
 } from "./provider-registry.js";
 import { FakeOmp } from "./providers/omp/test-utils/fake-omp.js";
 
@@ -518,6 +520,26 @@ const logger = createTestLogger();
 beforeEach(() => {
   mockState.reset();
 });
+
+test.each(["closes", "rejects", "unsupported"] as const)(
+  "confirms a provider only when every client generation stops: retired client %s",
+  async (retiredShutdown) => {
+    const current = createTestAgentClient("codex");
+    current.shutdown = async () => undefined;
+    const retired = createTestAgentClient("codex");
+    if (retiredShutdown !== "unsupported") {
+      retired.shutdown = async () => {
+        if (retiredShutdown === "rejects") throw new Error("retired runtime still running");
+      };
+    }
+    const independent = createTestAgentClient("pi");
+    independent.shutdown = async () => undefined;
+
+    const closed = await shutdownAgentClients([current, retired, independent], logger);
+
+    expect(closed).toEqual(new Set(retiredShutdown === "closes" ? ["codex", "pi"] : ["pi"]));
+  },
+);
 
 test("builds registry with no overrides — same as built-in count", () => {
   const registry = buildProviderRegistry(logger);

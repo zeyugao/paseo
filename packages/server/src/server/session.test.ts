@@ -39,6 +39,7 @@ import { Session } from "./session.js";
 import {
   terminalCleanupRecordPath,
   terminalWorkerDirectory,
+  terminalWorkerHome,
   writeTerminalCleanupRecord,
 } from "../terminal/terminal-worker-record.js";
 import { OWNER_PERMISSIONS, type DaemonPermission } from "./authorization/index.js";
@@ -205,6 +206,69 @@ test("legacy cancel_agent_request reports refusal through the activity log", asy
       },
     },
   ]);
+});
+
+test("refused clear_agent_attention returns a source-correlated rpc_error", async () => {
+  const source = {};
+  const messages: SessionOutboundMessage[] = [];
+  const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];
+  const session = createSessionForTest({
+    messages,
+    targetedMessages,
+    agentManager: {
+      waitForAgentClose: async () => {},
+      getAgent: () => ({ id: "foreign-agent" }),
+      clearAgentAttention: async () => {
+        throw new Error("agent is owned by host srv-other");
+      },
+    },
+  });
+
+  await session.handleMessage(
+    {
+      type: "clear_agent_attention",
+      agentId: "foreign-agent",
+      requestId: "clear-refused",
+    },
+    source,
+  );
+
+  expect(targetedMessages).toContainEqual({
+    source,
+    message: {
+      type: "rpc_error",
+      payload: {
+        requestId: "clear-refused",
+        requestType: "clear_agent_attention",
+        code: "handler_error",
+        error: "Request failed: agent is owned by host srv-other",
+      },
+    },
+  });
+  expect(messages).not.toContainEqual(expect.objectContaining({ type: "rpc_error" }));
+  expect(targetedMessages).not.toContainEqual(
+    expect.objectContaining({
+      message: expect.objectContaining({ type: "clear_agent_attention_response" }),
+    }),
+  );
+});
+
+test("refused fire-and-forget clear_agent_attention stays response-free", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      waitForAgentClose: async () => {},
+      getAgent: () => ({ id: "foreign-agent" }),
+      clearAgentAttention: async () => {
+        throw new Error("agent is owned by host srv-other");
+      },
+    },
+  });
+
+  await session.handleMessage({ type: "clear_agent_attention", agentId: "foreign-agent" });
+
+  expect(messages).toEqual([]);
 });
 
 const checkoutGitMocks = vi.hoisted(() => ({
@@ -434,9 +498,12 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
       existsOnDisk: vi.fn(),
       ...options.projectRegistry,
     },
-    workspaceRegistry: options.workspaceRegistry ?? {
+    workspaceRegistry: {
       get: vi.fn(),
       list: vi.fn().mockResolvedValue([]),
+      listAll: options.workspaceRegistry?.list ?? vi.fn().mockResolvedValue([]),
+      listActive: options.workspaceRegistry?.list ?? vi.fn().mockResolvedValue([]),
+      ...options.workspaceRegistry,
     },
     workspaceLabelService: options.workspaceLabelService,
     scheduleService: asScheduleService(),
@@ -2055,8 +2122,12 @@ test("push token registration can be revoked by the connected client", async () 
   const session = createSessionForTest({
     messages,
     pushNotifications: asPushNotifications({
-      renew: (token: string) => renewed.push(token),
-      revoke: (token: string) => revoked.push(token),
+      renew: async (token: string) => {
+        renewed.push(token);
+      },
+      revoke: async (token: string) => {
+        revoked.push(token);
+      },
     }),
   });
 
@@ -2093,8 +2164,10 @@ test("push token revocation only acknowledges durable removal", async () => {
   const session = createSessionForTest({
     messages,
     pushNotifications: asPushNotifications({
-      renew: (token: string) => renewed.push(token),
-      revoke: () => {
+      renew: async (token: string) => {
+        renewed.push(token);
+      },
+      revoke: async () => {
         throw new Error("disk full");
       },
     }),
@@ -2128,6 +2201,97 @@ test("push token revocation only acknowledges durable removal", async () => {
       code: "handler_error",
     },
   });
+});
+
+test("push registration waits for persistence before renewing that token on heartbeats", async () => {
+  const entered = deferred<void>();
+  const persisted = deferred<void>();
+  const renewed: string[] = [];
+  const session = createSessionForTest({
+    pushNotifications: asPushNotifications({
+      renew: async (token: string) => {
+        renewed.push(token);
+        entered.resolve();
+        await persisted.promise;
+      },
+    }),
+  });
+  let registered = false;
+  const registration = session
+    .handleMessage({ type: "register_push_token", token: "device" })
+    .then(() => {
+      registered = true;
+      return undefined;
+    });
+  await entered.promise;
+  expect(registered).toBe(false);
+  persisted.resolve();
+  await registration;
+  await session.handleMessage({
+    type: "client_heartbeat",
+    deviceType: "mobile",
+    focusedAgentId: null,
+    lastActivityAt: "2026-08-10T00:00:00.000Z",
+    appVisible: false,
+  });
+  expect(renewed).toEqual(["device", "device"]);
+});
+
+test("failed async push registration does not retain the token for heartbeat renewal", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const renewed: string[] = [];
+  const session = createSessionForTest({
+    messages,
+    pushNotifications: asPushNotifications({
+      renew: async (token: string) => {
+        renewed.push(token);
+        throw new Error("push write failed");
+      },
+    }),
+  });
+  await session.handleMessage({ type: "register_push_token", token: "device" });
+  await session.handleMessage({
+    type: "client_heartbeat",
+    deviceType: "mobile",
+    focusedAgentId: null,
+    lastActivityAt: "2026-08-10T00:00:00.000Z",
+    appVisible: false,
+  });
+  expect(renewed).toEqual(["device"]);
+  expect(messages).toEqual([
+    expect.objectContaining({
+      type: "activity_log",
+      payload: expect.objectContaining({ content: "Error: push write failed" }),
+    }),
+  ]);
+});
+
+test("heartbeat push renewal failures use session error delivery", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  let renewals = 0;
+  const session = createSessionForTest({
+    messages,
+    pushNotifications: asPushNotifications({
+      renew: async () => {
+        if (++renewals > 1) throw new Error("push renewal failed");
+      },
+    }),
+  });
+  await session.handleMessage({ type: "register_push_token", token: "device" });
+  await session.handleMessage({
+    type: "client_heartbeat",
+    deviceType: "mobile",
+    focusedAgentId: null,
+    lastActivityAt: "2026-08-10T00:00:00.000Z",
+    appVisible: false,
+  });
+  expect(renewals).toBe(2);
+  expect(messages).toEqual([
+    expect.objectContaining({
+      type: "activity_log",
+      payload: expect.objectContaining({ content: "Error: push renewal failed" }),
+    }),
+  ]);
 });
 
 describe("daemon status + pairing RPC", () => {
@@ -2194,7 +2358,7 @@ describe("daemon status + pairing RPC", () => {
       reason: "still alive" as const,
       detail: "survived SIGKILL",
     };
-    await writeTerminalCleanupRecord(paseoHome, {
+    await writeTerminalCleanupRecord(terminalWorkerHome(paseoHome, "srv-test"), {
       recordId: "closing-record",
       pid: 4241,
       bootId: null,
@@ -2229,8 +2393,9 @@ describe("daemon status + pairing RPC", () => {
   test("daemon.get_status.request fails when a terminal cleanup record cannot be read", async () => {
     const messages: unknown[] = [];
     const paseoHome = makeHome();
-    mkdirSync(terminalWorkerDirectory(paseoHome), { recursive: true });
-    const cleanupPath = terminalCleanupRecordPath(paseoHome, "closing-record");
+    const workerHome = terminalWorkerHome(paseoHome, "srv-test");
+    mkdirSync(terminalWorkerDirectory(workerHome), { recursive: true });
+    const cleanupPath = terminalCleanupRecordPath(workerHome, "closing-record");
     writeFileSync(cleanupPath, "{ not json");
     const session = createSessionForTest({
       messages,
@@ -2256,6 +2421,36 @@ describe("daemon status + pairing RPC", () => {
       expect.objectContaining({ type: "daemon.get_status.response" }),
     );
   });
+
+  test.each([undefined, "srv-test"])(
+    "daemon status ignores foreign and legacy terminal cleanup records for %s",
+    async (serverId) => {
+      const messages: SessionOutboundMessage[] = [];
+      const paseoHome = makeHome();
+      for (const workerHome of [paseoHome, terminalWorkerHome(paseoHome, "srv-other")]) {
+        mkdirSync(terminalWorkerDirectory(workerHome), { recursive: true });
+        writeFileSync(terminalCleanupRecordPath(workerHome, "unreadable"), "{ not json");
+      }
+      const session = createSessionForTest({
+        messages,
+        paseoHome,
+        serverId,
+        agentManager: { listProviderAvailability: async () => [] },
+      });
+
+      await session.handleMessage({
+        type: "daemon.get_status.request",
+        requestId: "status-scoped",
+      });
+
+      expect(messages).toEqual([
+        expect.objectContaining({
+          type: "daemon.get_status.response",
+          payload: expect.objectContaining({ terminalCleanupUnconfirmed: [] }),
+        }),
+      ]);
+    },
+  );
 
   test("daemon.get_status.request falls back to a null/empty status when provider listing fails", async () => {
     const messages: unknown[] = [];
@@ -2626,6 +2821,11 @@ describe("session checkout merge handling", () => {
       workspaceGitService,
       messages,
     });
+    gitCommandMocks.runGitCommand.mockResolvedValue({
+      stdout: "refs/heads/main\0/tmp/base-worktree\0",
+      stderr: "",
+      exitCode: 0,
+    });
 
     checkoutGitMocks.mergeToBase.mockResolvedValue("/tmp/base-worktree");
 
@@ -2660,6 +2860,99 @@ describe("session checkout merge handling", () => {
         success: true,
         error: null,
         requestId: "request-1",
+      },
+    });
+  });
+
+  test("rejects merge-to-base when the base worktree belongs to another host", async () => {
+    const messages: unknown[] = [];
+    const foreignBase = createPersistedWorkspaceRecord({
+      workspaceId: "ws-foreign-base",
+      projectId: "project-repo",
+      cwd: "/tmp/foreign-base-worktree",
+      kind: "worktree",
+      displayName: "foreign-base",
+      hostId: "srv-other",
+      branch: "main",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const workspaceGitService = {
+      getSnapshot: vi.fn().mockResolvedValue(
+        createWorkspaceGitSnapshot("/tmp/request-worktree", {
+          git: { isGit: true, baseRef: "main", isDirty: false },
+        }),
+      ),
+    };
+    gitCommandMocks.runGitCommand.mockResolvedValue({
+      stdout: "refs/heads/main\0/tmp/foreign-base-worktree\0",
+      stderr: "",
+      exitCode: 0,
+    });
+    const session = createSessionForTest({
+      serverId: "srv-local",
+      workspaceRegistry: {
+        get: vi.fn(),
+        list: vi.fn().mockResolvedValue([foreignBase]),
+      },
+      workspaceGitService,
+      messages,
+    });
+
+    await session.handleMessage({
+      type: "checkout_merge_request",
+      cwd: "/tmp/request-worktree",
+      baseRef: "main",
+      requestId: "foreign-base",
+    });
+
+    expect(checkoutGitMocks.mergeToBase).not.toHaveBeenCalled();
+    expect(messages).toContainEqual({
+      type: "checkout_merge_response",
+      payload: {
+        cwd: "/tmp/request-worktree",
+        success: false,
+        error: {
+          code: "UNKNOWN",
+          message: "Workspace ws-foreign-base is owned by host srv-other",
+        },
+        requestId: "foreign-base",
+      },
+    });
+  });
+
+  test("falls back to the current worktree when the base worktree cannot be resolved", async () => {
+    const messages: unknown[] = [];
+    const workspaceGitService = {
+      getSnapshot: vi.fn().mockResolvedValue(
+        createWorkspaceGitSnapshot("/tmp/request-worktree", {
+          git: { isGit: true, baseRef: "main", isDirty: false },
+        }),
+      ),
+    };
+    gitCommandMocks.runGitCommand.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+    checkoutGitMocks.mergeToBase.mockResolvedValue("/tmp/request-worktree");
+    const session = createSessionForTest({ workspaceGitService, messages });
+
+    await session.handleMessage({
+      type: "checkout_merge_request",
+      cwd: "/tmp/request-worktree",
+      baseRef: "main",
+      requestId: "fallback-current-worktree",
+    });
+
+    expect(checkoutGitMocks.mergeToBase).toHaveBeenCalledWith(
+      "/tmp/request-worktree",
+      { baseRef: "main", mode: "merge" },
+      { paseoHome: "/tmp/paseo-home", worktreesRoot: undefined },
+    );
+    expect(messages).toContainEqual({
+      type: "checkout_merge_response",
+      payload: {
+        cwd: "/tmp/request-worktree",
+        success: true,
+        error: null,
+        requestId: "fallback-current-worktree",
       },
     });
   });

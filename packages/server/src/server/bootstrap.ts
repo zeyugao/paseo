@@ -15,6 +15,7 @@ import { createServer as createHTTPServer, type IncomingMessage, type ServerResp
 import { constants, existsSync, unlinkSync } from "fs";
 import { open, rm, stat } from "fs/promises";
 import { randomUUID } from "node:crypto";
+import type { Socket } from "node:net";
 import { getHostName } from "./host-name.js";
 import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -128,12 +129,62 @@ export async function fanOutReconciledWorkspaceUpdates(input: {
   );
 }
 
+const DAEMON_INSTANCE_HEARTBEAT_INTERVAL_MS = 30_000;
+const DAEMON_INSTANCE_HEARTBEAT_FAILURE_LIMIT = 3;
+
+export function createDaemonInstanceHeartbeatErrorHandler(input: {
+  serverId: string;
+  logger: Pick<Logger, "error" | "fatal">;
+  shutdown: (error: unknown) => void;
+  now?: () => number;
+}): (error: unknown) => void {
+  const recentFailures: number[] = [];
+  const now = input.now ?? Date.now;
+  let shutdownRequested = false;
+
+  return (error) => {
+    if (shutdownRequested) return;
+    if (error instanceof DaemonInstanceLeaseLostError) {
+      shutdownRequested = true;
+      input.logger.fatal(
+        { err: error, serverId: input.serverId },
+        "Daemon instance lease lost to another daemon; stopping",
+      );
+      input.shutdown(error);
+      return;
+    }
+
+    const failedAt = now();
+    const failureWindowMs =
+      DAEMON_INSTANCE_HEARTBEAT_INTERVAL_MS * DAEMON_INSTANCE_HEARTBEAT_FAILURE_LIMIT;
+    recentFailures.push(failedAt);
+    while (recentFailures[0] !== undefined && failedAt - recentFailures[0] >= failureWindowMs) {
+      recentFailures.shift();
+    }
+    input.logger.error(
+      { err: error, serverId: input.serverId },
+      "Daemon instance heartbeat failed",
+    );
+    if (recentFailures.length < DAEMON_INSTANCE_HEARTBEAT_FAILURE_LIMIT) return;
+
+    shutdownRequested = true;
+    input.logger.fatal(
+      { err: error, serverId: input.serverId, consecutiveFailures: recentFailures.length },
+      "Daemon instance heartbeat failed repeatedly; stopping",
+    );
+    input.shutdown(error);
+  };
+}
+
 import { VoiceAssistantWebSocketServer, isDaemonOriginAllowed } from "./websocket-server.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { createWorkspaceLabelService } from "./workspace-labels/index.js";
 import { createGitHubService } from "../services/github-service.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
-import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import {
+  createWorkspaceProvisioningService,
+  type WorkspaceProvisioningService,
+} from "./session/workspace-provisioning/workspace-provisioning-service.js";
 import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import { formatAttachmentContentDisposition } from "./file-download/content-disposition.js";
@@ -158,10 +209,14 @@ import { WorkspaceReconciliationService } from "./workspace-reconciliation-servi
 import {
   FileBackedProjectRegistry,
   FileBackedWorkspaceRegistry,
+  assertCwdWorkspaceOwnedByThisServer,
+  isWorkspaceVisibleToServer,
+  resolveCwdWorkspaceHost,
   type WorkspaceArchiveContext,
+  type WorkspaceRegistry,
 } from "./workspace-registry.js";
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
-import { ScheduleService } from "./schedule/service.js";
+import { ScheduleService, type ScheduleServiceOptions } from "./schedule/service.js";
 import { DaemonConfigStore, type MutableDaemonConfig } from "./daemon-config-store.js";
 import { createOrchestrationSkills } from "./orchestration-skills/index.js";
 import {
@@ -183,9 +238,14 @@ import {
 import { setupAutoArchiveOnMerge } from "./auto-archive-on-merge/index.js";
 import { wrapSessionMessage, type SessionOutboundMessage } from "./messages.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
-import { startWorkerTerminalManager } from "../terminal/worker-terminal-manager.js";
+import { createDeferredWorkerTerminalManager } from "../terminal/worker-terminal-manager.js";
 import { applyTerminalAgentHookSetting } from "../terminal/agent-hooks/terminal-agent-hook-setting.js";
 import { loadOrCreateDaemonKeyPair } from "./daemon-keypair.js";
+import {
+  DaemonInstanceLeaseLostError,
+  registerDaemonInstance,
+  type DaemonInstanceRegistration,
+} from "./daemon-instance-registry.js";
 import { createRelayRuntime, type RelayRuntime } from "./relay-runtime.js";
 import { admitSecuredRelaySocket } from "./websocket/secure-relay-ingress.js";
 import type { PushNotificationSender } from "./push/index.js";
@@ -228,6 +288,7 @@ import {
 import { deleteLocalCredential, writeLocalCredential } from "./local-credential.js";
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
+import { AgentTitleRefiner } from "./agent/agent-title-refiner.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
 import { configureGitProcessPolicy } from "../utils/run-git-command.js";
@@ -257,6 +318,33 @@ const MCP_DEBUG_BATCH_LIMIT = 10;
 const MCP_DEBUG_SECRET = "[redacted]";
 const DOWNLOAD_OPEN_FLAGS =
   process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
+
+export function createScheduleLocalWorkspaceHandler(dependencies: {
+  workspaceRegistry: Pick<WorkspaceRegistry, "listAll">;
+  serverId: string | undefined;
+  workspaceProvisioning: Pick<WorkspaceProvisioningService, "createWorkspaceForDirectory">;
+  workspaceAutoName: Pick<WorkspaceAutoName, "scheduleForDirectory">;
+  emitWorkspaceUpdates: (workspaceIds: Iterable<string>) => Promise<void>;
+}): ScheduleServiceOptions["createDirectoryWorkspace"] {
+  return async (input) => {
+    await assertCwdWorkspaceOwnedByThisServer(
+      input.cwd,
+      dependencies.workspaceRegistry,
+      dependencies.serverId,
+    );
+    const workspace = await dependencies.workspaceProvisioning.createWorkspaceForDirectory(
+      input.cwd,
+      resolveFirstAgentPromptTitle(input.firstAgentContext),
+    );
+    dependencies.workspaceAutoName.scheduleForDirectory({
+      workspaceId: workspace.workspaceId,
+      cwd: workspace.cwd,
+      firstAgentContext: input.firstAgentContext,
+    });
+    await dependencies.emitWorkspaceUpdates([workspace.workspaceId]);
+    return workspace;
+  };
+}
 
 function formatHostForHttpUrl(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -481,6 +569,8 @@ export interface PaseoDaemonConfig {
   providerOverrides?: Record<string, ProviderOverride>;
   log?: PersistedConfig["log"];
   onLifecycleIntent?: (intent: DaemonLifecycleIntent) => void;
+  /** Called after a lost instance lease has shut the daemon down; the supervised worker uses it to exit the process. */
+  onLeaseLost?: (error: unknown) => void;
   pushNotificationSender?: PushNotificationSender;
   managedProcesses?: ManagedProcessRegistry;
   configReload?: {
@@ -525,6 +615,7 @@ function resolveBuiltinPluginLoader(dependencies: PaseoDaemonDependencies): Buil
 
 function createBootstrapManagedProcessRegistry(
   config: Pick<PaseoDaemonConfig, "paseoHome" | "managedProcesses">,
+  serverId: string,
   logger: Logger,
 ): ManagedProcessRegistry {
   if (config.managedProcesses) {
@@ -533,6 +624,7 @@ function createBootstrapManagedProcessRegistry(
 
   return createManagedProcessRegistry({
     paseoHome: config.paseoHome,
+    serverId,
     processTable: createSystemManagedProcessTable(),
     terminateProcess: terminateWithTreeKill,
     logger,
@@ -686,15 +778,10 @@ export async function createPaseoDaemon(
   });
 
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
-  const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
-  const managedProcesses = createBootstrapManagedProcessRegistry(config, logger);
-  // Reconcile the helper-process ledger in the background so it never blocks the
-  // daemon from coming up; terminating a live leftover can take a few seconds.
-  // Best-effort, so a failure is logged here rather than crashing startup.
-  void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
-    logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
-  });
+  const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, { serverId, logger });
+  const managedProcesses = createBootstrapManagedProcessRegistry(config, serverId, logger);
   let relayRuntime: RelayRuntime | null = null;
+  let daemonInstanceRegistration: DaemonInstanceRegistration | null = null;
 
   const staticDir = config.staticDir;
   const downloadTokenTtlMs = config.downloadTokenTtlMs ?? 60000;
@@ -721,8 +808,9 @@ export async function createPaseoDaemon(
   });
   let boundListenTarget: ListenTarget | null = null;
   let workspaceRegistry: FileBackedWorkspaceRegistry | null = null;
-  const terminalManager = await startWorkerTerminalManager({
+  const terminalManager = createDeferredWorkerTerminalManager({
     paseoHome: config.paseoHome,
+    serverId,
     paseoVersion: daemonVersion,
     logger,
     getTerminalActivityUrl: () => createTerminalActivityUrl(boundListenTarget),
@@ -840,6 +928,7 @@ export async function createPaseoDaemon(
   mountWebUi(app, config, logger);
 
   let localCredential: string | null = null;
+  let mirrorsLegacyCredential = false;
   const daemonAuth = { ...config.auth, localCredential: () => localCredential };
   app.use(
     createRequireBearerMiddleware(daemonAuth, (context) => {
@@ -927,6 +1016,14 @@ export async function createPaseoDaemon(
   });
 
   const httpServer = createHTTPServer(app);
+  // Track every accepted socket from birth so shutdown can destroy any that
+  // closeAllConnections() leaves behind (e.g. an unanswered WebSocket upgrade
+  // request arriving after the WS server stopped listening for upgrades).
+  const httpServerSockets = new Set<Socket>();
+  httpServer.on("connection", (socket) => {
+    httpServerSockets.add(socket);
+    socket.on("close", () => httpServerSockets.delete(socket));
+  });
 
   // Script proxy WebSocket upgrade handler — must be registered before the
   // VoiceAssistantWebSocketServer attaches its own "upgrade" listener so that
@@ -950,6 +1047,7 @@ export async function createPaseoDaemon(
   const workspaceLabelService = createWorkspaceLabelService({
     paseoHome: config.paseoHome,
     workspaceRegistry,
+    serverId,
   });
   const github = createGitHubService();
   const workspaceGitService = new WorkspaceGitServiceImpl({
@@ -1020,11 +1118,13 @@ export async function createPaseoDaemon(
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
   const agentManager = new AgentManager({
+    serverId,
     pluginLifecycle: pluginRuntime,
     pluginAgentTools: pluginRuntime,
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
     registry: agentStorage,
+    workspaceRegistry,
     appendSystemPrompt: config.appendSystemPrompt,
     onWorkspaceStateMayHaveChanged: ({ cwd }) => {
       workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
@@ -1050,6 +1150,7 @@ export async function createPaseoDaemon(
     logger,
     agentManager,
     agentStorage,
+    serverId,
   );
   await agentStorage.initialize();
   const restartRecovery = createRestartRecovery({
@@ -1058,13 +1159,17 @@ export async function createPaseoDaemon(
       enabled: daemonConfigStore.get().resumeOnStartup === true,
       prompt: daemonConfigStore.get().resumePrompt ?? "Resume working.",
     }),
+    mutable: async (record) => {
+      if (record.hostId !== undefined && record.hostId !== serverId) return false;
+      const workspace = record.workspaceId ? await workspaceRegistry.get(record.workspaceId) : null;
+      return !workspace || isWorkspaceVisibleToServer(workspace, serverId);
+    },
     eligible: async (record) =>
       !record.workspaceId || !(await workspaceRegistry?.get(record.workspaceId))?.archivedAt,
     dispatch: (agentId, prompt) =>
       sendPromptToAgent({ agentId, prompt, agentManager, agentStorage, logger, unarchive: false }),
     report: (agentId, err) => logger.error({ agentId, err }, "Agent restart recovery failed"),
   });
-  await restartRecovery.prepareStartup();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
   await bootstrapWorkspaceRegistries({
     serverId,
@@ -1121,11 +1226,15 @@ export async function createPaseoDaemon(
     if (!existingWorkspace || existingWorkspace.archivedAt) return;
     teardownArchivedWorkspaceRuntime(workspaceId);
   };
-  // external path→workspace adapter, not ownership: archive-by-path requests that
-  // arrive with a worktree path and no workspaceId (old clients / CLI).
+  // Legacy path-based requests resolve only the current host's workspace.
   const findWorkspaceIdForCwdExternal = async (cwd: string): Promise<string | null> => {
     // Explicit archive administration must prefer an archived exact match to an active ancestor.
-    return resolveWorkspaceIdForPath(cwd, await workspaceRegistry.listAll());
+    return resolveWorkspaceIdForPath(
+      cwd,
+      (await workspaceRegistry.listAll()).filter((workspace) =>
+        isWorkspaceVisibleToServer(workspace, serverId),
+      ),
+    );
   };
   const ensureWorkspaceForCreateExternal = async (
     cwd: string,
@@ -1150,6 +1259,7 @@ export async function createPaseoDaemon(
   const listActiveWorkspacesExternal = async (): Promise<ActiveWorkspaceRef[]> => {
     const workspaces = await workspaceRegistry.listActive();
     return workspaces
+      .filter((workspace) => isWorkspaceVisibleToServer(workspace, serverId))
       .filter((workspace) => !workspace.archivedAt)
       .map((workspace) => ({
         workspaceId: workspace.workspaceId,
@@ -1160,6 +1270,19 @@ export async function createPaseoDaemon(
         mainRepoRoot: workspace.mainRepoRoot,
       }));
   };
+  // Unfiltered view for destructive disk safety checks: a foreign host's
+  // workspace referencing the same backing directory must still block deletion.
+  const listAllActiveWorkspacesExternal = async (): Promise<ActiveWorkspaceRef[]> =>
+    (await workspaceRegistry.listActive())
+      .filter((workspace) => !workspace.archivedAt)
+      .map((workspace) => ({
+        workspaceId: workspace.workspaceId,
+        cwd: workspace.cwd,
+        kind: workspace.kind,
+        worktreeRoot: workspace.worktreeRoot,
+        isPaseoOwnedWorktree: workspace.isPaseoOwnedWorktree,
+        mainRepoRoot: workspace.mainRepoRoot,
+      }));
   const markWorkspaceArchivingExternal = (workspaceIds: Iterable<string>, archivingAt: string) => {
     const workspaceIdList = Array.from(workspaceIds);
     for (const session of wsServer?.listSessions() ?? []) {
@@ -1213,6 +1336,16 @@ export async function createPaseoDaemon(
     logger,
   });
 
+  agentManager.attachTitleRefiner(
+    new AgentTitleRefiner({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager,
+      readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
+      logger,
+    }),
+  );
+
   setupAutoArchiveOnMerge({
     paseoHome: config.paseoHome,
     paseoWorktreesBaseRoot: config.worktreesRoot,
@@ -1224,7 +1357,10 @@ export async function createPaseoDaemon(
     terminalManager,
     logger,
     findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+    assertCwdWorkspaceOwnedByThisServer: (cwd) =>
+      assertCwdWorkspaceOwnedByThisServer(cwd, workspaceRegistry, serverId),
     listActiveWorkspaces: listActiveWorkspacesExternal,
+    listAllActiveWorkspaces: listAllActiveWorkspacesExternal,
     getAutoArchivedChangeRequestUrl: async (workspaceId) =>
       (await workspaceRegistry.get(workspaceId))?.autoArchivedChangeRequestUrl ?? null,
     archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
@@ -1303,13 +1439,17 @@ export async function createPaseoDaemon(
     archiveByScope(
       {
         paseoHome: config.paseoHome,
+        serverId,
         paseoWorktreesBaseRoot: config.worktreesRoot,
         github,
         workspaceGitService,
         agentManager,
         agentStorage,
         findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+        assertCwdWorkspaceOwnedByThisServer: (cwd) =>
+          assertCwdWorkspaceOwnedByThisServer(cwd, workspaceRegistry, serverId),
         listActiveWorkspaces: listActiveWorkspacesExternal,
+        listAllActiveWorkspaces: listAllActiveWorkspacesExternal,
         getWorkspace: (workspaceIdToGet) => workspaceRegistry.get(workspaceIdToGet),
         archiveWorkspaceRecord: (workspaceIdToArchive, archivedAt) =>
           archiveWorkspaceRecordExternal(workspaceIdToArchive, undefined, archivedAt),
@@ -1336,6 +1476,7 @@ export async function createPaseoDaemon(
     archiveAgentForClose: (agentId) =>
       archiveAgentCommand({ agentManager, agentStorage, logger }, agentId),
     findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+    listAllActiveWorkspaces: listAllActiveWorkspacesExternal,
     listActiveWorkspaces: listActiveWorkspacesExternal,
     archiveWorkspaceRecord: (workspaceId) => archiveWorkspaceRecordExternal(workspaceId),
     emit: emitExternalSessionMessage,
@@ -1345,6 +1486,8 @@ export async function createPaseoDaemon(
     clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
     killTerminalsForWorkspace: (workspaceId) =>
       killTerminalsForWorkspace({ terminalManager, sessionLogger: logger }, workspaceId),
+    assertCwdWorkspaceOwnedByThisServer: (cwd) =>
+      assertCwdWorkspaceOwnedByThisServer(cwd, workspaceRegistry, serverId),
     logger,
   });
   const hubRelationships = new HubRelationshipController({
@@ -1384,6 +1527,7 @@ export async function createPaseoDaemon(
     createExecutionAgents: (daemonId) =>
       new DaemonExecutions({
         daemonId,
+        serverId,
         agentManager,
         agentStorage,
         createAgent,
@@ -1394,22 +1538,13 @@ export async function createPaseoDaemon(
       }),
   });
 
-  const createScheduleLocalWorkspaceExternal = async (input: {
-    cwd: string;
-    firstAgentContext: FirstAgentContext;
-  }) => {
-    const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
-      input.cwd,
-      resolveFirstAgentPromptTitle(input.firstAgentContext),
-    );
-    workspaceAutoName.scheduleForDirectory({
-      workspaceId: workspace.workspaceId,
-      cwd: workspace.cwd,
-      firstAgentContext: input.firstAgentContext,
-    });
-    await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
-    return workspace;
-  };
+  const createScheduleLocalWorkspaceExternal = createScheduleLocalWorkspaceHandler({
+    workspaceRegistry,
+    serverId,
+    workspaceProvisioning,
+    workspaceAutoName,
+    emitWorkspaceUpdates: emitWorkspaceUpdatesExternal,
+  });
   const createSchedulePaseoWorktreeExternal = async (input: {
     cwd: string;
     firstAgentContext: FirstAgentContext;
@@ -1425,12 +1560,16 @@ export async function createPaseoDaemon(
     await archiveByScope(
       {
         paseoHome: config.paseoHome,
+        serverId,
         paseoWorktreesBaseRoot: config.worktreesRoot,
         github,
         workspaceGitService,
         agentManager,
         agentStorage,
         findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
+        assertCwdWorkspaceOwnedByThisServer: (cwd) =>
+          assertCwdWorkspaceOwnedByThisServer(cwd, workspaceRegistry, serverId),
+        listAllActiveWorkspaces: listAllActiveWorkspacesExternal,
         listActiveWorkspaces: listActiveWorkspacesExternal,
         getWorkspace: (workspaceIdToGet) => workspaceRegistry.get(workspaceIdToGet),
         archiveWorkspaceRecord: (workspaceIdToArchive, archivedAt) =>
@@ -1458,6 +1597,7 @@ export async function createPaseoDaemon(
     );
   };
   const scheduleService = new ScheduleService({
+    serverId,
     paseoHome: config.paseoHome,
     logger,
     agentManager,
@@ -1466,9 +1606,12 @@ export async function createPaseoDaemon(
     createDirectoryWorkspace: createScheduleLocalWorkspaceExternal,
     createPaseoWorktreeWorkspace: createSchedulePaseoWorktreeExternal,
     archiveWorkspace: archiveScheduleWorkspaceExternal,
+    assertCwdWorkspaceOwnedByThisServer: (cwd) =>
+      assertCwdWorkspaceOwnedByThisServer(cwd, workspaceRegistry, serverId),
+    resolveCwdWorkspaceHost: (cwd) => resolveCwdWorkspaceHost(cwd, workspaceRegistry),
   });
-  await scheduleService.start();
-
+  // Deferred to start() after the instance lease is held: a rejected
+  // competitor must never interrupt the live daemon's schedule recovery.
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {
       await scheduleService.completeForAgent(agentId);
@@ -1547,6 +1690,7 @@ export async function createPaseoDaemon(
     },
     agentManager,
     agentStorage,
+
     terminalManager,
     getDaemonTcpPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
     scheduleService,
@@ -1556,6 +1700,7 @@ export async function createPaseoDaemon(
     workspaceGitService,
     findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
     listActiveWorkspaces: listActiveWorkspacesExternal,
+    listAllActiveWorkspaces: listAllActiveWorkspacesExternal,
     archiveWorkspaceRecord: (workspaceId, archivedAt) =>
       archiveWorkspaceRecordExternal(workspaceId, undefined, archivedAt),
     emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
@@ -1748,11 +1893,44 @@ export async function createPaseoDaemon(
   }
 
   logger.info({ elapsed: elapsed() }, "Bootstrap complete, ready to start listening");
+  // Defined before `start` so the heartbeat callback can trigger it without a
+  // promise chain inside a callback; `stop` is defined by the time it runs.
+  const shutdownAfterLeaseLoss = async (leaseError: unknown): Promise<void> => {
+    try {
+      await stop();
+    } catch (stopError) {
+      logger.error({ err: stopError, serverId }, "Shutdown after lease loss failed");
+    } finally {
+      config.onLeaseLost?.(leaseError);
+    }
+  };
+  const handleDaemonInstanceHeartbeatError = createDaemonInstanceHeartbeatErrorHandler({
+    serverId,
+    logger,
+    shutdown: (error) => void shutdownAfterLeaseLoss(error),
+  });
 
   const start = async () => {
     let mainStarted = false;
     try {
-      localCredential = await writeLocalCredential(config.paseoHome);
+      const registration = await registerDaemonInstance(config.paseoHome, serverId, {
+        onHeartbeatError: handleDaemonInstanceHeartbeatError,
+      });
+      daemonInstanceRegistration = registration;
+      await terminalManager.activate();
+      await restartRecovery.prepareStartup();
+      // Reconcile only after this daemon owns the instance lease. A rejected
+      // competitor must never terminate helpers owned by the live daemon.
+      // Best-effort and backgrounded because terminating leftovers can take seconds.
+      void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
+        logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
+      });
+      await scheduleService.start();
+      mirrorsLegacyCredential = process.env.PASEO_PID_LOCK_OWNER !== "0";
+      localCredential = await writeLocalCredential(config.paseoHome, {
+        serverId,
+        mirrorLegacy: mirrorsLegacyCredential,
+      });
       if (serviceProxyListenTarget) {
         const boundServiceProxyTarget = await serviceProxy.startStandalone({
           listenTarget: serviceProxyListenTarget,
@@ -1963,89 +2141,137 @@ export async function createPaseoDaemon(
       // model loading doesn't block the server from accepting connections.
       speechService.start();
       scriptHealthMonitor.start();
+      await registration.updateListen(formatListenTarget(boundListenTarget)!);
     } catch (error) {
+      scheduleService.stopScheduling();
+      const credentialToDelete = localCredential;
       localCredential = null;
-      await deleteLocalCredential(config.paseoHome);
+      if (credentialToDelete !== null) {
+        await deleteLocalCredential(config.paseoHome, {
+          serverId,
+          token: credentialToDelete,
+          deleteLegacy: mirrorsLegacyCredential,
+        }).catch((deleteError) => {
+          logger.warn({ err: deleteError, serverId }, "Failed to delete local credential");
+        });
+      }
       unsubscribePluginProviders();
       unsubscribePluginSessionChanges();
-      await pluginRuntime.stopAllPlugins().catch(() => undefined);
+      agentManager.prepareForShutdown();
+      await closeAllAgents(logger, agentManager);
       await serviceProxy.stopStandalone().catch(() => undefined);
-      await agentProviderRuntime.shutdown().catch(() => undefined);
+      await agentProviderRuntime
+        .shutdown()
+        .then((closedProviders) => agentManager.finishProviderShutdown(closedProviders))
+        .catch((shutdownError) => {
+          logger.warn({ err: shutdownError }, "Failed to shut down agent provider runtime");
+        });
+      await scheduleService.stop();
+      await pluginRuntime.stopAllPlugins().catch(() => undefined);
       if (mainStarted) {
         httpServer.closeAllConnections();
-        await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+        // Promise.withResolvers is unavailable under the ES2023 lib target.
+        await new Promise<void>((resolve) => {
+          httpServer.close(() => resolve());
+        });
       }
+      await daemonInstanceRegistration?.release().catch((releaseError) => {
+        logger.warn({ err: releaseError, serverId }, "Failed to release daemon instance registry");
+      });
+      daemonInstanceRegistration = null;
       throw error;
     }
   };
 
   const stop = async (options?: { keepTerminals?: boolean }) => {
+    scheduleService.stopScheduling();
     const keepTerminals = options?.keepTerminals === true;
     let terminalShutdownError: unknown = null;
+    const credentialToDelete = localCredential;
     localCredential = null;
-    await deleteLocalCredential(config.paseoHome);
-    // Stop tracking plugin provider registrations before anything tears plugins
-    // down, so plugin shutdown cannot withdraw a provider from under an agent
-    // that is still open. Plugins themselves are stopped once every session
-    // they serve has been closed, further down.
-    unsubscribePluginProviders();
-    unsubscribePluginSessionChanges();
-    await hubRelationships.stop();
-    workspaceReconciliation.dispose();
-    scriptHealthMonitor.stop();
-    unsubscribeIdleRuntimeCleanup();
-    await idleRuntimeCleanup.close();
-    // Freeze both ingress and registration before taking the agent closure snapshot.
-    wsServer?.prepareForShutdown();
-    await finishSubscriptions.close();
-    await wsServer?.agentMessages.close();
-    agentManager.prepareForShutdown();
-    await restartRecovery.captureRunningAgents();
-    await closeAllAgents(logger, agentManager);
-    await withTimeout({
-      promise: pluginRuntime.drainEvents(),
-      timeoutMs: AGENT_CLOSE_TIMEOUT_MS,
-      label: "drain plugin lifecycle events",
-    }).catch((error) => logger.warn({ err: error }, "Plugin lifecycle events did not finish"));
-    await agentManager.flushForShutdown().catch(() => undefined);
-    detachAgentStoragePersistence();
-    await agentStorage.flush().catch(() => undefined);
-    await agentProviderRuntime.shutdown();
-    await pluginRuntime.stopAllPlugins();
     try {
-      if (keepTerminals) {
-        await terminalManager.detach();
-        logger.info("Terminals left running for the next daemon");
-      } else {
-        await terminalManager.closeTerminals();
+      if (credentialToDelete !== null) {
+        await deleteLocalCredential(config.paseoHome, {
+          serverId,
+          token: credentialToDelete,
+          deleteLegacy: mirrorsLegacyCredential,
+        }).catch((error) => {
+          logger.warn({ err: error, serverId }, "Failed to delete local credential");
+        });
       }
-    } catch (error) {
-      // Finish the rest of the shutdown, then report it: the supervisor and `daemon stop`
-      // retry the cleanup from the record the reaper kept.
-      terminalShutdownError = error;
-      logger.error({ err: error }, "Terminal shutdown failed");
-    }
-    await speechService.stop();
-    await scheduleService.stop().catch(() => undefined);
-    await relayRuntime?.stop().catch(() => undefined);
-    if (wsServer) {
-      await wsServer.close();
-    }
-    await serviceProxy.stopStandalone();
-    // Force-drop remaining sockets so httpServer.close() resolves promptly.
-    // We've already closed wsServer (which sent ws-layer close frames) and
-    // stopped every other service, so anything still attached is a TCP
-    // socket whose higher-level shutdown hasn't fully released it (e.g.
-    // upgraded WS sockets in the closing handshake, or HTTP keep-alive
-    // sockets in CLOSE_WAIT). closeIdleConnections() does not catch
-    // upgraded sockets, so we use closeAllConnections() here.
-    httpServer.closeAllConnections();
-    await new Promise<void>((resolve) => {
-      httpServer.close(() => resolve());
-    });
-    // Clean up socket files
-    if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
-      unlinkSync(listenTarget.path);
+      // Stop tracking plugin provider registrations before anything tears plugins
+      // down, so plugin shutdown cannot withdraw a provider from under an agent
+      // that is still open. Plugins themselves are stopped once every session
+      // they serve has been closed, further down.
+      unsubscribePluginProviders();
+      unsubscribePluginSessionChanges();
+      await hubRelationships.stop();
+      workspaceReconciliation.dispose();
+      scriptHealthMonitor.stop();
+      unsubscribeIdleRuntimeCleanup();
+      await idleRuntimeCleanup.close();
+      // Freeze both ingress and registration before taking the agent closure snapshot.
+      wsServer?.prepareForShutdown();
+      await finishSubscriptions.close();
+      await wsServer?.agentMessages.close();
+      agentManager.prepareForShutdown();
+      await restartRecovery.captureRunningAgents();
+      await closeAllAgents(logger, agentManager);
+      await withTimeout({
+        promise: pluginRuntime.drainEvents(),
+        timeoutMs: AGENT_CLOSE_TIMEOUT_MS,
+        label: "drain plugin lifecycle events",
+      }).catch((error) => logger.warn({ err: error }, "Plugin lifecycle events did not finish"));
+      const closedProviders = await agentProviderRuntime.shutdown();
+      await agentManager.finishProviderShutdown(closedProviders);
+      await scheduleService.stop();
+      await agentManager.flushForShutdown().catch(() => undefined);
+      detachAgentStoragePersistence();
+      await agentStorage.flush().catch(() => undefined);
+      await pluginRuntime.stopAllPlugins();
+      try {
+        if (keepTerminals) {
+          await terminalManager.detach();
+          logger.info("Terminals left running for the next daemon");
+        } else {
+          await terminalManager.closeTerminals();
+        }
+      } catch (error) {
+        // Finish the rest of the shutdown, then report it: the supervisor and `daemon stop`
+        // retry the cleanup from the record the reaper kept.
+        terminalShutdownError = error;
+        logger.error({ err: error }, "Terminal shutdown failed");
+      }
+      await speechService.stop();
+      await relayRuntime?.stop().catch(() => undefined);
+      if (wsServer) {
+        await wsServer.close();
+      }
+      await serviceProxy.stopStandalone();
+      // Close the listener before dropping connections so the accept path is
+      // dead first: a client reconnecting between closeAllConnections() and
+      // close() would otherwise be accepted and keep the close callback
+      // pending forever. Once the WebSocket server has finished closing, its
+      // upgrade listener is gone and an unanswered upgrade request can also
+      // leak a half-closed socket that closeAllConnections() leaves behind,
+      // so destroy every tracked socket as a final sweep.
+      const httpServerClosed = new Promise<void>((resolve) => {
+        httpServer.close(() => resolve());
+      });
+      httpServer.closeAllConnections();
+      for (const socket of httpServerSockets) {
+        socket.destroy();
+      }
+      await httpServerClosed;
+      // Clean up socket files
+      if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
+        unlinkSync(listenTarget.path);
+      }
+    } finally {
+      await daemonInstanceRegistration?.release().catch((error) => {
+        logger.warn({ err: error, serverId }, "Failed to release daemon instance registry");
+      });
+      daemonInstanceRegistration = null;
     }
     if (terminalShutdownError) {
       throw terminalShutdownError;
@@ -2070,8 +2296,8 @@ export async function createPaseoDaemon(
 /**
  * Closing an agent asks its provider to close the session and waits for the
  * answer. A provider that never answers must not hold the daemon open, so a
- * close that outlives this deadline is abandoned; `agentProviderRuntime`
- * shutdown runs next and rejects the request that was still pending.
+ * close that outlives this deadline is abandoned. Provider runtime shutdown
+ * confirms which sessions can be finalized before draining scheduled runs.
  */
 const AGENT_CLOSE_TIMEOUT_MS = 5_000;
 

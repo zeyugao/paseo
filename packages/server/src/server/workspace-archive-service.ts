@@ -14,10 +14,12 @@ import {
   WorktreeTeardownError,
 } from "../utils/worktree.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
-import type {
-  PersistedWorkspaceRecord,
-  WorkspaceArchiveContext,
-  WorkspaceRegistry,
+import {
+  isWorkspaceVisibleToServer,
+  type PersistedWorkspaceRecord,
+  type WorkspaceArchiveContext,
+  WorkspaceCwdOwnershipError,
+  type WorkspaceRegistry,
 } from "./workspace-registry.js";
 import { createRealpathAwarePathMatcher } from "../utils/path.js";
 import { runWithGitCommandPriority } from "../utils/run-git-command.js";
@@ -30,6 +32,7 @@ export type ActiveWorkspaceRef = Pick<
 
 export interface ArchiveDependencies {
   paseoHome?: string;
+  serverId?: string;
   // Base directory that may hold worktrees across repositories.
   paseoWorktreesBaseRoot?: string;
   github: ForgeService;
@@ -41,11 +44,14 @@ export interface ArchiveDependencies {
   // the archive target, not status/ownership.
   findWorkspaceIdForCwd: (cwd: string) => Promise<string | null>;
   getWorkspace?: (workspaceId: string) => Promise<PersistedWorkspaceRecord | null>;
-  // Active (non-archived) workspaces, used to decide whether the workspace being
-  // archived is the last reference to its backing worktree directory, and to
-  // break a same-cwd tie in favor of the worktree-kind record when archiving by
-  // path (no explicit workspaceId).
+  // Active (non-archived) workspaces visible to the caller. Used for archive
+  // target lookup and to break a same-cwd tie in favor of the worktree-kind
+  // record when archiving by path (no explicit workspaceId).
   listActiveWorkspaces: () => Promise<ActiveWorkspaceRef[]>;
+  // Unfiltered active registry view used only for destructive disk safety checks.
+  // Target discovery and mutation authorization continue to use listActiveWorkspaces.
+  // Required: a safety check must never silently degrade to a visibility-filtered view.
+  listAllActiveWorkspaces: () => Promise<ActiveWorkspaceRef[]>;
   archiveWorkspaceRecord: (workspaceId: string, archivedAt: string) => Promise<void>;
   emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds: Iterable<string>) => Promise<void>;
   markWorkspaceArchiving: (workspaceIds: Iterable<string>, archivingAt: string) => void;
@@ -53,6 +59,9 @@ export interface ArchiveDependencies {
   killTerminalsForWorkspace: (workspaceId: string) => Promise<void>;
   stopWorkspaceSetup?: (workspaceId: string) => Promise<void>;
   assertWorkspaceAutomationAllowed?: (workspaceId: string) => Promise<void>;
+  // Path-based archive and worktree disk mutations check ownership separately
+  // from the workspace ID used for record-scoped archive.
+  assertCwdWorkspaceOwnedByThisServer: (cwd: string) => Promise<void>;
   sessionLogger?: Logger;
 }
 
@@ -165,6 +174,7 @@ async function archiveByScopeWithPriority(
 
   checkpoint();
   const target = await resolveArchiveTarget(dependencies, request.scope);
+  await assertArchivePathsOwned(dependencies, target);
   const targetWorkspaceIds = target.workspaceIds;
 
   await stopWorkspaceSetups(dependencies, target.setupWorkspaceIds, request.requestId);
@@ -237,9 +247,12 @@ async function resolveArchiveTarget(
 
   if (scope.kind === "workspace") {
     const workspaceId = scope.workspaceId;
+    const persisted = await dependencies.getWorkspace?.(workspaceId);
+    if (persisted && !isWorkspaceVisibleToServer(persisted, dependencies.serverId)) {
+      throw new Error(`Workspace ${workspaceId} is owned by host ${persisted.hostId}`);
+    }
     const record =
-      (await dependencies.getWorkspace?.(workspaceId)) ??
-      activeWorkspaces.find((workspace) => workspace.workspaceId === workspaceId);
+      persisted ?? activeWorkspaces.find((workspace) => workspace.workspaceId === workspaceId);
     if (!record) {
       dependencies.sessionLogger?.warn(
         { workspaceId },
@@ -418,6 +431,35 @@ async function archiveTargetRecords(
   return { archivedAgents, archivedWorkspaceIds };
 }
 
+async function assertArchivePathsOwned(
+  dependencies: Pick<ArchiveDependencies, "assertCwdWorkspaceOwnedByThisServer">,
+  target: ArchiveTarget,
+): Promise<void> {
+  const paths = target.teardownTargets.map(({ cwd }) => cwd);
+  if (target.backing) paths.push(target.backing.path);
+  for (const cwd of uniqueCwds(paths)) {
+    await dependencies.assertCwdWorkspaceOwnedByThisServer(cwd);
+  }
+}
+
+async function canMutateArchivePaths(
+  dependencies: ArchiveDependencies,
+  target: ArchiveTarget,
+  requestId: string,
+): Promise<boolean> {
+  try {
+    await assertArchivePathsOwned(dependencies, target);
+    return true;
+  } catch (error) {
+    if (!(error instanceof WorkspaceCwdOwnershipError)) throw error;
+    dependencies.sessionLogger?.info(
+      { reason: error.message, targetPath: target.backing?.path, requestId },
+      "Worktree directory left in place during archive",
+    );
+    return false;
+  }
+}
+
 async function maybeRemoveDirectory(
   dependencies: ArchiveDependencies,
   request: { requestId: string; checkpoint: () => void },
@@ -444,6 +486,12 @@ async function maybeRemoveDirectory(
         directoryLeftBehind: { path: backing.path, reason },
       };
     }
+    return { removedDirectory: false };
+  }
+
+  // The local record is archived now and cannot authorize writes to a path
+  // still owned by a sibling host, even if that host's record is archived too.
+  if (!(await canMutateArchivePaths(dependencies, target, request.requestId))) {
     return { removedDirectory: false };
   }
 
@@ -477,7 +525,7 @@ async function maybeRemoveDirectory(
     throw error;
   }
 
-  const remainingActive = await dependencies.listActiveWorkspaces();
+  const remainingActive = await dependencies.listAllActiveWorkspaces();
   if (
     !(await isDirectoryUnreferenced(
       remainingActive,
@@ -539,6 +587,16 @@ function uniqueTeardownTargets<T extends { cwd: string }>(targets: T[]): T[] {
   const unique: T[] = [];
   for (const candidate of targets) {
     if (!unique.some((existing) => createRealpathAwarePathMatcher(existing.cwd)(candidate.cwd))) {
+      unique.push(candidate);
+    }
+  }
+  return unique;
+}
+
+function uniqueCwds(cwds: string[]): string[] {
+  const unique: string[] = [];
+  for (const candidate of cwds) {
+    if (!unique.some((existing) => createRealpathAwarePathMatcher(existing)(candidate))) {
       unique.push(candidate);
     }
   }

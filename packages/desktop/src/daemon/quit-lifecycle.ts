@@ -30,7 +30,7 @@ interface DeferredUpdateQuit {
 
 export interface StopOnQuitDeps {
   settingsStore: Pick<DesktopSettingsStore, "get">;
-  isDesktopManagedDaemonRunning: () => boolean;
+  isDesktopManagedDaemonRunning: () => Promise<boolean>;
   stopDaemon: () => Promise<unknown>;
   showShutdownFeedback: () => void;
 }
@@ -64,7 +64,7 @@ export async function stopDesktopManagedDaemonOnQuitIfNeeded(
     return false;
   }
 
-  if (!deps.isDesktopManagedDaemonRunning()) {
+  if (!(await deps.isDesktopManagedDaemonRunning())) {
     return false;
   }
 

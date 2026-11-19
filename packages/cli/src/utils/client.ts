@@ -168,13 +168,15 @@ export function resolveDaemonPassword(host: string): string | undefined {
   return fromEnv && fromEnv.length > 0 ? fromEnv : undefined;
 }
 
-export function resolveDaemonCredential(
+export async function resolveDaemonCredential(
   host: string,
   home: string,
-): { kind: "password"; password: string } | { kind: "localCredential"; token: string } | null {
+): Promise<
+  { kind: "password"; password: string } | { kind: "localCredential"; token: string } | null
+> {
   const password = resolveDaemonPassword(host);
   if (password) return { kind: "password", password };
-  const token = readLocalCredentialForTarget(home, host);
+  const token = await readLocalCredentialForTarget(home, host);
   return token ? { kind: "localCredential", token } : null;
 }
 
@@ -190,14 +192,17 @@ async function connectSelectedDaemon(options: ConnectOptions): Promise<DaemonCli
           })
         ).listen;
   const home = resolveClientPaseoHome(options.target);
-  const credential = resolveDaemonCredential(host, home);
+  const credential = await resolveDaemonCredential(host, home);
   const client = createHostClient(host, {
     clientId: await getOrCreateCliClientId(home),
     clientType: "cli",
     appVersion: resolveCliVersion(),
     ...(credential?.kind === "password" ? { password: credential.password } : {}),
     ...(credential?.kind === "localCredential"
-      ? { localCredential: () => readLocalCredentialForTarget(home, host) ?? undefined }
+      ? {
+          localCredential: async () =>
+            (await readLocalCredentialForTarget(home, host)) ?? undefined,
+        }
       : {}),
     connectTimeoutMs: timeout,
     reconnect: { enabled: false },

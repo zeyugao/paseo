@@ -17,6 +17,7 @@ import {
   type OmpToolResult,
   type OmpTrackedToolCall,
 } from "./tool-call-detail.js";
+import { renderOmpToolResultImages, splitOmpToolResultImages } from "./tool-result-images.js";
 
 export interface OmpCapturedUserMessageEntry {
   id: string;
@@ -28,7 +29,7 @@ export interface OmpHistoryMapperHooks {
     message: Extract<OmpAgentMessage, { role: "custom" }>,
     text: string,
     provider: string,
-  ) => Extract<AgentStreamEvent, { type: "timeline" }> | null;
+  ) => Extract<AgentStreamEvent, { type: "timeline" }>[];
   resolveToolCallId?: (toolCallId: string, toolCall: OmpTrackedToolCall) => string;
   mapToolDetail?: (
     toolCall: OmpTrackedToolCall,
@@ -74,7 +75,7 @@ export class OmpHistoryMapper {
     private readonly bridgedTools: ReadonlyMap<string, OmpBridgedToolIdentity> = new Map(),
   ) {}
 
-  mapMessages(messages: readonly OmpAgentMessage[]): AgentStreamEvent[] {
+  async mapMessages(messages: readonly OmpAgentMessage[]): Promise<AgentStreamEvent[]> {
     const events: AgentStreamEvent[] = [];
 
     for (const message of messages) {
@@ -89,10 +90,7 @@ export class OmpHistoryMapper {
           events.push(...this.mapAssistantMessage(message));
           break;
         case "toolResult": {
-          const event = this.mapToolResultMessage(message);
-          if (event) {
-            events.push(event);
-          }
+          events.push(...(await this.mapToolResultMessage(message)));
           break;
         }
         case "bashExecution":
@@ -131,9 +129,11 @@ export class OmpHistoryMapper {
       return [];
     }
     const text = getUserMessageText(message.content);
-    const mappedEvent = text ? this.hooks.mapCustomMessage?.(message, text, this.provider) : null;
-    if (mappedEvent) {
-      return [mappedEvent];
+    const mappedEvents = text
+      ? (this.hooks.mapCustomMessage?.(message, text, this.provider) ?? [])
+      : [];
+    if (mappedEvents.length > 0) {
+      return mappedEvents;
     }
     if (!text) {
       return [];
@@ -209,28 +209,34 @@ export class OmpHistoryMapper {
     return events;
   }
 
-  private mapToolResultMessage(
+  private async mapToolResultMessage(
     message: Extract<OmpAgentMessage, { role: "toolResult" }>,
-  ): AgentStreamEvent | null {
+  ): Promise<AgentStreamEvent[]> {
     const tracked =
       this.pendingToolCalls.get(message.toolCallId) ?? parseToolArgs(message.toolName, null);
     this.pendingToolCalls.delete(message.toolCallId);
-    const result = parseToolResult({ content: message.content, details: message.details });
+    const { result, images } = splitOmpToolResultImages(
+      parseToolResult({ content: message.content, details: message.details }),
+    );
     const detail = this.mapToolDetail(message.toolCallId, tracked, result);
-    if (!detail) {
-      return null;
+    const events: AgentStreamEvent[] = [];
+    if (detail) {
+      events.push({
+        type: "timeline",
+        provider: this.provider,
+        item: toToolResultTimelineItem({
+          callId: this.resolveToolCallId(message.toolCallId, tracked),
+          name: this.toolName(tracked, result),
+          isError: isOmpToolFailure(tracked, result, Boolean(message.isError)),
+          detail,
+          errorText: toolFailureMessage(result),
+        }),
+      });
     }
-    return {
-      type: "timeline",
-      provider: this.provider,
-      item: toToolResultTimelineItem({
-        callId: this.resolveToolCallId(message.toolCallId, tracked),
-        name: this.toolName(tracked, result),
-        isError: isOmpToolFailure(tracked, result, Boolean(message.isError)),
-        detail,
-        errorText: toolFailureMessage(result),
-      }),
-    };
+    for (const item of await renderOmpToolResultImages(images)) {
+      events.push({ type: "timeline", provider: this.provider, item });
+    }
+    return events;
   }
 
   private mapBashExecutionMessage(
@@ -287,7 +293,7 @@ export async function* streamOmpCoreHistory(
   hooks: OmpHistoryMapperHooks = {},
 ): AsyncGenerator<AgentStreamEvent> {
   const mapper = new OmpHistoryMapper(provider, userEntries, hooks);
-  for (const event of mapper.mapMessages(messages)) {
+  for (const event of await mapper.mapMessages(messages)) {
     if (event) {
       yield event;
     }

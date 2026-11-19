@@ -28,6 +28,7 @@ import {
   OmpModelsResultSchema,
   OmpPromptAckSchema,
   OmpRpcCommandSchema,
+  OmpRuntimeEventSchema,
   parseOmpRuntimeEvent,
   OmpSessionStateSchema,
   OmpSessionStatsSchema,
@@ -48,6 +49,12 @@ import {
 
 const DEFAULT_OMP_COMMAND: [string, ...string[]] = [process.env.OMP_COMMAND ?? "omp"];
 const DEFAULT_COMMANDS_RPC_NAME = "get_available_commands";
+/**
+ * OMP can run auto-compaction before acknowledging a prompt, so the ack lags
+ * behind LLM summarization by minutes. Wait on the process/session lifecycle
+ * instead of the control-plane timeout.
+ */
+const OMP_PROMPT_REQUEST_TIMEOUT_MS = JSONL_RPC_NO_TIMEOUT;
 
 export interface OmpCliRuntimeOptions {
   logger: Logger;
@@ -101,7 +108,12 @@ export class OmpCliRuntime implements OmpRuntime {
         requestTimeoutMs: this.options.requestTimeoutMs,
       });
       input.signal?.throwIfAborted();
-      return new OmpCliRuntimeSession(process, this.commandsRpcName, launch.env);
+      return new OmpCliRuntimeSession(
+        process,
+        this.commandsRpcName,
+        launch.env,
+        this.options.logger,
+      );
     } catch (error) {
       const startupError = error instanceof Error ? error : new Error(String(error));
       await process.close(startupError);
@@ -120,12 +132,28 @@ class OmpCliRuntimeSession implements OmpRuntimeSession {
     private readonly process: JsonlRpcProcess,
     private readonly commandsRpcName: "get_available_commands",
     private readonly launchEnvironment: Record<string, string>,
+    private readonly logger: Logger,
   ) {
     process.onMessage((message) => {
       const event = parseOmpRuntimeEvent(message);
       if (event) {
         this.emit(event);
+        return;
       }
+      // A dropped frame can strand an active turn — e.g. a terminal agent_end
+      // carrying a message shape this build does not know — so the failure must
+      // be visible in the daemon log instead of silently discarded.
+      const eventType = typeof message.type === "string" ? message.type : "unknown";
+      const rejection = OmpRuntimeEventSchema.safeParse(message);
+      this.logger.warn(
+        {
+          eventType,
+          issues: rejection.success
+            ? []
+            : rejection.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
+        },
+        "Ignoring OMP RPC event that failed schema validation",
+      );
     });
     process.onExit(({ error }) => {
       this.emit({ type: "process_exit", error: error.message });
@@ -144,12 +172,15 @@ class OmpCliRuntimeSession implements OmpRuntimeSession {
   }
 
   async prompt({ message, images, streamingBehavior }: OmpPromptInput): Promise<OmpPromptAck> {
-    const { id: requestId, promise } = this.process.startRequest({
-      type: "prompt",
-      message,
-      ...(images?.length ? { images } : {}),
-      ...(streamingBehavior ? { streamingBehavior: streamingBehavior } : {}),
-    });
+    const { id: requestId, promise } = this.process.startRequest(
+      {
+        type: "prompt",
+        message,
+        ...(images?.length ? { images } : {}),
+        ...(streamingBehavior ? { streamingBehavior: streamingBehavior } : {}),
+      },
+      OMP_PROMPT_REQUEST_TIMEOUT_MS,
+    );
     const ack = OmpPromptAckSchema.parse(await promise) ?? {};
     return { requestId, ...ack };
   }

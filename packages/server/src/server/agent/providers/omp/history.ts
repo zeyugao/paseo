@@ -125,7 +125,7 @@ export async function* streamOmpHistory(input: {
     const events: AgentStreamEvent[] =
       "item" in replayEntry
         ? [{ type: "timeline", provider: input.provider, item: replayEntry.item }]
-        : mapper.mapMessages([replayEntry.message]);
+        : await mapper.mapMessages([replayEntry.message]);
     for (const event of events) {
       yield timestamp && event.type === "timeline" ? { ...event, timestamp } : event;
     }
@@ -561,7 +561,13 @@ function isControlEntryType(type: string): boolean {
     type === "system_prompt" ||
     type === "model_change" ||
     type === "thinking_level_change" ||
+    // model_usage rows are auxiliary-call token/cost accounting (judge,
+    // background calls); they carry no conversation content.
+    type === "model_usage" ||
+    // Rule injections carry no user-facing text.
     type === "ttsr_injection" ||
+    // Branch summaries are abandoned-branch context for /tree navigation, not conversation.
+    type === "branch_summary" ||
     type === "tool_execution" ||
     type.startsWith("tool_execution_")
   );

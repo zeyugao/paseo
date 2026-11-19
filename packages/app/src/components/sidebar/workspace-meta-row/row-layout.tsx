@@ -188,6 +188,7 @@ export function MetaRowLayout({ children }: { children: ReactNode }) {
             style={[styles.measureText, styles.measurement]}
             onLayout={measureSeparator}
             accessible={false}
+            aria-hidden
             importantForAccessibility="no"
           >
             ·
@@ -281,6 +282,7 @@ function FieldMeasurement({
       style={styles.measurement}
       onLayout={onLayout}
       pointerEvents="none"
+      aria-hidden
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
     >

@@ -17,10 +17,12 @@ export function WorkspaceHeaderProjectRow({
   subtitle,
   isSubtitleDistinct,
   serverId,
+  measurement = false,
 }: {
   subtitle: string;
   isSubtitleDistinct: boolean;
   serverId: string;
+  measurement?: boolean;
 }) {
   const isCompact = useIsCompactFormFactor();
   const hostBadge = useHostBadges({ enabled: isCompact }).get(serverId) ?? null;
@@ -31,7 +33,11 @@ export function WorkspaceHeaderProjectRow({
   return (
     <View style={styles.row}>
       {showProject ? (
-        <Text testID="workspace-header-subtitle" style={styles.project} numberOfLines={1}>
+        <Text
+          testID={measurement ? undefined : "workspace-header-subtitle"}
+          style={styles.project}
+          numberOfLines={1}
+        >
           {subtitle}
         </Text>
       ) : null}

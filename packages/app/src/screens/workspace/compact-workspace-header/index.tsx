@@ -604,6 +604,17 @@ function CompactWorkspaceHeaderContentBase({
     ),
     [subtitle, isSubtitleDistinct, serverId],
   );
+  const measurementProjectRow = useMemo(
+    () => (
+      <WorkspaceHeaderProjectRow
+        subtitle={subtitle}
+        isSubtitleDistinct={isSubtitleDistinct}
+        serverId={serverId}
+        measurement
+      />
+    ),
+    [subtitle, isSubtitleDistinct, serverId],
+  );
   const project = resolveProjectPresentation(windowLayout, headerVariant, fullProjectRow);
   // Orientation selects a presentation, never the validity of either intrinsic variant.
   const typography = JSON.stringify([fontScale, isCompact, titleTypographySignature]);
@@ -713,6 +724,7 @@ function CompactWorkspaceHeaderContentBase({
           scrollEnabled={false}
           style={styles.titleMeasurement}
           pointerEvents="none"
+          aria-hidden
           accessibilityElementsHidden
           importantForAccessibility="no-hide-descendants"
           showsHorizontalScrollIndicator={false}
@@ -728,7 +740,7 @@ function CompactWorkspaceHeaderContentBase({
             signature={projectSignature}
             loading={isLoading}
             title={title}
-            projectRow={fullProjectRow}
+            projectRow={measurementProjectRow}
           />
         </ScrollView>
       ) : null}

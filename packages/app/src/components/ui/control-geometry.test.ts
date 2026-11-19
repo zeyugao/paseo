@@ -129,13 +129,12 @@ describe("toolbar glyphs and spacing", () => {
   });
 
   it("paints touch toolbar glyphs at the header icons' 20pt and 1.5px stroke and leaves pointer unchanged", () => {
-    const pointerGlyph = { size: 16, strokeWidth: 1.5, tone: "muted" };
-    expect(toolbarGlyphsFor("touch").icon).toEqual({
+    const pointerGlyph = { size: 16, strokeWidth: 1.5 };
+    expect(toolbarGlyphsFor("touch").icon).toMatchObject({
       size: 20,
       strokeWidth: 1.5,
-      tone: "foreground",
     });
-    expect(toolbarGlyphsFor("pointer")).toEqual({ icon: pointerGlyph, label: pointerGlyph });
+    expect(toolbarGlyphsFor("pointer")).toMatchObject({ icon: pointerGlyph, label: pointerGlyph });
     expect(TOOLBAR_GLYPH_SIZES.icon).toEqual({ xs: 20, md: 16 });
     expect(toolbarGlyphsFor("touch").icon.size).toBeLessThan(TOOLBAR_CONTROL_SIZES.touch);
     expect(toolbarGlyphsFor("pointer").icon.size).toBeLessThan(TOOLBAR_CONTROL_SIZES.pointer);
@@ -143,7 +142,7 @@ describe("toolbar glyphs and spacing", () => {
     expect(TOOLBAR_DISC_GLYPH_SIZES).toEqual({ touch: 20, pointer: 16 });
   });
 
-  it("keeps a touch glyph beside a label at the label's 20pt scale", () => {
+  it("keeps a touch glyph beside a label at the label's 20pt scale and mutes it", () => {
     expect(toolbarGlyphsFor("touch").label).toEqual({
       size: 20,
       strokeWidth: 1.5,
@@ -152,13 +151,13 @@ describe("toolbar glyphs and spacing", () => {
     expect(TOOLBAR_GLYPH_SIZES.label).toEqual({ xs: 20, md: 16 });
   });
 
-  it("mutes a touch glyph paired with a label while keeping an icon-only touch glyph foreground", () => {
+  it("mutes both icon-only and labelled touch glyphs while idle", () => {
     const { icon, label } = toolbarGlyphsFor("touch");
     const colors = { foreground: "#fafafa", foregroundMuted: "#a1a5a4" };
     const palette = { colors } as unknown as Theme;
 
     expect(toolbarGlyphColor(palette, label.tone)).toBe(colors.foregroundMuted);
-    expect(toolbarGlyphColor(palette, icon.tone)).toBe(colors.foreground);
+    expect(toolbarGlyphColor(palette, icon.tone)).toBe(colors.foregroundMuted);
   });
 
   it("sizes the touch context ring to the toolbar glyph's ink and keeps the pointer ring", () => {
@@ -168,16 +167,17 @@ describe("toolbar glyphs and spacing", () => {
     });
   });
 
-  it("brightens a muted toolbar glyph under a hovering pointer", () => {
-    const pointer = toolbarGlyphsFor("pointer").icon;
-    const touch = toolbarGlyphsFor("touch").icon;
-    expect(toolbarGlyphTone(pointer, false)).toBe("muted");
-    expect(toolbarGlyphTone(pointer, true)).toBe("foreground");
-    expect(toolbarGlyphTone(touch, false)).toBe("foreground");
+  it("returns the resting tone and supports explicit hover brightening", () => {
     const colors = { foreground: "#fafafa", foregroundMuted: "#a1a5a4" };
     const palette = { colors } as unknown as Theme;
-    expect(toolbarGlyphColor(palette, "foreground")).toBe("#fafafa");
-    expect(toolbarGlyphColor(palette, "muted")).toBe("#a1a5a4");
+    for (const sizing of ["touch", "pointer"] as const) {
+      for (const glyph of Object.values(toolbarGlyphsFor(sizing))) {
+        expect(toolbarGlyphColor(palette, toolbarGlyphTone(glyph, false))).toBe(
+          colors.foregroundMuted,
+        );
+        expect(toolbarGlyphColor(palette, toolbarGlyphTone(glyph, true))).toBe(colors.foreground);
+      }
+    }
   });
 });
 

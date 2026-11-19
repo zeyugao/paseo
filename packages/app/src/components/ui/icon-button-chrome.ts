@@ -6,6 +6,7 @@ import {
   controlSizingForLayout,
   ICON_BUTTON_SIZES,
   TOUCH_ICON_SIZE,
+  type ControlSizing,
   type SizingValue,
 } from "@/components/ui/control-geometry";
 import type { LayoutValue } from "@/components/ui/control-sizing";
@@ -120,6 +121,13 @@ export function iconButtonChromeHang(size: IconButtonChromeSize): LayoutValue {
     touch: (glyph.touch - frame.touch) / 2,
     pointer: (glyph.pointer - frame.pointer) / 2,
   });
+}
+
+export function iconButtonChromeGlyphInset(
+  size: IconButtonChromeSize,
+  sizing: ControlSizing,
+): number {
+  return (ICON_BUTTON_SIZES[size][sizing] - GLYPH_SIZES[size][sizing]) / 2;
 }
 
 export function smallIconButtonChromeFrameSize(compact = false): number {

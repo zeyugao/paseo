@@ -42,9 +42,7 @@ test.describe("Composer toolbar glyph tone", () => {
   test.describe("on a touch screen", () => {
     test.use({ hasTouch: true, viewport: { width: 1024, height: 1366 } });
 
-    test("a glyph beside its label matches the label while an icon-only glyph stays foreground", async ({
-      page,
-    }) => {
+    test("labelled and icon-only controls share the muted rest tone", async ({ page }) => {
       const agent = await openSeededComposer(page, "composer-tone-touch-");
       try {
         const thinking = await readComposerControlTone(composerControl(page, THINKING));
@@ -54,7 +52,7 @@ test.describe("Composer toolbar glyph tone", () => {
         expectGlyphMatchesLabel(thinking, "thinking");
         expectGlyphMatchesLabel(mode, "mode");
         expectIconOnlyGlyph(attach, "attach");
-        expect(attach.glyph, "an icon-only glyph is brighter than a labelled glyph").not.toBe(
+        expect(attach.glyph, "the icon-only glyph shares the label's muted rest tone").toBe(
           thinking.label,
         );
       } finally {
@@ -66,7 +64,7 @@ test.describe("Composer toolbar glyph tone", () => {
   test.describe("on a compact non-touch window", () => {
     test.use({ hasTouch: false, viewport: { width: 590, height: 844 } });
 
-    test("the icon-only thinking glyph stays foreground and the labelled mode glyph matches its label", async ({
+    test("the icon-only thinking glyph shares the labelled mode glyph's muted rest tone", async ({
       page,
     }) => {
       const agent = await openSeededComposer(page, "composer-tone-compact-");
@@ -79,7 +77,7 @@ test.describe("Composer toolbar glyph tone", () => {
         expectGlyphMatchesLabel(mode, "mode");
         expectIconOnlyGlyph(attach, "attach");
         expect(thinking.glyph, "the icon-only glyphs share one tone").toBe(attach.glyph);
-        expect(thinking.glyph, "an icon-only glyph is brighter than a labelled glyph").not.toBe(
+        expect(thinking.glyph, "the icon-only glyph shares the label's muted rest tone").toBe(
           mode.label,
         );
       } finally {

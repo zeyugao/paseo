@@ -71,6 +71,7 @@ import {
   type ComposerControlPresentation,
 } from "@/composer/agent-controls/layout";
 import { ComposerControlLayoutProvider } from "@/composer/agent-controls/layout-context";
+import { useComposerControlInteraction } from "@/composer/agent-controls/interaction-context";
 import { ComposerToolbarGlyph } from "@/composer/agent-controls/glyph";
 import {
   ComposerControls,
@@ -227,20 +228,20 @@ type ActiveSheet = "features" | null;
 function resolveHasAnyControl({
   canSelectModel,
   thinkingOptions,
-  controls,
+  optionControls,
   hasMode,
   pluginItemCount,
 }: {
   canSelectModel: boolean;
   thinkingOptions: AgentControlOption[] | undefined;
-  controls: readonly AgentOptionControl[] | undefined;
+  optionControls: ComposerOptionControls | undefined;
   hasMode: boolean;
   pluginItemCount: number;
 }) {
   return (
     canSelectModel ||
     Boolean(thinkingOptions?.length) ||
-    Boolean(controls?.length) ||
+    Boolean(optionControls?.controls.length) ||
     hasMode ||
     pluginItemCount > 0
   );
@@ -437,8 +438,8 @@ function ControlledAgentControls({
   onCreateAgentProfile,
   onEditAgentProfile,
   optionControls,
-  onDropdownClose,
-  onModelSelectorOpen,
+  onDropdownClose: onDropdownCloseProp,
+  onModelSelectorOpen: onModelSelectorOpenProp,
   onRetryModelProvider,
   isRetryingModelProvider = false,
   modeControl,
@@ -446,6 +447,16 @@ function ControlledAgentControls({
   isCompactLayout,
 }: ControlledAgentControlsProps) {
   const { t } = useTranslation();
+  const interaction = useComposerControlInteraction();
+  const collapsed = interaction?.collapsed === true;
+  const onModelSelectorOpen = useCallback(() => {
+    interaction?.onOpen();
+    onModelSelectorOpenProp?.();
+  }, [interaction, onModelSelectorOpenProp]);
+  const onDropdownClose = useCallback(() => {
+    interaction?.onClose();
+    if (!collapsed) onDropdownCloseProp?.();
+  }, [collapsed, interaction, onDropdownCloseProp]);
   const isCompactFormFactor = useIsCompactFormFactor();
   const isCompact = isCompactLayout ?? isCompactFormFactor;
   // Control sizes follow the window layout, as the toolbar's stylesheet does. A narrow pane in a
@@ -457,7 +468,7 @@ function ControlledAgentControls({
   const [openSelector, setOpenSelector] = useState<string | null>(null);
   // A compact composer always folds its controls into the model sheet; the width budget only
   // decides whether the model keeps its label.
-  const minimumDensity: ComposerControlDensity = isCompact ? "compact" : "full";
+  const minimumDensity: ComposerControlDensity = isCompact || collapsed ? "compact" : "full";
   const initialDensity = minimumDensity;
   const [density, setDensity] = useState<ComposerControlDensity>(initialDensity);
   const densityRef = useRef<ComposerControlDensity>(initialDensity);
@@ -483,8 +494,8 @@ function ControlledAgentControls({
   const hasAnyControl = resolveHasAnyControl({
     canSelectModel,
     thinkingOptions,
-    controls: optionControls?.controls,
-    hasMode: modeControl !== null && modeControl !== undefined,
+    optionControls,
+    hasMode: Boolean(modeControl),
     pluginItemCount,
   });
   const featureControls = useMemo(
@@ -512,7 +523,11 @@ function ControlledAgentControls({
     }),
     [canSelectModel, canSelectThinking, featureControls, fontScale, modeControl, pluginItemsWidth],
   );
-  const presentation = useMemo(() => resolveComposerControlPresentation(density), [density]);
+  const presentation = useMemo(
+    () =>
+      resolveComposerControlPresentation(collapsed && !densityFolds(density) ? "compact" : density),
+    [density, collapsed],
+  );
   const layoutContextValue = useMemo(
     () => ({
       glyphs: toolbarGeometry.glyphs,
@@ -592,10 +607,11 @@ function ControlledAgentControls({
 
   const handleToolbarOpenChange = useCallback(
     (id: string | null) => {
+      if (id !== null) interaction?.onOpen();
       setOpenSelector(id);
       if (id === null) onDropdownClose?.();
     },
-    [onDropdownClose],
+    [interaction, onDropdownClose],
   );
 
   const handleDesktopModelSelect = useCallback(
@@ -611,15 +627,20 @@ function ControlledAgentControls({
     [onSelectModel, onSelectProviderAndModel, provider],
   );
 
-  const handleOpenSheet = useCallback((sheet: Exclude<ActiveSheet, null>) => {
-    Keyboard.dismiss();
-    setActiveSheet(sheet);
-  }, []);
+  const handleOpenSheet = useCallback(
+    (sheet: Exclude<ActiveSheet, null>) => {
+      interaction?.onOpen();
+      Keyboard.dismiss();
+      setActiveSheet(sheet);
+    },
+    [interaction],
+  );
 
   const handleCloseSheet = useCallback(() => {
     setActiveSheet(null);
+    interaction?.onClose();
     if (!presentation.foldControls) onDropdownClose?.();
-  }, [onDropdownClose, presentation.foldControls]);
+  }, [interaction, onDropdownClose, presentation.foldControls]);
 
   const handleSheetModelSelect = useCallback(
     (nextProviderId: string, modelId: string) => {
@@ -702,7 +723,7 @@ function ControlledAgentControls({
             canSwitchProvider={Boolean(onSelectProviderAndModel)}
           />
         )}
-        {!isCompact ? (
+        {minimumDensity === "full" ? (
           <PluginToolbarSlot
             serverId={modelSelectorServerId}
             width={pluginItemsWidth}
@@ -752,6 +773,7 @@ interface DesktopAgentControlsContentProps extends AgentControlsContentProps {
 
 function DesktopAgentControlsContent(props: DesktopAgentControlsContentProps) {
   const sheetBridge = useComposerSheetBridge();
+  const interaction = useComposerControlInteraction();
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const {
@@ -838,7 +860,9 @@ function DesktopAgentControlsContent(props: DesktopAgentControlsContentProps) {
         onOpenIdChange={handleToolbarOpenChange}
       />
 
-      {modeControl ? <AgentModeControl {...modeControl} onClose={onDropdownClose} /> : null}
+      {modeControl ? (
+        <AgentModeControl {...modeControl} onOpen={interaction?.onOpen} onClose={onDropdownClose} />
+      ) : null}
 
       {presentation.aggregateFeatures && hasFeatures ? (
         <>

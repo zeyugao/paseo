@@ -4,6 +4,7 @@ import type { PrHint } from "@/git/pr-hint";
 import { DEFAULT_SIDEBAR_CHECKS_DISPLAY } from "@/components/sidebar/display-preferences/checks-display";
 import { DEFAULT_SIDEBAR_ROW_ITEMS } from "@/components/sidebar/display-preferences/row-items";
 import { selectMetaRowItems } from "./meta-items";
+import { selectMetaRowPresentation, type MetaRowMeasuredItem } from "./presentation";
 import type { WorkspaceServiceSummary } from "./service-summary";
 
 const PR_HINT: PrHint = {
@@ -141,5 +142,145 @@ describe("selectMetaRowItems", () => {
   it("keeps a change request whose forge reports no checks", () => {
     const items = select({ prHint: { ...PR_HINT, checksStatus: undefined } });
     expect(kinds(items)).toEqual(["host", "changeRequest", "services", "labels"]);
+  });
+});
+
+const MEASURED_ITEMS: readonly MetaRowMeasuredItem[] = [
+  { id: "host", separator: false, fields: [{ id: "host", priority: "host", width: 88 }] },
+  {
+    id: "pr",
+    separator: true,
+    fields: [{ id: "number", priority: "changeRequestNumber", width: 33 }],
+  },
+  { id: "ci", separator: true, fields: [{ id: "checks", priority: "checks", width: 47 }] },
+];
+
+function present(availableWidth: number, items = MEASURED_ITEMS) {
+  return selectMetaRowPresentation({
+    availableWidth,
+    items,
+    markerWidth: 12,
+    separatorWidth: 3,
+    gap: 6,
+    compactGap: 4,
+  });
+}
+
+describe("metadata text priority", () => {
+  it("restores all words and separators when the complete row fits", () => {
+    expect(present(240)).toEqual({
+      visibleTextIds: new Set(["host", "number", "checks"]),
+      separators: true,
+      gap: 6,
+      wrap: false,
+    });
+  });
+
+  it("removes the hostname before sacrificing the PR number or check word", () => {
+    expect(present(127).visibleTextIds).toEqual(new Set(["number", "checks"]));
+  });
+
+  it("drops the complete check word next and retains its marker", () => {
+    expect(present(100)).toEqual({
+      visibleTextIds: new Set(["number"]),
+      separators: false,
+      gap: 4,
+      wrap: false,
+    });
+    expect(present(60).visibleTextIds).toEqual(new Set());
+  });
+
+  it("never hides additional words when the available width grows", () => {
+    let previous = present(44).visibleTextIds;
+    for (let width = 45; width <= 250; width += 1) {
+      const current = present(width).visibleTextIds;
+      for (const id of previous) expect(current.has(id)).toBe(true);
+      previous = current;
+    }
+  });
+
+  it("uses translated measured widths rather than an English character estimate", () => {
+    const translated: readonly MetaRowMeasuredItem[] = [
+      MEASURED_ITEMS[0],
+      MEASURED_ITEMS[1],
+      { id: "ci", separator: true, fields: [{ id: "checks", priority: "checks", width: 80 }] },
+    ];
+    expect(present(127, translated).visibleTextIds).toEqual(new Set(["number"]));
+  });
+
+  it("keeps unmeasured text hidden without losing a known higher-priority field", () => {
+    const pending: readonly MetaRowMeasuredItem[] = [
+      { id: "host", separator: false, fields: [{ id: "host", priority: "host", width: null }] },
+      MEASURED_ITEMS[1],
+      MEASURED_ITEMS[2],
+    ];
+    expect(present(127, pending).visibleTextIds).toEqual(new Set(["number", "checks"]));
+  });
+
+  it("sacrifices plugin text before state and keeps all markers", () => {
+    const withPlugin: readonly MetaRowMeasuredItem[] = [
+      ...MEASURED_ITEMS,
+      { id: "plugin", separator: false, fields: [{ id: "plugin", priority: "plugin", width: 40 }] },
+    ];
+    expect(present(140, withPlugin)).toEqual({
+      visibleTextIds: new Set(["number", "checks"]),
+      separators: false,
+      gap: 4,
+      wrap: false,
+    });
+  });
+
+  it("wraps markers only after every word is gone and the icons themselves cannot fit", () => {
+    expect(present(40)).toEqual({
+      visibleTextIds: new Set(),
+      separators: false,
+      gap: 4,
+      wrap: true,
+    });
+  });
+});
+
+describe("mixed metadata presentation", () => {
+  it("preserves branch identity and the PR number after lower-priority names and state words", () => {
+    const items: readonly MetaRowMeasuredItem[] = [
+      { id: "branch", separator: false, fields: [{ id: "branch", priority: "branch", width: 50 }] },
+      {
+        id: "project",
+        separator: true,
+        fields: [{ id: "project", priority: "project", width: 35 }],
+      },
+      { ...MEASURED_ITEMS[0], separator: true },
+      {
+        id: "pr",
+        separator: true,
+        fields: [
+          { id: "number", priority: "changeRequestNumber", width: 33 },
+          { id: "state", priority: "changeRequestState", width: 40 },
+        ],
+      },
+      MEASURED_ITEMS[2],
+      {
+        id: "service",
+        separator: true,
+        fields: [{ id: "service", priority: "services", width: 60 }],
+      },
+      { id: "labels", separator: true, fields: [{ id: "labels", priority: "labels", width: 65 }] },
+    ];
+    expect(present(200, items).visibleTextIds).toEqual(new Set(["branch", "number"]));
+    expect(present(108, items).wrap).toBe(false);
+    expect(present(107, items)).toEqual({
+      visibleTextIds: new Set(),
+      separators: false,
+      gap: 4,
+      wrap: true,
+    });
+  });
+
+  it("keeps earlier plugin text when equally ranked plugin labels compete", () => {
+    const items: readonly MetaRowMeasuredItem[] = [
+      { id: "first", separator: false, fields: [{ id: "first", priority: "plugin", width: 30 }] },
+      { id: "second", separator: false, fields: [{ id: "second", priority: "plugin", width: 30 }] },
+    ];
+    expect(present(58, items).visibleTextIds).toEqual(new Set(["first"]));
   });
 });

@@ -230,7 +230,6 @@ function BadgePreview({
         {t("settings.host.appearance.preview.workspaceName")}
       </Text>
       <WorkspaceMetaRow
-        backdrop="surfaceSidebar"
         currentBranch={null}
         projectName={null}
         hostBadge={hostBadge}

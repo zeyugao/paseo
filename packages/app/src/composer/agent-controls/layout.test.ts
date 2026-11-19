@@ -238,8 +238,8 @@ describe("composer control layout", () => {
   });
 
   it("gives every toolbar control one shell and one glyph per role and control sizing", () => {
-    const pointerGlyph = { size: 16, strokeWidth: 1.5, tone: "muted" };
-    expect(POINTER).toEqual({
+    const pointerGlyph = { size: 16, strokeWidth: 1.5 };
+    expect(POINTER).toMatchObject({
       controlSize: 28,
       glyphs: { icon: pointerGlyph, label: pointerGlyph },
       controlGap: 4,

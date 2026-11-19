@@ -142,7 +142,7 @@ export type ToolbarGlyphTone = "foreground" | "muted";
 export interface ToolbarGlyph {
   size: number;
   strokeWidth: number;
-  /** The tone at rest; a hovering pointer brightens it to `foreground`. */
+  /** The resting tone; consumers that opt into pointer hover may brighten it to `foreground`. */
   tone: ToolbarGlyphTone;
 }
 

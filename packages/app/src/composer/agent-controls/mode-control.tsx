@@ -83,8 +83,13 @@ export function AgentModeControl({
   onSelectMode,
   disabled = false,
   surface = "toolbar",
+  onOpen,
   onClose,
-}: AgentModeControlValue & { surface?: "toolbar" | "sheet"; onClose?: () => void }) {
+}: AgentModeControlValue & {
+  surface?: "toolbar" | "sheet";
+  onOpen?: () => void;
+  onClose?: () => void;
+}) {
   const { presentation } = useComposerControlLayout();
   const { t } = useTranslation();
   const { isActiveComposer } = useComposerKeyboardScope();
@@ -116,6 +121,7 @@ export function AgentModeControl({
   const handleOpenChange = useCallback(
     (next: boolean) => {
       const wasOpen = openRef.current;
+      if (next && !wasOpen) onOpen?.();
       openRef.current = next;
       setOpen(next);
       if (!next) {
@@ -123,7 +129,7 @@ export function AgentModeControl({
         if (wasOpen) onClose?.();
       }
     },
-    [onClose],
+    [onClose, onOpen],
   );
 
   const handlePress = useCallback(() => handleOpenChange(!open), [handleOpenChange, open]);

@@ -22,6 +22,7 @@ import { AgentControlTrigger } from "@/composer/agent-controls/control";
 import { ComposerToolbarGlyph } from "@/composer/agent-controls/glyph";
 import { resolveModelTriggerLabels } from "@/composer/agent-controls/layout";
 import { resolveModelSheetOpening } from "@/composer/agent-controls/model-sheet-flow";
+import { useComposerControlInteraction } from "@/composer/agent-controls/interaction-context";
 import type { ProviderSelectorProvider } from "@/provider-selection/provider-selection";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isNative, isWeb } from "@/constants/platform";
@@ -154,6 +155,9 @@ export function CompactModelSheet({
 }: CompactModelSheetProps) {
   const { t } = useTranslation();
   const usesBottomSheet = useIsCompactFormFactor();
+  const interaction = useComposerControlInteraction();
+  const collapsedSettings = interaction?.collapsed === true;
+  const usesSettingsRoot = usesBottomSheet || collapsedSettings;
   const modelBrowserScrolling = resolveModelBrowserScrolling({
     isNative,
     isCompact: usesBottomSheet,
@@ -202,10 +206,10 @@ export function CompactModelSheet({
   );
 
   const open = useCallback(() => {
+    onOpen?.();
     Keyboard.dismiss();
     rootBrowser.showAll();
     setIsOpen(true);
-    onOpen?.();
   }, [onOpen, rootBrowser]);
 
   const close = useCallback(() => {
@@ -342,7 +346,7 @@ export function CompactModelSheet({
         >
           <ModelBrowser
             state={rootBrowser}
-            onSelect={usesBottomSheet ? handleSearchSelect : handleDesktopSelect}
+            onSelect={usesSettingsRoot ? handleSearchSelect : handleDesktopSelect}
             onApplyProfile={handleApplyProfile}
             onEditProfiles={onEditProfiles ? handleEditProfiles : undefined}
             onCreateProfile={profileActions.create}
@@ -350,11 +354,12 @@ export function CompactModelSheet({
             onRetryProvider={onRetryProvider}
             isRetryingProvider={isRetryingProvider}
             scrolling={modelBrowserScrolling}
-            searchAllOnFocus={usesBottomSheet}
-            rootBrowseContent={usesBottomSheet ? mobileRootContent : undefined}
+            searchAllOnFocus={usesSettingsRoot}
+            rootBrowseContent={usesSettingsRoot ? mobileRootContent : undefined}
+            showProfilesSection={!collapsedSettings}
           />
         </View>
-        {!usesBottomSheet ? (
+        {!usesSettingsRoot ? (
           <>
             <View style={styles.modelViewportDivider} />
             <ScrollView
@@ -370,7 +375,7 @@ export function CompactModelSheet({
         ) : null}
       </AdaptiveModalSheet>
 
-      {usesBottomSheet ? (
+      {usesSettingsRoot ? (
         <AdaptiveModalSheet
           header={modelBrowser.header}
           visible={isModelBrowserOpen}
@@ -383,7 +388,10 @@ export function CompactModelSheet({
           testID="agent-controls-model-browser-sheet"
         >
           <View
-            style={[styles.modelViewport, styles.flexibleModelViewport]}
+            style={[
+              styles.modelViewport,
+              usesBottomSheet ? styles.flexibleModelViewport : styles.fixedModelViewport,
+            ]}
             testID="agent-controls-model-browser-viewport"
           >
             <ModelBrowser
@@ -396,7 +404,7 @@ export function CompactModelSheet({
               isRetryingProvider={isRetryingProvider}
               scrolling={modelBrowserScrolling}
               searchAllOnFocus
-              showProfilesSection={false}
+              showProfilesSection={collapsedSettings}
             />
           </View>
         </AdaptiveModalSheet>
@@ -431,6 +439,7 @@ function ModelSheetTrigger({
   onPress: () => void;
   accessibilityLabel: string;
 }) {
+  const interaction = useComposerControlInteraction();
   const glyphRole = iconOnly ? "icon" : "label";
   const glyph = glyphs[glyphRole];
   const triggerLabels = useModelTriggerLabels({
@@ -452,7 +461,10 @@ function ModelSheetTrigger({
   );
 
   return (
-    <View style={styles.triggerFrame} onLayout={triggerLabels.onFrameLayout}>
+    <View
+      style={[styles.triggerFrame, interaction?.collapsed && styles.triggerFrameTrailing]}
+      onLayout={triggerLabels.onFrameLayout}
+    >
       <ComboboxTrigger
         collapsable={false}
         disabled={disabled}
@@ -574,6 +586,7 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     alignItems: "center",
   },
+  triggerFrameTrailing: { justifyContent: "flex-end" },
   /** An invisible copy of the trigger with both labels untruncated. */
   triggerMeasurer: {
     position: "absolute",

@@ -878,6 +878,10 @@ badges as you like. Every row
 renders the component, so share one query across rows instead of fetching per workspace: the
 plugin's React Query client is shared by all of its components on a host.
 
+Badge text may collapse when the row runs out of room. The icon remains; a text-only badge uses a
+puzzle glyph in its compact form. Keep the full meaning in `accessibilityLabel` when the short
+label is not enough. Collapsed text is also available in the desktop tooltip.
+
 ```tsx
 import type { PluginWorkspaceRowBadgeItemProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";

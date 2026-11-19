@@ -50,13 +50,20 @@ function reconcileHistoryWindow(input: {
 
 export function useStreamHistoryWindow(input: {
   items: StreamItem[];
+  initialRowId?: string;
   loadRemoteOlder: () => boolean | Promise<boolean>;
 }) {
-  const { items, loadRemoteOlder } = input;
-  const initialStart = useMemo(
-    () => findMountedWindowStart({ items, minMountedCount: getMountedRecentStreamItems() }),
-    [items],
-  );
+  const { items, loadRemoteOlder, initialRowId } = input;
+  const initialStart = useMemo(() => {
+    const recentStart = findMountedWindowStart({
+      items,
+      minMountedCount: getMountedRecentStreamItems(),
+    });
+    const target = initialRowId ? items.findIndex((item) => item.id === initialRowId) : -1;
+    return target >= 0 && target < recentStart
+      ? findMountedWindowStart({ items: items.slice(0, target + 1), minMountedCount: 1 })
+      : recentStart;
+  }, [items, initialRowId]);
   const initialBoundaryItemId = initialStart === 0 ? null : (items[initialStart]?.id ?? null);
   const [window, setWindow] = useState(() => ({
     boundaryItemId: initialBoundaryItemId,
@@ -75,6 +82,7 @@ export function useStreamHistoryWindow(input: {
       start = boundaryIndex;
     }
   }
+  start = Math.min(start, initialStart);
 
   useEffect(() => {
     setWindow((current) =>

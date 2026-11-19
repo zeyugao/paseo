@@ -80,6 +80,77 @@ describe("window chrome", () => {
     ).toEqual({ paddingLeft: 0, paddingRight: 48 });
   });
 
+  it("keeps rounded-corner clearance on the physical edge without reserving another row", () => {
+    const obstruction = { topLeft: null, topRight: { width: 144, height: 44 } };
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        corners: "top-left",
+        placement: "inline",
+        inlineChromeInsets: { left: 56, right: 144 },
+      }),
+    ).toEqual({ paddingLeft: 56, paddingRight: 0 });
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        corners: "top-right",
+        placement: "inline",
+        inlineChromeInsets: { left: 56, right: 144 },
+      }),
+    ).toEqual({ paddingLeft: 0, paddingRight: 144 });
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        corners: "top-left",
+        placement: "below",
+        inlineChromeInsets: { left: 56, right: 144 },
+      }),
+    ).toEqual({ height: 0 });
+  });
+
+  it("clears rounded corners without a reusable top band or system-control obstruction", () => {
+    const obstruction = { topLeft: null, topRight: null };
+    const inlineChromeInsets = { left: 32, right: 24 };
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        inlineChromeInsets,
+        corners: "both",
+        placement: "inline",
+      }),
+    ).toEqual({ paddingLeft: 32, paddingRight: 24 });
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        inlineChromeInsets,
+        corners: "top-right",
+        placement: "inline",
+      }),
+    ).toEqual({ paddingLeft: 0, paddingRight: 24 });
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction,
+        inlineChromeInsets,
+        corners: "both",
+        placement: "below",
+      }),
+    ).toEqual({ height: 0 });
+    expect(
+      resolveHasOwnedWindowChromeObstruction({ obstruction, corners: "both", corner: "top-left" }),
+    ).toBe(false);
+  });
+
+  it("combines overlapping corner and control clearances without adding them", () => {
+    expect(
+      resolveWindowChromeSafeArea({
+        obstruction: { topLeft: { width: 80, height: 44 }, topRight: { width: 48, height: 44 } },
+        inlineChromeInsets: { left: 56, right: 64 },
+        corners: "both",
+        placement: "inline",
+      }),
+    ).toEqual({ paddingLeft: 80, paddingRight: 64 });
+  });
+
   it("intersects identical and empty corner claims", () => {
     expect(intersectWindowChromeCorners("both", "both")).toBe("both");
     expect(intersectWindowChromeCorners("top-left", "top-left")).toBe("top-left");

@@ -35,6 +35,12 @@ Following output:
 - Scroll events during the hold never re-stick: the correction is a programmatic scroll that
   would otherwise read as "back at the bottom".
 
+An overview summary's bounded list owns its own scroll offset. Scroll it to the latest call when
+the summary opens or gains a call, not when its content height changes: expanding a nested detail
+changes that height without adding output. The timeline's hold cannot prevent an inner list from
+scrolling to its end. The compact overview sheet follows new calls only while pinned to the end;
+manual upward scrolling detaches it until the reader returns to the end.
+
 The trigger can only stay put when the list has scroll room for the change. When the loaded
 content fits the viewport, or a collapse at the end would need an offset past the end, the list
 ends at its end and the trigger moves by the difference.
@@ -46,10 +52,10 @@ window, or reassigns a native row's LegendList container. State held in the row 
 Keep a disclosure's open state in the per-agent store the timeline provides, keyed by item id:
 `ToolCallExpansionContext` for tool calls, `UserMessageExpansionContext` for long user messages.
 
-Decide a row's first painted shape in the commit that mounts it. `MessagePreview` measures its body
-in a layout effect, which commits before paint on web and Fabric. `onLayout` lands after the first
-frame: a long message measured there paints capped with no fade or show more, then grows by the
-control's height a frame later. `onLayout` still tracks later size changes. A zero height comes from
+Decide a row's first painted shape in the commit that mounts it or changes its allocated width.
+`MessagePreview` measures its body in a layout effect, which commits before paint on web and
+Fabric. `onLayout` lands after the first frame: a long message measured there paints capped with
+no fade or show more, then grows by the control's height a frame later. A zero height comes from
 a hidden panel and is ignored.
 
 ## Web
@@ -71,6 +77,17 @@ change in the commit that makes it, so a hold needs no anchor neighbour, native 
 render window stretch. The inverted FlatList it replaced needed all three, and three commits per
 toggle; its applied commit took up to 3.5 s of JS on a long turn.
 
+Window resizing can reflow native text without rerendering the list's memoized item containers.
+Measure the allocated viewport in the window-layout commit and invalidate mounted rows through
+the same synchronous measurement batch used by disclosures. Preview overflow must update in that
+batch too. Keep row identities and the existing offset owner; clipping stale row frames hides
+text instead of reconciling the new heights and positions.
+
+On iOS the short timeline's spare space belongs to native layout. A measured LegendList spacer
+lands after the viewport mount: on Duo the rows moved 218pt even though the viewport and scroll
+offset were already settled. Keep the history entry at the top and measure its flexing region
+for list offsets without using that measurement to resize the region.
+
 ### Who owns the offset
 
 One owner keeps the scroll offset at any moment:
@@ -86,9 +103,10 @@ One owner keeps the scroll offset at any moment:
 
 The end pin is a zero-height view at the bottom of the content and the content's first native
 child, with React Native's `maintainVisibleContentPosition` set to `{ minIndexForVisible: 0 }`. The
-native correction runs on the UI thread around each mount, so a row that grows or lands at the end
-scrolls in the frame it lays out. The controller scrolls only for a viewport resize (the composer
-growing or shrinking) and an explicit jump, both through the native `scrollToEnd`.
+native correction runs on the UI thread around each mount. On iOS it also preserves the end
+distance when the same mount changes the viewport height; a JS correction there would move the
+timeline again after it painted. The controller still handles explicit jumps and Android viewport
+resizes through native `scrollToEnd`.
 
 Do not use LegendList's `maintainScrollAtEnd` instead. It scrolls from JS after the mount to the end
 its JS sizes predict: growth paints below the viewport for a frame, and the scroll lands short of
@@ -154,6 +172,12 @@ in the detached state LegendList uses the same native correction, and a history 
 mid-drag needs it. They key on the drag, not the touch, so a tap or long press while following
 keeps following.
 
+An expanded tool detail viewport owns drags that start inside it. Keep its body
+wrapper a `View`, not a hover-only `Pressable`: `Pressable` takes the JS responder
+even without `onPress`, and iOS then prevents descendant scroll views from
+cancelling touches. Press handling belongs on the disclosure header; body hover
+handlers are web-only. Do not disable timeline scrolling to make details draggable.
+
 Following resumes only for a gesture that ends within 1 px of the end, either when the finger lifts
 or when momentum stops. A release past the end counts: iOS bounces back to the end, and lines that
 land during the bounce must keep scrolling in. A release short of the end stays detached with the scroll-to-bottom pill unless you submitted
@@ -190,6 +214,11 @@ Drop a hunk when the installed LegendList ships its fix.
 Android's `PaseoScrollView` and iOS's `PaseoScrollViewComponentView`.
 `VisibleContentPositionClampTest` and `SelectableTextTouchTest` cover Android; iOS has no native
 test harness.
+
+After an iOS change, [rebuild the native client](development.md#running-the-ios-app-on-a-local-simulator)
+and check the compact tool-detail sheet as well as the timeline: drag its body in both
+directions and scroll wide content horizontally. A chat-only check misses the sheet's
+native gesture binding.
 
 **Content clamp.** A mount that shrinks the content while `maintainVisibleContentPosition` is set
 applies the shrink twice on both platforms: the scroll view clamps its offset to the new end during

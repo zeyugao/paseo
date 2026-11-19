@@ -53,7 +53,15 @@ import { CONTROL_HEIGHTS } from "@/components/ui/control-geometry";
 import type { ShortcutKey } from "@/utils/format-shortcut";
 import { Shortcut } from "@/components/ui/shortcut";
 import { useWorkspaceTabLayout } from "@/screens/workspace/use-workspace-tab-layout";
-import { retainWorkspaceTabMeasuredWidth } from "@/screens/workspace/workspace-tab-layout";
+import {
+  computeWorkspaceTabLayout,
+  retainWorkspaceTabMeasuredWidth,
+  workspaceTabNaturalWidth,
+  resolveWorkspaceTabRowTrailingInset,
+  resolveWorkspaceTabRowClearance,
+  type WorkspaceTabRowClearance,
+  type WorkspaceTabLayoutMetrics,
+} from "@/screens/workspace/workspace-tab-layout";
 import {
   WorkspaceTabPresentationResolver,
   WorkspaceTabIcon,
@@ -95,6 +103,8 @@ import {
   useHorizontalScrollBoundary,
 } from "@/components/ui/horizontal-scroll-boundary";
 import { useSessionStore } from "@/stores/session-store";
+import { useWindowLayout } from "@/window-layout";
+import { useOwnsWindowChromeCorner } from "@/utils/desktop-window";
 
 const DROPDOWN_WIDTH = 220;
 const DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH = 36;
@@ -232,6 +242,7 @@ interface WorkspaceNewTabButtonProps {
   paneId?: string;
   shortcutKeys: ShortcutKey[][] | null;
   placement: "inline" | "toolbar";
+  visible?: boolean;
 }
 
 function WorkspaceNewTabButton({
@@ -242,9 +253,11 @@ function WorkspaceNewTabButton({
   paneId,
   shortcutKeys,
   placement,
+  visible = true,
 }: WorkspaceNewTabButtonProps) {
   const { t } = useTranslation();
   const tooltipText = t("workspace.tabs.actions.newTab");
+  if (!visible) return null;
   const menu = (
     <DropdownMenu>
       <ToolbarButton
@@ -267,6 +280,12 @@ function WorkspaceNewTabButton({
   );
 
   return placement === "inline" ? <View style={styles.inlineAddButton}>{menu}</View> : menu;
+}
+
+function resolveWorkspaceNewTabPlacement(embedded: boolean, overflow: boolean) {
+  if (embedded) return "inline";
+  if (overflow) return "toolbar";
+  return "scroll";
 }
 
 function WorkspacePaneToolbarActions({
@@ -490,12 +509,17 @@ interface WorkspaceTabLabelMeasurement {
   width: number;
 }
 
-const TabMeasurementCache = createContext<Map<string, WorkspaceTabLabelMeasurement> | null>(null);
-
-export function WorkspaceTabMeasurementScope({ children }: { children: React.ReactNode }) {
-  const cache = useMemo(() => new Map<string, WorkspaceTabLabelMeasurement>(), []);
-  return <TabMeasurementCache.Provider value={cache}>{children}</TabMeasurementCache.Provider>;
-}
+export type WorkspaceTabMeasurementInput = Pick<
+  WorkspaceDesktopTabsRowProps,
+  | "tabs"
+  | "normalizedServerId"
+  | "normalizedWorkspaceId"
+  | "host"
+  | "embedded"
+  | "focusModeEnabled"
+  | "showPaneSplitActions"
+  | "showPaneMaximizeAction"
+>;
 
 interface WorkspaceTabTrackSnapshot {
   signature: string;
@@ -504,8 +528,328 @@ interface WorkspaceTabTrackSnapshot {
   labelWidths: number[];
 }
 
+interface WorkspaceTabTrackState {
+  tabs: ResolvedWorkspaceDesktopTabRowItem[];
+  displayedTabs: ResolvedWorkspaceDesktopTabRowItem[];
+  snapshot: WorkspaceTabTrackSnapshot | null;
+  layoutMetrics: WorkspaceTabLayoutMetrics;
+  intrinsicWidth: number | null;
+  outsideNewTabButton: boolean;
+  measureExitFocusMode: (event: LayoutChangeEvent) => void;
+}
+
+const WorkspaceTabTrackContext = createContext<WorkspaceTabTrackState | null>(null);
+const EMPTY_TAB_ROWS: WorkspaceDesktopTabRowItem[] = [];
+
+export function WorkspaceTabMeasurementScope({
+  input,
+  children,
+}: {
+  input: WorkspaceTabMeasurementInput | null;
+  children: React.ReactNode;
+}) {
+  const { t } = useTranslation();
+  const tabs = input?.tabs ?? EMPTY_TAB_ROWS;
+  const outsideNewTabButton = Boolean(input?.embedded) || (isNative && input?.host === "explorer");
+  const [presentations, setPresentations] = useState(
+    () => new Map<string, WorkspaceTabPresentation>(),
+  );
+  const [labelMeasurements, setLabelMeasurements] = useState(
+    () => new Map<string, WorkspaceTabLabelMeasurement>(),
+  );
+  const [retainedSnapshot, setRetainedSnapshot] = useState<WorkspaceTabTrackSnapshot | null>(null);
+  const [addButtonWidth, setAddButtonWidth] = useState(0);
+  const [exitFocusModeWidth, setExitFocusModeWidth] = useState(0);
+  const tabInputs = useMemo(
+    () =>
+      tabs.map((item) => ({
+        item,
+        // Reading/disclosure state does not change the tab's presentation identity.
+        key: JSON.stringify([
+          input?.normalizedServerId,
+          input?.normalizedWorkspaceId,
+          item.tab.tabId,
+          item.tab.key,
+          item.tab.kind,
+          item.tab.target,
+        ]),
+      })),
+    [input?.normalizedServerId, input?.normalizedWorkspaceId, tabs],
+  );
+  const currentKeys = useMemo(() => new Set(tabInputs.map(({ key }) => key)), [tabInputs]);
+  useEffect(() => {
+    setPresentations((current) => {
+      const removedKeys = [...current.keys()].filter((key) => !currentKeys.has(key));
+      if (removedKeys.length === 0) return current;
+      const next = new Map(current);
+      for (const key of removedKeys) next.delete(key);
+      return next;
+    });
+  }, [currentKeys]);
+  const handlePresentation = useCallback((key: string, presentation: WorkspaceTabPresentation) => {
+    setPresentations((current) => {
+      if (current.get(key) === presentation) return current;
+      const next = new Map(current);
+      next.set(key, presentation);
+      return next;
+    });
+  }, []);
+  const resolvedTabInputs = useMemo(
+    () =>
+      tabInputs.flatMap(({ item, key }) => {
+        const presentation = presentations.get(key);
+        return presentation ? [{ key, item: { ...item, presentation } }] : [];
+      }),
+    [presentations, tabInputs],
+  );
+  const resolvedTabs = useMemo(
+    () => resolvedTabInputs.map(({ item }) => item),
+    [resolvedTabInputs],
+  );
+  const fallbackTabLabels = useMemo(
+    () => ({
+      newTab: t("workspace.tabs.actions.newTab"),
+      newAgent: t("workspace.tabs.fallback.newAgent"),
+      setup: t("workspace.tabs.fallback.setup"),
+      terminal: t("workspace.tabs.fallback.terminal"),
+      agent: t("workspace.tabs.fallback.agent"),
+      changes: t("panels.diff.changesLabel"),
+      files: t("panels.files.label"),
+      pullRequest: t("panels.pullRequest.label"),
+    }),
+    [t],
+  );
+  const tabLabels = useMemo(
+    () =>
+      resolvedTabInputs.map(({ key, item }) => ({
+        key,
+        label:
+          item.presentation.titleState === "loading"
+            ? getFallbackTabLabel(item.tab, fallbackTabLabels)
+            : item.presentation.label,
+        modified: item.presentation.modified,
+      })),
+    [fallbackTabLabels, resolvedTabInputs],
+  );
+  const currentLabelKeys = useMemo(
+    () => new Set(tabLabels.map(({ key, label }) => workspaceTabLabelMeasurementKey(key, label))),
+    [tabLabels],
+  );
+  useEffect(() => {
+    setLabelMeasurements((current) => {
+      const removedKeys = [...current.keys()].filter((key) => !currentLabelKeys.has(key));
+      if (removedKeys.length === 0) return current;
+      const next = new Map(current);
+      for (const key of removedKeys) next.delete(key);
+      return next;
+    });
+  }, [currentLabelKeys]);
+  const currentSnapshot = useMemo(() => {
+    if (!input || resolvedTabs.length !== tabs.length) return null;
+    const labelWidths = completeWorkspaceTabLabelWidths(tabLabels, labelMeasurements);
+    return labelWidths
+      ? {
+          signature: workspaceTabLabelSignature(tabLabels),
+          tabs: resolvedTabs,
+          labels: tabLabels,
+          labelWidths,
+        }
+      : null;
+  }, [input, labelMeasurements, resolvedTabs, tabLabels, tabs.length]);
+  // Retention is visual only. Readiness and intrinsic width always use the current raw inputs.
+  if (
+    currentSnapshot &&
+    (retainedSnapshot?.signature !== currentSnapshot.signature ||
+      !sameWidths(retainedSnapshot.labelWidths, currentSnapshot.labelWidths))
+  ) {
+    setRetainedSnapshot(currentSnapshot);
+  }
+  const layoutMetrics = useMemo<WorkspaceTabLayoutMetrics>(
+    () => ({
+      // Each sortable slot contributes a half-gap at both outboard edges too.
+      rowHorizontalInset: outsideNewTabButton && tabs.length > 0 ? TAB_CHIP_GAP / 2 : 0,
+      actionsReservedWidth: Math.max(
+        0,
+        (outsideNewTabButton && addButtonWidth > 0
+          ? addButtonWidth
+          : DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH) +
+          (input?.focusModeEnabled ? exitFocusModeWidth : 0) +
+          (input?.showPaneSplitActions ? PANE_SPLIT_ACTIONS_RESERVED_WIDTH : 0) +
+          (input?.showPaneMaximizeAction ? PANE_MAXIMIZE_ACTION_RESERVED_WIDTH : 0),
+      ),
+      rowPaddingHorizontal: TAB_ROW_PADDING_HORIZONTAL,
+      tabGap: TAB_CHIP_GAP,
+      minTabWidth: TAB_MIN_WIDTH,
+      maxTabWidth: TAB_MAX_WIDTH,
+      tabIconWidth: TAB_ICON_WIDTH,
+      tabContentGap: TAB_CONTENT_GAP,
+      tabHorizontalPadding: TAB_CHIP_HORIZONTAL_PADDING,
+      closeButtonWidth: TAB_CLOSE_BUTTON_RESERVED_WIDTH,
+    }),
+    [
+      addButtonWidth,
+      exitFocusModeWidth,
+      input?.focusModeEnabled,
+      input?.showPaneMaximizeAction,
+      input?.showPaneSplitActions,
+      outsideNewTabButton,
+      tabs.length,
+    ],
+  );
+  const intrinsicWidth = useMemo(() => {
+    if (
+      !currentSnapshot ||
+      (outsideNewTabButton && addButtonWidth <= 0) ||
+      (input?.focusModeEnabled && exitFocusModeWidth <= 0)
+    ) {
+      return null;
+    }
+    return workspaceTabNaturalWidth(
+      computeWorkspaceTabLayout({
+        viewportWidth: 0,
+        tabLabelWidths: currentSnapshot.labelWidths,
+        metrics: layoutMetrics,
+        compact: false,
+        preserveNaturalWidths: true,
+      }),
+      layoutMetrics,
+    );
+  }, [
+    addButtonWidth,
+    currentSnapshot,
+    exitFocusModeWidth,
+    input?.focusModeEnabled,
+    layoutMetrics,
+    outsideNewTabButton,
+  ]);
+  const measureInlineAddButton = useCallback((event: LayoutChangeEvent) => {
+    updateMeasuredWidth(setAddButtonWidth, event);
+  }, []);
+  const measureExitFocusMode = useCallback((event: LayoutChangeEvent) => {
+    updateMeasuredWidth(setExitFocusModeWidth, event);
+  }, []);
+  const handleTabLabelLayout = useCallback(
+    (key: string, label: string, event: LayoutChangeEvent) => {
+      const width = Math.ceil(event.nativeEvent.layout.width);
+      if (width <= 0) return;
+      const measurementKey = workspaceTabLabelMeasurementKey(key, label);
+      setLabelMeasurements((current) => {
+        const measurement = current.get(measurementKey);
+        if (measurement?.width === width) return current;
+        const next = new Map(current);
+        next.set(measurementKey, { label, width });
+        return next;
+      });
+    },
+    [],
+  );
+  const snapshot = currentSnapshot ?? retainedSnapshot;
+  const displayedTabs = useMemo(() => {
+    if (currentSnapshot) return currentSnapshot.tabs;
+    if (!retainedSnapshot) return EMPTY_RESOLVED_TAB_ROWS;
+    const currentTabs = new Map(
+      resolvedTabInputs.map(({ key, item }, index) => [key, { item, label: tabLabels[index] }]),
+    );
+    return retainedSnapshot.tabs.map((tab, index) => {
+      const retainedLabel = retainedSnapshot.labels[index];
+      const current = retainedLabel ? currentTabs.get(retainedLabel.key) : undefined;
+      if (!current || !retainedLabel) return tab;
+      return current.label?.label === retainedLabel.label &&
+        current.label.modified === retainedLabel.modified
+        ? current.item
+        : { ...current.item, presentation: tab.presentation };
+    });
+  }, [currentSnapshot, retainedSnapshot, resolvedTabInputs, tabLabels]);
+  const track = useMemo(
+    () => ({
+      tabs: resolvedTabs,
+      displayedTabs,
+      snapshot,
+      layoutMetrics,
+      intrinsicWidth,
+      outsideNewTabButton,
+      measureExitFocusMode,
+    }),
+    [
+      resolvedTabs,
+      displayedTabs,
+      snapshot,
+      layoutMetrics,
+      intrinsicWidth,
+      outsideNewTabButton,
+      measureExitFocusMode,
+    ],
+  );
+  return (
+    <WorkspaceTabTrackContext.Provider value={track}>
+      {children}
+      {input ? (
+        <>
+          <View
+            style={styles.tabLabelMeasurements}
+            pointerEvents="none"
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+          >
+            <InlineAddButtonMeasurement
+              enabled={outsideNewTabButton}
+              onLayout={measureInlineAddButton}
+            />
+            {tabLabels.map(({ key, label }) => (
+              <TabLabelMeasurement
+                key={`${key}:${label}`}
+                tabKey={key}
+                label={label}
+                onMeasure={handleTabLabelLayout}
+              />
+            ))}
+          </View>
+          {tabInputs.map(({ item, key }) => (
+            <WorkspaceDesktopTabPresentationSlot
+              key={key}
+              tab={item.tab}
+              presentationKey={key}
+              serverId={input.normalizedServerId}
+              workspaceId={input.normalizedWorkspaceId}
+              onResolve={handlePresentation}
+            />
+          ))}
+        </>
+      ) : null}
+    </WorkspaceTabTrackContext.Provider>
+  );
+}
+
+function useWorkspaceTabTrack() {
+  const track = useContext(WorkspaceTabTrackContext);
+  if (!track) throw new Error("Workspace tab track requires its measurement scope");
+  return track;
+}
+
+export function useWorkspaceTabIntrinsicWidth(): number | null {
+  return useContext(WorkspaceTabTrackContext)?.intrinsicWidth ?? null;
+}
+
+function InlineAddButtonMeasurement({
+  enabled,
+  onLayout,
+}: {
+  enabled: boolean;
+  onLayout: (event: LayoutChangeEvent) => void;
+}) {
+  return enabled ? (
+    <View style={styles.inlineAddButton} onLayout={onLayout}>
+      <View style={styles.inlineNewTabButton} />
+    </View>
+  ) : null;
+}
+
 function workspaceTabLabelSignature(labels: WorkspaceTabLabel[]): string {
   return JSON.stringify(labels);
+}
+
+function workspaceTabLabelMeasurementKey(key: string, label: string): string {
+  return JSON.stringify([key, label]);
 }
 
 function completeWorkspaceTabLabelWidths(
@@ -514,7 +858,7 @@ function completeWorkspaceTabLabelWidths(
 ): number[] | null {
   const widths: number[] = [];
   for (const { key, label, modified } of labels) {
-    const measurement = measurements.get(key);
+    const measurement = measurements.get(workspaceTabLabelMeasurementKey(key, label));
     if (!measurement || measurement.label !== label || measurement.width <= 0) {
       return null;
     }
@@ -532,6 +876,7 @@ function sameWidths(left: number[], right: number[]): boolean {
 
 export interface WorkspaceDesktopTabsRowProps {
   host?: PaneHost;
+  embedded?: boolean;
   launchPurpose?: WorkspaceTabLaunchPurpose;
   paneId?: string;
   isFocused?: boolean;
@@ -572,6 +917,7 @@ interface ResolvedWorkspaceDesktopTabsRowProps extends Omit<WorkspaceDesktopTabs
 
 interface WorkspaceDesktopTabPresentationSlotProps {
   tab: WorkspaceTabDescriptor;
+  presentationKey: string;
   serverId: string;
   workspaceId: string;
   onResolve: (tabKey: string, presentation: WorkspaceTabPresentation) => void;
@@ -581,6 +927,7 @@ const EMPTY_RESOLVED_TAB_ROWS: ResolvedWorkspaceDesktopTabRowItem[] = [];
 
 function WorkspaceDesktopTabPresentationSlot({
   tab,
+  presentationKey,
   serverId,
   workspaceId,
   onResolve,
@@ -589,7 +936,7 @@ function WorkspaceDesktopTabPresentationSlot({
     <WorkspaceTabPresentationResolver tab={tab} serverId={serverId} workspaceId={workspaceId}>
       {(presentation) => (
         <WorkspaceDesktopTabPresentationCommit
-          tabKey={tab.key}
+          tabKey={presentationKey}
           presentation={presentation}
           onResolve={onResolve}
         />
@@ -1012,66 +1359,61 @@ export function useWorkspaceNewTabKeyboardAction({
 }
 
 export function WorkspaceDesktopTabsRow(props: WorkspaceDesktopTabsRowProps) {
-  const [presentations, setPresentations] = useState(
-    () => new Map<string, WorkspaceTabPresentation>(),
+  const track = useContext(WorkspaceTabTrackContext);
+  return track ? (
+    <WorkspaceDesktopTabsRowContent {...props} />
+  ) : (
+    <WorkspaceTabMeasurementScope input={props}>
+      <WorkspaceDesktopTabsRowContent {...props} />
+    </WorkspaceTabMeasurementScope>
   );
-  const handlePresentation = useCallback(
-    (tabKey: string, presentation: WorkspaceTabPresentation) => {
-      setPresentations((current) => {
-        if (current.get(tabKey) === presentation) {
-          return current;
-        }
-        const next = new Map(current);
-        next.set(tabKey, presentation);
-        return next;
-      });
-    },
-    [],
-  );
-  const currentTabKeys = useMemo(
-    () => new Set(props.tabs.map((item) => item.tab.key)),
-    [props.tabs],
-  );
-  useEffect(() => {
-    setPresentations((current) => {
-      const removedKeys = [...current.keys()].filter((key) => !currentTabKeys.has(key));
-      if (removedKeys.length === 0) {
-        return current;
-      }
-      const next = new Map(current);
-      for (const key of removedKeys) {
-        next.delete(key);
-      }
-      return next;
-    });
-  }, [currentTabKeys]);
-  const resolvedTabs = useMemo(
-    () =>
-      props.tabs.flatMap((item) => {
-        const presentation = presentations.get(item.tab.key);
-        return presentation ? [{ ...item, presentation }] : [];
-      }),
-    [presentations, props.tabs],
-  );
+}
 
-  return (
-    <>
-      <ResolvedWorkspaceDesktopTabsRow {...props} tabs={resolvedTabs} />
-      {props.tabs.map(({ tab }) => (
-        <WorkspaceDesktopTabPresentationSlot
-          key={`${tab.key}:${tab.kind}`}
-          tab={tab}
-          serverId={props.normalizedServerId}
-          workspaceId={props.normalizedWorkspaceId}
-          onResolve={handlePresentation}
-        />
-      ))}
-    </>
+function WorkspaceDesktopTabsRowContent(props: WorkspaceDesktopTabsRowProps) {
+  const { tabs } = useWorkspaceTabTrack();
+  return <ResolvedWorkspaceDesktopTabsRow {...props} tabs={tabs} />;
+}
+
+function useWorkspaceTabRowClearance(host: PaneHost, embedded: boolean) {
+  const ownsTrailingCorner = useOwnsWindowChromeCorner("top-right");
+  const measuresSystemClearance = host === "main" && !embedded && ownsTrailingCorner;
+  const tabsContainerRef = useRef<View>(null);
+  const windowLayout = useWindowLayout();
+  const [rowClearance, setRowClearance] = useState<WorkspaceTabRowClearance | null>(null);
+  const trailingInset = resolveWorkspaceTabRowClearance(
+    rowClearance,
+    windowLayout,
+    measuresSystemClearance,
   );
+  const measurementRevision = useRef(0);
+  const measureTrailingInset = useCallback(() => {
+    const revision = ++measurementRevision.current;
+    // Explorer and embedded rails already have an inset owner.
+    if (!measuresSystemClearance || !windowLayout) return;
+    tabsContainerRef.current?.measureInWindow((x, y, width, height) => {
+      if (revision !== measurementRevision.current || width <= 0 || height <= 0) return;
+      const inset = resolveWorkspaceTabRowTrailingInset({ x, y, width, height }, windowLayout);
+      setRowClearance((current) =>
+        current?.inset === inset &&
+        current.bounds.width === windowLayout.bounds.width &&
+        current.bounds.height === windowLayout.bounds.height
+          ? current
+          : { bounds: windowLayout.bounds, inset },
+      );
+    });
+  }, [measuresSystemClearance, windowLayout, setRowClearance]);
+  useLayoutEffect(() => {
+    measureTrailingInset();
+    return () => {
+      measurementRevision.current += 1;
+    };
+  }, [measureTrailingInset]);
+  return { tabsContainerRef, trailingInset, measureTrailingInset };
 }
 
 function ResolvedWorkspaceDesktopTabsRow({
   host = "main",
+  embedded = false,
   launchPurpose = "primary",
   paneId,
   isFocused = false,
@@ -1107,65 +1449,26 @@ function ResolvedWorkspaceDesktopTabsRow({
 }: ResolvedWorkspaceDesktopTabsRowProps) {
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
+  const naturalExplorerTrack = isNative && host === "explorer";
   const newTabKeys = useShortcutKeys("workspace-tab-new");
   const [tabsContainerWidth, setTabsContainerWidth] = useState<number>(0);
-  const tabsScrollRef = useRef<ScrollView>(null);
-  const [exitFocusModeWidth, setExitFocusModeWidth] = useState<number>(0);
-  const tabScrollBoundary = useHorizontalScrollBoundary();
-  const measurementCache = useContext(TabMeasurementCache);
-  const [labelMeasurements, setLabelMeasurements] = useState(() => new Map(measurementCache ?? []));
-  useLayoutEffect(() => {
-    if (!measurementCache) return;
-    measurementCache.clear();
-    for (const [key, value] of labelMeasurements) measurementCache.set(key, value);
-  }, [measurementCache, labelMeasurements]);
-  const [trackSnapshot, setTrackSnapshot] = useState<WorkspaceTabTrackSnapshot | null>(null);
-
-  const handleTabsContainerLayout = useCallback((event: LayoutChangeEvent) => {
-    updateMeasuredWidth(setTabsContainerWidth, event);
-  }, []);
-
-  const handleExitFocusModeLayout = useCallback((event: LayoutChangeEvent) => {
-    updateMeasuredWidth(setExitFocusModeWidth, event);
-  }, []);
-
-  const layoutMetrics = useMemo(
-    () => ({
-      rowHorizontalInset: 0,
-      actionsReservedWidth: Math.max(
-        0,
-        DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH +
-          (focusModeEnabled ? exitFocusModeWidth : 0) +
-          (showPaneSplitActions ? PANE_SPLIT_ACTIONS_RESERVED_WIDTH : 0) +
-          (showPaneMaximizeAction ? PANE_MAXIMIZE_ACTION_RESERVED_WIDTH : 0),
-      ),
-      rowPaddingHorizontal: TAB_ROW_PADDING_HORIZONTAL,
-      tabGap: TAB_CHIP_GAP,
-      minTabWidth: TAB_MIN_WIDTH,
-      maxTabWidth: TAB_MAX_WIDTH,
-      tabIconWidth: TAB_ICON_WIDTH,
-      tabContentGap: TAB_CONTENT_GAP,
-      tabHorizontalPadding: TAB_CHIP_HORIZONTAL_PADDING,
-      closeButtonWidth: TAB_CLOSE_BUTTON_RESERVED_WIDTH,
-    }),
-    [exitFocusModeWidth, focusModeEnabled, showPaneMaximizeAction, showPaneSplitActions],
+  const { tabsContainerRef, trailingInset, measureTrailingInset } = useWorkspaceTabRowClearance(
+    host,
+    embedded,
   );
+  const obstructionStyle = useMemo(() => ({ paddingRight: trailingInset }), [trailingInset]);
+  const tabsScrollRef = useRef<ScrollView>(null);
+  const {
+    displayedTabs,
+    snapshot: trackSnapshot,
+    layoutMetrics,
+    outsideNewTabButton,
+    measureExitFocusMode,
+  } = useWorkspaceTabTrack();
+  const tabScrollBoundary = useHorizontalScrollBoundary();
 
   const panePanelKinds = useMemo(() => tabs.map(({ tab }) => tab.kind), [tabs]);
 
-  const fallbackTabLabels = useMemo(
-    () => ({
-      newTab: t("workspace.tabs.actions.newTab"),
-      newAgent: t("workspace.tabs.fallback.newAgent"),
-      setup: t("workspace.tabs.fallback.setup"),
-      terminal: t("workspace.tabs.fallback.terminal"),
-      agent: t("workspace.tabs.fallback.agent"),
-      changes: t("panels.diff.changesLabel"),
-      files: t("panels.files.label"),
-      pullRequest: t("panels.pullRequest.label"),
-    }),
-    [t],
-  );
   const tabMenuLabels = useMemo<WorkspaceTabMenuLabels>(
     () => ({
       copyResumeCommand: t("workspace.tabs.menu.copyResumeCommand"),
@@ -1184,99 +1487,45 @@ function ResolvedWorkspaceDesktopTabsRow({
     }),
     [t],
   );
-  const tabLabels = useMemo(
-    () =>
-      tabs.map((tab) => {
-        const label =
-          tab.presentation.titleState === "loading"
-            ? getFallbackTabLabel(tab.tab, fallbackTabLabels)
-            : tab.presentation.label;
-        return { key: tab.tab.key, label, modified: tab.presentation.modified };
-      }),
-    [fallbackTabLabels, tabs],
-  );
-  const tabLabelSignature = useMemo(() => workspaceTabLabelSignature(tabLabels), [tabLabels]);
-  const currentTabLabelKeys = useMemo(() => new Set(tabLabels.map(({ key }) => key)), [tabLabels]);
-  useEffect(() => {
-    setLabelMeasurements((current) => {
-      const removedKeys = [...current.keys()].filter((key) => !currentTabLabelKeys.has(key));
-      if (removedKeys.length === 0) {
-        return current;
-      }
-      const next = new Map(current);
-      for (const key of removedKeys) {
-        next.delete(key);
-      }
-      return next;
-    });
-  }, [currentTabLabelKeys]);
-  const publishMeasuredTrack = useCallback(() => {
-    if (tabsContainerWidth <= 0) {
-      return;
-    }
-    const labelWidths = completeWorkspaceTabLabelWidths(tabLabels, labelMeasurements);
-    if (!labelWidths) {
-      return;
-    }
-
-    setTrackSnapshot((current) => {
-      if (
-        current?.signature === tabLabelSignature &&
-        sameWidths(current.labelWidths, labelWidths)
-      ) {
-        return current;
-      }
-      return {
-        signature: tabLabelSignature,
-        tabs,
-        labels: tabLabels,
-        labelWidths,
-      };
-    });
-  }, [labelMeasurements, tabLabelSignature, tabLabels, tabs, tabsContainerWidth]);
-
-  useLayoutEffect(() => {
-    publishMeasuredTrack();
-  }, [publishMeasuredTrack]);
-
-  const handleTabLabelLayout = useCallback(
-    (key: string, label: string, event: LayoutChangeEvent) => {
-      const width = Math.ceil(event.nativeEvent.layout.width);
-      if (width <= 0) {
-        return;
-      }
-      setLabelMeasurements((current) => {
-        const measurement = current.get(key);
-        if (measurement?.label === label && measurement.width === width) {
-          return current;
-        }
-        const next = new Map(current);
-        next.set(key, { label, width });
-        return next;
-      });
-    },
-    [],
-  );
-
-  const displayedTabs = useMemo(() => {
-    if (!trackSnapshot) {
-      return EMPTY_RESOLVED_TAB_ROWS;
-    }
-    const currentTabs = new Map(
-      tabs.map((tab, index) => [tab.tab.key, { tab, label: tabLabels[index]?.label }]),
-    );
-    return trackSnapshot.tabs.map((snapshotTab, index) => {
-      const current = currentTabs.get(snapshotTab.tab.key);
-      return current?.label === trackSnapshot.labels[index]?.label ? current.tab : snapshotTab;
-    });
-  }, [tabLabels, tabs, trackSnapshot]);
 
   const { layout } = useWorkspaceTabLayout({
     tabLabelWidths: trackSnapshot?.labelWidths ?? [],
-    viewportWidthOverride: tabsContainerWidth > 0 ? tabsContainerWidth : null,
+    viewportWidthOverride:
+      tabsContainerWidth > 0 ? Math.max(0, tabsContainerWidth - trailingInset) : null,
     metrics: layoutMetrics,
     compact: isCompact,
+    preserveNaturalWidths: outsideNewTabButton,
   });
+  const { scrollContainerStyle, scrollEnabled } = useMemo(
+    () => ({
+      scrollContainerStyle: naturalExplorerTrack
+        ? [
+            styles.tabsScrollContainer,
+            styles.tabsScrollContainerNatural,
+            {
+              width:
+                workspaceTabNaturalWidth(layout, layoutMetrics) -
+                layoutMetrics.actionsReservedWidth,
+            },
+          ]
+        : styles.tabsScrollContainer,
+      scrollEnabled: naturalExplorerTrack || layout.requiresHorizontalScrollFallback,
+    }),
+    [layout, layoutMetrics, naturalExplorerTrack],
+  );
+  const handleTabsContainerLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      measureTrailingInset();
+      if (naturalExplorerTrack) {
+        if (event.nativeEvent.layout.width >= workspaceTabNaturalWidth(layout, layoutMetrics)) {
+          tabsScrollRef.current?.scrollTo({ x: 0, animated: false });
+        }
+        return;
+      }
+      updateMeasuredWidth(setTabsContainerWidth, event);
+    },
+    [layout, layoutMetrics, naturalExplorerTrack, measureTrailingInset],
+  );
   // A scroll view keeps its offset when its content shrinks under the viewport, so a row that
   // stops scrolling would leave the tabs it had panned past out of view with no way back.
   useEffect(() => {
@@ -1400,38 +1649,34 @@ function ResolvedWorkspaceDesktopTabsRow({
     ],
     [layout.requiresHorizontalScrollFallback],
   );
+  const newTabPlacement = resolveWorkspaceNewTabPlacement(
+    outsideNewTabButton,
+    layout.requiresHorizontalScrollFallback,
+  );
 
   const row = (
     <View
-      style={[styles.tabsContainer, onSidebar && styles.tabsContainerSidebar]}
+      ref={tabsContainerRef}
+      collapsable={false}
+      style={[
+        styles.tabsContainer,
+        onSidebar && styles.tabsContainerSidebar,
+        embedded && styles.tabsContainerEmbedded,
+        obstructionStyle,
+      ]}
       testID="workspace-tabs-row"
       onLayout={handleTabsContainerLayout}
     >
-      <View
-        style={styles.tabLabelMeasurements}
-        pointerEvents="none"
-        accessibilityElementsHidden
-        importantForAccessibility="no-hide-descendants"
-      >
-        {tabLabels.map(({ key, label }) => (
-          <TabLabelMeasurement
-            key={`${key}:${label}`}
-            tabKey={key}
-            label={label}
-            onMeasure={handleTabLabelLayout}
-          />
-        ))}
-      </View>
       <WorkspaceExitFocusModeButton
         visible={focusModeEnabled}
         onPress={onExitFocusMode}
-        onLayout={handleExitFocusModeLayout}
+        onLayout={measureExitFocusMode}
       />
-      <View style={styles.tabsScrollContainer}>
+      <View style={scrollContainerStyle}>
         <Animated.ScrollView
           ref={tabsScrollRef}
           horizontal
-          scrollEnabled={layout.requiresHorizontalScrollFallback}
+          scrollEnabled={scrollEnabled}
           testID="workspace-tabs-scroll"
           style={tabsScrollStyle}
           contentContainerStyle={styles.tabsContent}
@@ -1452,31 +1697,42 @@ function ResolvedWorkspaceDesktopTabsRow({
             getItemData={getTabDragData}
             renderItem={renderTab}
           />
-          {!layout.requiresHorizontalScrollFallback ? (
-            <WorkspaceNewTabButton
-              panePanelKinds={panePanelKinds}
-              host={host}
-              launchPurpose={launchPurpose}
-              placement="inline"
-              serverId={normalizedServerId}
-              paneId={paneId}
-              shortcutKeys={newTabKeys}
-            />
-          ) : null}
+          <WorkspaceNewTabButton
+            visible={newTabPlacement === "scroll"}
+            panePanelKinds={panePanelKinds}
+            host={host}
+            launchPurpose={launchPurpose}
+            placement="inline"
+            serverId={normalizedServerId}
+            paneId={paneId}
+            shortcutKeys={newTabKeys}
+          />
         </Animated.ScrollView>
         <HorizontalScrollBoundaryShades
-          visible={layout.requiresHorizontalScrollFallback}
+          visible={scrollEnabled}
           backdrop={rail}
           testIDPrefix="workspace-tabs-scroll-shade"
           leftStyle={tabScrollBoundary.leftShadeStyle}
           rightStyle={tabScrollBoundary.rightShadeStyle}
         />
       </View>
+      {/* Natural rails keep + outside the scroller; native Explorer also bounds that scroller
+          to its content width, so a late viewport measurement cannot move the button. */}
+      <WorkspaceNewTabButton
+        visible={newTabPlacement === "inline"}
+        panePanelKinds={panePanelKinds}
+        host={host}
+        launchPurpose={launchPurpose}
+        placement="inline"
+        serverId={normalizedServerId}
+        paneId={paneId}
+        shortcutKeys={newTabKeys}
+      />
       <WorkspacePaneToolbarActions
         panePanelKinds={panePanelKinds}
         host={host}
         launchPurpose={launchPurpose}
-        showNewTabButton={layout.requiresHorizontalScrollFallback}
+        showNewTabButton={newTabPlacement === "toolbar"}
         showSplitActions={showPaneSplitActions}
         showMaximizeAction={showPaneMaximizeAction}
         paneMaximized={paneMaximized}
@@ -1643,6 +1899,11 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     overflow: "visible",
   },
+  tabsContainerEmbedded: {
+    flex: 1,
+    borderBottomWidth: 0,
+    backgroundColor: "transparent",
+  },
   tabsContainerSidebar: {
     backgroundColor: theme.colors.surfaceSidebar,
   },
@@ -1653,6 +1914,12 @@ const styles = StyleSheet.create((theme) => ({
     minWidth: 0,
     flex: 1,
     alignSelf: "stretch",
+  },
+  tabsScrollContainerNatural: {
+    flex: 0,
+    flexGrow: 0,
+    flexShrink: 1,
+    flexBasis: "auto",
   },
   tabsScrollFitContent: {
     flex: 1,

@@ -217,6 +217,9 @@ its own.
   [floating-panels.md](floating-panels.md).
 - **One overlay per menu.** Submenus render inside their parent's layer and paint no second
   backdrop, so there is exactly one `Modal` on native no matter how deep the menu goes.
+- **The native overlay owns its viewport.** A rotation can resize the Modal without resizing
+  the menu or replacing its trigger ref. Remeasure the trigger on overlay layout and use that
+  viewport for placement; the window dimensions can arrive before the native modal lays out.
 - **Sheet stacking and backdrop dismissal belong to `IsolatedBottomSheetModal`.** Menus only
   request a backdrop opacity. See [floating-panels.md](floating-panels.md#gotcha-6--bottom-sheet-refs-are-not-lifecycle-truth).
 - **A menu closes when its panel leaves the screen.** `MenuSurface` closes the menu when its

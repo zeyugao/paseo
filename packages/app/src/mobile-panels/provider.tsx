@@ -1,4 +1,4 @@
-import { useWindowLayout, resolveDesktopDivisionLayout } from "@/window-layout";
+import { useWindowLayoutViewport, resolveDesktopDivisionLayout } from "@/window-layout";
 import { subscribeMobilePanelSelection } from "./selection";
 
 import {
@@ -13,7 +13,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { Keyboard, useWindowDimensions } from "react-native";
+import { Keyboard } from "react-native";
 import type { GestureType } from "react-native-gesture-handler";
 import {
   cancelAnimation,
@@ -23,7 +23,6 @@ import {
   withTiming,
   type SharedValue,
 } from "react-native-reanimated";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { scheduleOnRN, scheduleOnUI } from "react-native-worklets";
 import { resolveDesktopSidebarWidth } from "@/components/desktop-sidebar-layout";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -80,13 +79,16 @@ const MobilePanelActiveContext = createContext<MobilePanelView>("agent");
  * clamped to the safe viewport on wide layouts. The wide dock, its overlay, and the gestures that
  * drag it all read this one value.
  */
-function useResolvedLeftPanelWidth(windowWidth: number): number {
+function useResolvedLeftPanelWidth({
+  width: windowWidth,
+  height: windowHeight,
+  insets,
+  geometry,
+}: ReturnType<typeof useWindowLayoutViewport>): number {
   const isCompact = useIsCompactFormFactor();
-  const insets = useSafeAreaInsets();
   const sidebarWidth = usePanelStore((state) => state.sidebarWidth);
-  const { height: windowHeight } = useWindowDimensions();
   const divisionLayout = resolveDesktopDivisionLayout({
-    geometry: useWindowLayout(),
+    geometry,
     windowWidth,
     windowHeight,
     leftInset: insets.left,
@@ -103,8 +105,9 @@ function useResolvedLeftPanelWidth(windowWidth: number): number {
 }
 
 export function MobilePanelsProvider({ children }: { children: ReactNode }) {
-  const { width: windowWidth } = useWindowDimensions();
-  const leftPanelWidth = useResolvedLeftPanelWidth(windowWidth);
+  const viewport = useWindowLayoutViewport();
+  const { width: windowWidth } = viewport;
+  const leftPanelWidth = useResolvedLeftPanelWidth(viewport);
   const initialSelection = useRef(usePanelStore.getState().mobilePanel).current;
   const position = useSharedValue(getMobilePanelAnchor(initialSelection.target));
   const motionState = useSharedValue(createMobilePanelMotionState(initialSelection));

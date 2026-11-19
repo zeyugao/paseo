@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef } from "react";
 import { StyleSheet } from "react-native-unistyles";
 import { WebView } from "react-native-webview";
+import { useWindowLayoutHasTopEdgeControls } from "@/window-layout";
 import { withPreviewCsp } from "./html-preview-csp";
 import { htmlPreviewNavigationKind } from "./html-preview-navigation";
 
@@ -33,6 +34,7 @@ const ORIGIN_WHITELIST = ["*"];
 const BASE_URL = "about:blank";
 
 export function FileHtmlPreview({ html, testID }: { html: string; testID?: string }) {
+  const hasTopEdgeControls = useWindowLayoutHasTopEdgeControls();
   const document = useMemo(() => withPreviewCsp(html), [html]);
   const source = useMemo(() => ({ html: document, baseUrl: BASE_URL }), [document]);
   // Latched per document rather than once for the lifetime of the WebView: the
@@ -55,6 +57,7 @@ export function FileHtmlPreview({ html, testID }: { html: string; testID?: strin
     <WebView
       testID={testID}
       style={styles.webview}
+      scrollsToTop={!hasTopEdgeControls}
       source={source}
       originWhitelist={ORIGIN_WHITELIST}
       onShouldStartLoadWithRequest={allowOnlyInitialDocument}

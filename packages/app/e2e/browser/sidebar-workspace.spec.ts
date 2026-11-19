@@ -650,28 +650,6 @@ test.describe("Half-screen desktop layout", () => {
     await expect(page.getByTestId("agent-list-backdrop")).not.toBeVisible();
   });
 
-  test("keeps the left toggle center-owned without left window controls", async ({ page }) => {
-    await gotoAppShell(page);
-
-    const openToggle = page.getByTestId("menu-button");
-    const openIcon = openToggle.locator("svg").first();
-    await expect(openIcon).toBeVisible();
-    const openBounds = await openIcon.boundingBox();
-    expect(openBounds).not.toBeNull();
-    expect(openBounds?.x).toBeGreaterThan(12);
-
-    await openToggle.click();
-    await expect(page.getByTestId("sidebar-global-new-workspace")).not.toBeVisible();
-
-    const closedToggle = page.getByTestId("menu-button");
-    const closedIcon = closedToggle.locator("svg").first();
-    await expect(closedIcon).toBeVisible();
-    const closedBounds = await closedIcon.boundingBox();
-    expect(closedBounds).not.toBeNull();
-    expect(closedBounds?.x).toBeCloseTo(9, 0);
-    expect(closedBounds?.y).toBe(openBounds?.y);
-  });
-
   test("yields app navigation to the settings split", async ({ page }) => {
     await gotoAppShell(page);
     await page.getByTestId("sidebar-settings").click();

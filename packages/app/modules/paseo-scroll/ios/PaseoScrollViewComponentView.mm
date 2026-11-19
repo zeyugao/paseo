@@ -35,6 +35,8 @@ using namespace facebook::react;
  * offset, so the shrink is applied twice and the viewport lands above the content it kept.
  * The chat timeline hits this when a finished turn folds while the end pin follows the latest row.
  * https://github.com/react/react-native/issues/58578
+ * When the viewport height also changes, the end pin preserves its distance from the new
+ * end in that same mount. An onLayout scroll would expose the old offset for a frame.
  * Remove once https://github.com/react/react-native/pull/58695 ships; it keeps the pre-mount
  * offset and clamps after the adjustment, as this class does.
  */
@@ -43,8 +45,11 @@ using namespace facebook::react;
 
 @implementation PaseoScrollViewComponentView {
   CGPoint _offsetBeforeMount;
+  CGFloat _viewportHeightBeforeMount;
+  CGFloat _endDistanceBeforeMount;
   __weak UIView *_anchorBeforeMount;
   NSInteger _anchorTagBeforeMount;
+  __weak UIView *_endPinBeforeMount;
 }
 
 // Replaces React Native's class for the ScrollView component. The factory looks a component up the
@@ -82,27 +87,44 @@ using namespace facebook::react;
   _offsetBeforeMount = self.scrollView.contentOffset;
   _anchorBeforeMount = [self visibleContentAnchor];
   _anchorTagBeforeMount = _anchorBeforeMount.tag;
+  _viewportHeightBeforeMount = self.scrollView.bounds.size.height;
+  _endPinBeforeMount = [self contentEndPin];
+  if (_endPinBeforeMount != nil) {
+    _endDistanceBeforeMount = MAX(0, [self maxOffsetY] - _offsetBeforeMount.y);
+  }
   [super mountingTransactionWillMount:transaction withSurfaceTelemetry:surfaceTelemetry];
 }
 
 - (void)mountingTransactionDidMount:(const MountingTransaction &)transaction
                withSurfaceTelemetry:(const SurfaceTelemetry &)surfaceTelemetry
 {
+  UIScrollView *scrollView = self.scrollView;
   // The view registry sets a removed view's tag to 0; a released view reads nil here.
   BOOL isAnchorRemoved = _anchorTagBeforeMount != 0 && _anchorBeforeMount.tag != _anchorTagBeforeMount;
-  if (isAnchorRemoved || (self.scrollView.isDragging && [self isEndPin:_anchorBeforeMount])) {
-    // Without the content-position props, React Native's mount completes without moving the offset.
+  UIView *endPin = _endPinBeforeMount;
+  BOOL userOwnsOffset = scrollView.isDragging || scrollView.isDecelerating;
+  CGFloat height = scrollView.bounds.size.height;
+  BOOL resizePinnedViewport = endPin != nil && !userOwnsOffset &&
+      _viewportHeightBeforeMount > 0 && height > 0 && height != _viewportHeightBeforeMount &&
+      [self contentEndPin] == endPin;
+  if (resizePinnedViewport || isAnchorRemoved || (userOwnsOffset && endPin != nil)) {
+    // Keep RN's mount bookkeeping, without issuing a separate offset adjustment.
     SharedViewProps props = _props;
     _props = ScrollViewShadowNode::defaultSharedProps();
     [super mountingTransactionDidMount:transaction withSurfaceTelemetry:surfaceTelemetry];
     _props = props;
+    if (resizePinnedViewport) {
+      CGFloat y = MAX(-scrollView.adjustedContentInset.top, [self maxOffsetY] - _endDistanceBeforeMount);
+      if (y != scrollView.contentOffset.y) {
+        scrollView.contentOffset = CGPointMake(scrollView.contentOffset.x, y);
+      }
+    }
     return;
   }
   if (![self didClampOffsetDuringMount]) {
     [super mountingTransactionDidMount:transaction withSurfaceTelemetry:surfaceTelemetry];
     return;
   }
-  UIScrollView *scrollView = self.scrollView;
   scrollView.contentOffset = _offsetBeforeMount;
   [super mountingTransactionDidMount:transaction withSurfaceTelemetry:surfaceTelemetry];
   CGFloat y = MAX(MIN(scrollView.contentOffset.y, [self maxOffsetY]), -scrollView.adjustedContentInset.top);
@@ -132,7 +154,7 @@ using namespace facebook::react;
   if (!props.maintainVisibleContentPosition || scrollView.contentSize.width > self.frame.size.width) {
     return nil;
   }
-  NSArray<UIView *> *children = [self contentView].subviews;
+  NSArray<UIView *> *children = [self paseoScrollContentView].subviews;
   NSUInteger first = props.maintainVisibleContentPosition.value().minIndexForVisible;
   for (NSUInteger index = first; index < children.count; ++index) {
     UIView *child = children[index];
@@ -143,13 +165,23 @@ using namespace facebook::react;
   return nil;
 }
 
-- (BOOL)isEndPin:(UIView *)view
+- (UIView *)contentEndPin
 {
-  return [view isKindOfClass:[RCTViewComponentView class]] &&
-      [((RCTViewComponentView *)view).nativeId isEqualToString:@"paseo-end-pin"];
+  const auto &props = static_cast<const ScrollViewProps &>(*_props);
+  if (!props.maintainVisibleContentPosition || props.maintainVisibleContentPosition->minIndexForVisible != 0) {
+    return nil;
+  }
+  UIView *firstChild = [self paseoScrollContentView].subviews.firstObject;
+  if ([firstChild isKindOfClass:[RCTViewComponentView class]] &&
+      [((RCTViewComponentView *)firstChild).nativeId isEqualToString:@"paseo-end-pin"]) {
+    return firstChild;
+  }
+  return nil;
 }
 
-- (UIView *)contentView
+// Keep the inherited contentView getter intact: gesture-handler unwraps it before binding
+// its native scroll recognizer, which must stay on RCTScrollViewComponentView.
+- (UIView *)paseoScrollContentView
 {
   for (UIView *child in self.containerView.subviews) {
     if (![child conformsToProtocol:@protocol(RCTCustomPullToRefreshViewProtocol)]) {

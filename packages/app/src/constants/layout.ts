@@ -1,6 +1,8 @@
-import { useUnistyles } from "react-native-unistyles";
+import { use, useSyncExternalStore } from "react";
+import { StyleSheet, UnistyleDependency, UnistylesRuntime } from "react-native-unistyles";
 import { bySizing, TOUCH_TARGET } from "@/components/ui/control-sizing";
 import { isWeb } from "@/constants/platform";
+import { AppWindowCompactContext } from "@/hooks/app-window-frame-context";
 
 export const FOOTER_HEIGHT = 75;
 
@@ -44,13 +46,24 @@ export function isCompactBreakpoint(breakpoint: string | undefined): boolean {
   return breakpoint === "xs" || breakpoint === "sm";
 }
 
-/**
- * Reactive hook — re-renders the component when the breakpoint changes.
- * Always use this instead of reading UnistylesRuntime.breakpoint directly.
- */
+const subscribeCompactLayout = (onChange: () => void) =>
+  StyleSheet.addChangeListener((dependencies) => {
+    if (dependencies.includes(UnistyleDependency.Breakpoints)) onChange();
+  });
+
+const getCompactLayoutSnapshot = () => isCompactBreakpoint(UnistylesRuntime.breakpoint);
+const subscribeWindowSnapshot = () => () => {};
+const noCompactBreakpoint = () => false;
+
+/** Native window geometry owns structure; Unistyles is only the bootstrap and non-iOS source. */
 export function useIsCompactFormFactor(): boolean {
-  const { rt } = useUnistyles();
-  return isCompactBreakpoint(rt.breakpoint);
+  const compact = use(AppWindowCompactContext);
+  const fallback = useSyncExternalStore(
+    compact === null ? subscribeCompactLayout : subscribeWindowSnapshot,
+    compact === null ? getCompactLayoutSnapshot : noCompactBreakpoint,
+    getCompactLayoutSnapshot,
+  );
+  return compact ?? fallback;
 }
 
 // SplitContainer relies on dnd-kit and DOM-backed accessibility helpers.

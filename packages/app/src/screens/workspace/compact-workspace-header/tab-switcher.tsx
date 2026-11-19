@@ -19,6 +19,9 @@ import {
   type WorkspaceTabMenuLabels,
 } from "@/screens/workspace/workspace-tab-menu";
 import type { WorkspaceTabDescriptor } from "@/screens/workspace/workspace-tabs-types";
+import { HeaderAttentionDot } from "@/components/headers/attention-dot";
+import { useWorkspaceTabAttention } from "@/screens/workspace/use-workspace-tab-attention";
+import { ATTENTION_LABEL_KEYS } from "@/utils/attention-indicator";
 
 // The trigger draws at 32pt beside its island neighbours, so only vertical slop is free.
 const TAB_SWITCHER_TRIGGER_HIT_SLOP = { top: 8, bottom: 8 } as const;
@@ -300,6 +303,8 @@ export const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitch
   onCloseOtherTabs,
 }: MobileWorkspaceTabSwitcherProps) {
   const { t } = useTranslation();
+  const attentionBucket = useWorkspaceTabAttention(tabs, normalizedServerId, normalizedWorkspaceId);
+  const attentionLabel = attentionBucket ? t(ATTENTION_LABEL_KEYS[attentionBucket]) : undefined;
   const tabFallbackLabels = useMemo(
     () => ({
       newTab: t("workspace.tabs.actions.newTab"),
@@ -448,13 +453,19 @@ export const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitch
         ref={anchorRef}
         testID="workspace-tab-switcher-trigger"
         accessibilityRole="button"
-        accessibilityLabel={t("workspace.tabs.switcher.trigger", { count: tabs.length })}
+        accessibilityLabel={[
+          t("workspace.tabs.switcher.trigger", { count: tabs.length }),
+          attentionLabel,
+        ]
+          .filter(Boolean)
+          .join(", ")}
         hitSlop={TAB_SWITCHER_TRIGGER_HIT_SLOP}
         style={triggerStyle}
         onPress={handleOpenSwitcher}
       >
         <View style={styles.tabCountBadge}>
           <Text style={styles.tabCountText}>{tabs.length}</Text>
+          <HeaderAttentionDot bucket={attentionBucket} testID="workspace-tab-switcher-attention" />
         </View>
       </Pressable>
 

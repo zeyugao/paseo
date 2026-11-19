@@ -11,5 +11,9 @@ Pod::Spec.new do |s|
   s.source = { :path => '.' }
   s.static_framework = true
   s.dependency 'ExpoModulesCore'
-  s.source_files = '**/*.swift'
+  s.dependency 'React-RuntimeApple'
+  s.source_files = '**/*.{h,m,mm,swift}'
+  s.public_header_files = '**/*.h'
+
+  install_modules_dependencies(s)
 end

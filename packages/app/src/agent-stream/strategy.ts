@@ -2,6 +2,7 @@ import type { ComponentType, ReactElement, ReactNode, RefObject } from "react";
 import type { StyleProp, ViewStyle } from "react-native";
 import type { StreamItem } from "@/types/stream";
 import type { ReadingRowReplacements } from "./reading-anchor";
+import type { CapturedReadingPosition } from "./reading-position";
 import { continuesResponse } from "./turn-membership";
 import type { StreamHistoryBoundary, StreamRenderSegments } from "./model";
 import type {
@@ -98,6 +99,8 @@ export interface StreamRenderInput {
   // The history row under the top of the viewport, for surfaces that mark where the reader
   // is in the transcript. Only the web viewport measures it today.
   onReadingPositionChange?: (rowId: string | null) => void;
+  initialReadingPosition?: CapturedReadingPosition | null;
+  onSaveReadingPosition?: (position: CapturedReadingPosition | null) => void;
   onNearHistoryStart: () => Promise<boolean>;
   isLoadingOlderHistory: boolean;
   hasOlderHistory: boolean;

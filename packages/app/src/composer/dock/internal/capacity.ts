@@ -1,3 +1,17 @@
+/** A folded display never balances the bar, regardless of the content allocation's orientation. */
+export function resolveComposerBarCompensation(input: {
+  isExpandedDisplay: boolean;
+  viewportWidth: number;
+  viewportHeight: number;
+  left: number;
+  right: number;
+}): number {
+  if (!input.isExpandedDisplay) return 0;
+  return input.viewportHeight > 0 && input.viewportWidth > input.viewportHeight
+    ? input.right - input.left
+    : 0;
+}
+
 interface ComposerGeometry {
   height: number;
   bottomInset: number;

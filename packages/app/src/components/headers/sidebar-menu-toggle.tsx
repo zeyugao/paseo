@@ -1,20 +1,32 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { View, type StyleProp, type ViewStyle } from "react-native";
+import { Platform, View, type StyleProp, type ViewStyle } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { PanelLeft } from "lucide-react-native";
 import { HeaderToggleButton, headerIconSlotStyle } from "./header-toggle-button";
+import { SidebarCloseButton } from "./sidebar-close-button";
 import { selectIsAgentListOpen, usePanelStore } from "@/stores/panel-store";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { getShortcutOs } from "@/utils/shortcut-platform";
 import { useHasWindowChromeObstruction, useOwnsWindowChromeCorner } from "@/utils/desktop-window";
+import { useSidebarAttention } from "@/hooks/use-sidebar-attention";
+import { HeaderAttentionDot } from "./attention-dot";
+import { ATTENTION_LABEL_KEYS } from "@/utils/attention-indicator";
 import {
   extraMutedIconColorMapping,
   iconButtonChromeGlyphSize,
   mutedIconColorMapping,
 } from "@/components/ui/icon-button-chrome";
+import { resolveSidebarMenuTogglePresentation } from "@/components/desktop-sidebar-layout";
+import { useWindowLayout, WindowLayoutActions } from "@/window-layout";
+import { resolveSidebarNavigationPlacement } from "@/window-layout/model";
+import { WindowLayoutVariantView } from "@/window-layout/variant-view";
 
 const ThemedPanelLeft = withUnistyles(PanelLeft);
+const HEADER_NAVIGATION_LAYOUT = {
+  expanded: { display: "flex" },
+  collapsed: { display: "none" },
+} as const;
 
 interface SidebarMenuToggleProps {
   style?: StyleProp<ViewStyle>;
@@ -58,6 +70,7 @@ function SidebarMenuToggleButton({
   const { t } = useTranslation();
   const isOpen = usePanelStore((state) => selectIsAgentListOpen(state, { isCompact: isMobile }));
   const toggleAgentListForLayout = usePanelStore((state) => state.toggleAgentListForLayout);
+  const attentionBucket = useSidebarAttention(isOpen);
   const toggleShortcutKeys = useMemo(
     () => (getShortcutOs() === "mac" ? ["mod", "B"] : ["mod", "."]),
     [],
@@ -68,6 +81,7 @@ function SidebarMenuToggleButton({
   }, [toggleAgentListForLayout, isMobile]);
 
   const accessibilityState = useMemo(() => ({ expanded: isOpen }), [isOpen]);
+  const attentionLabel = attentionBucket ? t(ATTENTION_LABEL_KEYS[attentionBucket]) : undefined;
 
   return (
     <HeaderToggleButton
@@ -80,45 +94,113 @@ function SidebarMenuToggleButton({
       style={resolvedStyle}
       accessible
       accessibilityRole="button"
-      accessibilityLabel={isOpen ? t("shell.menu.close") : t("shell.menu.open")}
+      accessibilityLabel={[isOpen ? t("shell.menu.close") : t("shell.menu.open"), attentionLabel]
+        .filter(Boolean)
+        .join(", ")}
       accessibilityState={accessibilityState}
     >
-      {isMobile ? (
-        <MobileMenuIcon extraMuted={extraMutedIdleIcon} />
-      ) : (
-        <ThemedPanelLeft
-          size={iconButtonChromeGlyphSize("large")}
-          strokeWidth={1.5}
-          uniProps={extraMutedIdleIcon ? extraMutedIconColorMapping : mutedIconColorMapping}
-        />
-      )}
+      <View style={isMobile ? styles.mobileMenuIcon : styles.desktopAttentionGlyph}>
+        {isMobile ? (
+          <MobileMenuIcon extraMuted={extraMutedIdleIcon} />
+        ) : (
+          <ThemedPanelLeft
+            size={iconButtonChromeGlyphSize("large")}
+            strokeWidth={1.5}
+            uniProps={extraMutedIdleIcon ? extraMutedIconColorMapping : mutedIconColorMapping}
+          />
+        )}
+        <HeaderAttentionDot bucket={attentionBucket} testID="sidebar-toggle-attention" />
+      </View>
     </HeaderToggleButton>
   );
 }
 
-export function SidebarMenuToggle({ style, ...props }: SidebarMenuToggleProps = {}) {
-  const isMobile = useIsCompactFormFactor();
+function useSidebarMenuInWindowBar(): boolean {
+  const compact = useIsCompactFormFactor();
+  return resolveSidebarNavigationPlacement(useWindowLayout(), compact) === "vertical-bar";
+}
+
+function useSidebarHeaderMenuPresentation(): "button" | "placeholder" | "hidden" {
+  const isCompact = useIsCompactFormFactor();
   const ownsTopLeft = useOwnsWindowChromeCorner("top-left");
   const hasTopLeftWindowControls = useHasWindowChromeObstruction("top-left");
-  const resolvedStyle = useMemo(() => [styles.leadingToggle, style], [style]);
-  const placeholderStyle = useMemo(
-    () => [headerIconSlotStyle.slot, resolvedStyle],
-    [resolvedStyle],
+  return resolveSidebarMenuTogglePresentation({ isCompact, ownsTopLeft, hasTopLeftWindowControls });
+}
+
+export function useSidebarMenuTogglePresentation(): "button" | "placeholder" | "hidden" {
+  const presentation = useSidebarHeaderMenuPresentation();
+  return useSidebarMenuInWindowBar() ? "hidden" : presentation;
+}
+
+/** The top bar control follows intent, not the sidebar content's animation settlement. */
+export function WindowBarNavigation({ enabled }: { enabled: boolean }) {
+  const { t } = useTranslation();
+  const target = usePanelStore((state) => state.mobilePanel.target);
+  const closeSidebar = usePanelStore((state) => state.showMobileAgent);
+  const navigationInBar = useSidebarMenuInWindowBar();
+  const opensSidebar = target === "agent";
+  const showOpenInBar = opensSidebar && (Platform.OS === "ios" || navigationInBar);
+  return (
+    <WindowLayoutActions
+      slot="navigation"
+      active={enabled && (target === "agent-list" || showOpenInBar)}
+      followHeaderNavigation={opensSidebar}
+    >
+      {target === "agent-list" ? (
+        <SidebarCloseButton
+          label={t("sidebar.actions.closeSidebar")}
+          onPress={closeSidebar}
+          testID="sidebar-close"
+          nativeID="sidebar-close"
+        />
+      ) : (
+        <SidebarMenuToggle inWindowBar />
+      )}
+    </WindowLayoutActions>
   );
+}
 
-  if (!isMobile && !ownsTopLeft) {
-    return null;
+export function SidebarMenuToggle({
+  style,
+  inWindowBar = false,
+  slotStyle,
+  ...props
+}: SidebarMenuToggleProps & {
+  inWindowBar?: boolean;
+  slotStyle?: StyleProp<ViewStyle>;
+} = {}) {
+  const isMobile = useIsCompactFormFactor();
+  const presentation = useSidebarHeaderMenuPresentation();
+  const navigationInBar = useSidebarMenuInWindowBar();
+  const placeholderStyle = useMemo(() => [headerIconSlotStyle.slot, style], [style]);
+
+  if (inWindowBar) {
+    return <SidebarMenuToggleButton {...props} isMobile={isMobile} resolvedStyle={style} />;
   }
-
-  if (!isMobile && hasTopLeftWindowControls) {
-    return (
+  if (presentation === "hidden") return null;
+  const control =
+    presentation === "placeholder" ? (
       <View pointerEvents="none" style={placeholderStyle}>
         <View style={styles.desktopMenuIconSpace} />
       </View>
+    ) : (
+      <SidebarMenuToggleButton {...props} isMobile={isMobile} resolvedStyle={style} />
+    );
+  if (Platform.OS === "ios") {
+    return (
+      <WindowLayoutVariantView
+        windowBarRole="header-navigation"
+        collapsed={navigationInBar}
+        collapseInLandscape={false}
+        variants={HEADER_NAVIGATION_LAYOUT}
+        style={slotStyle}
+      >
+        {control}
+      </WindowLayoutVariantView>
     );
   }
-
-  return <SidebarMenuToggleButton {...props} isMobile={isMobile} resolvedStyle={resolvedStyle} />;
+  if (navigationInBar) return null;
+  return slotStyle ? <View style={slotStyle}>{control}</View> : control;
 }
 
 export function WindowSidebarMenuToggle({ style, ...props }: SidebarMenuToggleProps = {}) {
@@ -149,6 +231,10 @@ const styles = StyleSheet.create((theme) => ({
   desktopMenuIconSpace: {
     width: theme.iconSize.md,
     height: theme.iconSize.md,
+  },
+  desktopAttentionGlyph: {
+    width: iconButtonChromeGlyphSize("large"),
+    height: iconButtonChromeGlyphSize("large"),
   },
   mobileMenuLine: {
     width: MOBILE_MENU_LINE_WIDTH,

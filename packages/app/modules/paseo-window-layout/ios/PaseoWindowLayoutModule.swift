@@ -4,137 +4,300 @@ import UIKit
 public final class PaseoWindowLayoutModule: Module {
   public func definition() -> ModuleDefinition {
     Name("PaseoWindowLayout")
+    Events("onWindowGeometryChange")
     View(WindowLayoutView.self) {
+      Prop("geometrySourceId", "") { [weak self] (view: WindowLayoutView, sourceId: String) in
+        if sourceId.isEmpty {
+          view.setGeometryListener(nil)
+        } else {
+          view.setGeometryListener { [weak self] geometry in
+            self?.emit(event: "onWindowGeometryChange", payload: ["sourceId": sourceId, "geometry": geometry])
+          }
+        }
+      }
+      Prop("topChromeRowHeight", 0.0) { (view: WindowLayoutView, height: Double) in
+        view.topChromeRowHeight = CGFloat(height)
+      }
+    }
+    View(WindowLayoutTopInsetView.self) {
+      Prop("additionalPadding", 0.0) { (view: WindowLayoutTopInsetView, padding: Double) in
+        view.additionalPadding = CGFloat(padding)
+      }
+      Prop("landscapePadding", 0.0) { (view: WindowLayoutTopInsetView, padding: Double) in
+        view.landscapePadding = CGFloat(padding)
+      }
+      Prop("unownedInset", 0.0) { (view: WindowLayoutTopInsetView, inset: Double) in
+        view.unownedInset = CGFloat(inset)
+      }
+    }
+    View(WindowLayoutHorizontalInsetView.self) {
+      Prop("trailing", false) { (view: WindowLayoutHorizontalInsetView, trailing: Bool) in
+        view.trailing = trailing
+      }
+      Prop("compact", false) { (view: WindowLayoutHorizontalInsetView, compact: Bool) in
+        view.compact = compact
+      }
+      Prop("unownedInset", 0.0) { (view: WindowLayoutHorizontalInsetView, inset: Double) in
+        view.unownedInset = CGFloat(inset)
+      }
+    }
+    View(WindowLayoutVariantView.self) {
+      // The Fabric commit hook (not the mounted UIView) consumes these props.
+      Prop("expandedLayout") { (_: WindowLayoutVariantView, _: [String: Any]) in }
+      Prop("collapsedLayout") { (_: WindowLayoutVariantView, _: [String: Any]) in }
+      Prop("collapseInLandscape", false) { (_: WindowLayoutVariantView, _: Bool) in }
+      Prop("windowBarRole") { (_: WindowLayoutVariantView, _: String) in }
+      Prop("wideWindowMinWidth", 0.0) { (_: WindowLayoutVariantView, _: Double) in }
+      Prop("viewportHeightLimit") { (_: WindowLayoutVariantView, _: [String: Double]) in }
+      Prop("editorPlaceholder") { (_: WindowLayoutVariantView, _: String) in }
+      Prop("headerChrome") { (_: WindowLayoutVariantView, _: [String: Any]) in }
+      Prop("centerContent") { (_: WindowLayoutVariantView, _: Bool) in }
+    }
+    View(SheetWindowView.self) {
       Events("onGeometryChange")
+      Prop("active", false) { (view: SheetWindowView, active: Bool) in
+        view.active = active
+      }
     }
   }
 }
 
-final class WindowLayoutView: ExpoView {
-  let onGeometryChange = EventDispatcher()
-  private var updateScheduled = false
-  private var previousPayload: [String: Any]?
-  private var divisions: [CGRect] = []
-  private var barGuide: UILayoutGuide?
-  private var barEdge = "none"
-  private var bottomBarGuide: UILayoutGuide?
-  private var topBarGuide: UILayoutGuide?
-  private var occlusions: [CGRect] = []
-  private var measuredBounds = CGRect.zero
+final class WindowLayoutVariantView: ExpoView {}
 
-  required init(appContext: AppContext? = nil) {
-    super.init(appContext: appContext)
-    isUserInteractionEnabled = false
-    #if compiler(>=6.4)
-    if #available(iOS 27.1, *) {
-      registerForTraitChanges(UITraitCollection.systemTraitsAffectingVerticalBarEdge) {
-        (view: WindowLayoutView, _) in
-        view.setNeedsUpdateConstraints()
-        view.scheduleUpdate()
-      }
-    }
-    #endif
+private let windowLayoutInsetsDidChange = Notification.Name("PaseoWindowLayoutInsetsDidChange")
+
+final class WindowLayoutView: ExpoView {
+  private var geometryListener: (([String: Any]) -> Void)?
+  private var previousPayload: [String: Any]?
+  private weak var rootLayout: PaseoWindowLayoutRootView?
+  private var localProbe: WindowGeometryProbe?
+
+  var topChromeRowHeight: CGFloat = 0 {
+    didSet { geometryProbe?.topChromeRowHeight = topChromeRowHeight }
+  }
+
+  private var geometryProbe: WindowGeometryProbe? { rootLayout?.geometryProbe ?? localProbe }
+  var usesRootCommitter: Bool { rootLayout != nil }
+  var topInset: CGFloat { geometryProbe?.topInset ?? 0 }
+  var hasTopBand: Bool { geometryProbe?.hasTopBand ?? false }
+  var isLandscape: Bool { geometryProbe?.isLandscape ?? false }
+  var horizontalInsets: UIEdgeInsets { geometryProbe?.horizontalInsets ?? .zero }
+  var hasVerticalBar: Bool { geometryProbe?.hasVerticalBar ?? false }
+
+  override func didMoveToSuperview() {
+    super.didMoveToSuperview()
+    bindGeometrySource()
   }
 
   override func didMoveToWindow() {
     super.didMoveToWindow()
     previousPayload = nil
-    bottomBarGuide = nil
-    topBarGuide = nil
-    setNeedsUpdateConstraints()
-    scheduleUpdate()
-  }
-
-  override func safeAreaInsetsDidChange() {
-    super.safeAreaInsetsDidChange()
-    setNeedsUpdateConstraints()
-    scheduleUpdate()
+    bindGeometrySource()
   }
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    if bounds != measuredBounds {
-      measuredBounds = bounds
-      setNeedsUpdateConstraints()
+    if let localProbe {
+      localProbe.frame = bounds
+      localProbe.setNeedsLayout()
     }
-    scheduleUpdate()
   }
 
-  override func updateConstraints() {
-    #if compiler(>=6.4)
-    if #available(iOS 27.1, *) {
-      // UIKit tracks these reads and invalidates constraints when regions change.
-      divisions = reservedRegions(kind: .division).compactMap { $0.isActive ? $0.frame : nil }
-      // Frames already include the system's interactive margins.
-      occlusions = reservedRegions(kind: .occlusion).compactMap { $0.isActive ? $0.frame : nil }
-      let edge: String
-      switch traitCollection.verticalBarEdge {
-      case .leading: edge = "leading"
-      case .trailing: edge = "trailing"
-      default: edge = "none"
+  func setGeometryListener(_ listener: (([String: Any]) -> Void)?) {
+    geometryListener = listener
+    previousPayload = nil
+    if let payload = geometryProbe?.currentPayload { receiveGeometry(payload) }
+  }
+
+  func receiveGeometry(_ payload: [String: Any]) {
+    guard window != nil,
+      !NSDictionary(dictionary: payload).isEqual(to: previousPayload ?? [:]) else { return }
+    previousPayload = payload
+    geometryListener?(payload)
+  }
+
+  private func bindGeometrySource() {
+    var ancestor = superview
+    var root: PaseoWindowLayoutRootView?
+    while let view = ancestor {
+      if let layout = view as? PaseoWindowLayoutRootView {
+        root = layout
+        break
       }
-      if bottomBarGuide == nil {
-        // Where a bottom bar rests: above the home indicator, refined to the
-        // screen's corners rather than the rectangular safe area.
-        bottomBarGuide = layoutGuide(for: .bar(onEdge: UIRectEdge.bottom, extent: 44))
+      ancestor = view.superview
+    }
+    if root !== rootLayout || (root == nil && localProbe == nil) {
+      rootLayout?.removeSource(self)
+      localProbe?.removeFromSuperview()
+      localProbe = nil
+      rootLayout = root
+      if let root {
+        root.addSource(self)
+      } else if superview != nil {
+        let probe = WindowGeometryProbe(frame: bounds)
+        probe.isUserInteractionEnabled = false
+        probe.accessibilityElementsHidden = true
+        probe.setGeometryListener { [weak self] payload in self?.receiveGeometry(payload) }
+        probe.onInsetsChange = { [weak self] in
+          guard let self else { return }
+          NotificationCenter.default.post(name: windowLayoutInsetsDidChange, object: self)
+        }
+        localProbe = probe
+        addSubview(probe)
       }
-      if topBarGuide == nil {
-        // Where a top bar rests. Beside a partial status region it can start above the
-        // rectangular safe area; content still keeps out of the occlusions.
-        topBarGuide = layoutGuide(for: .bar(onEdge: UIRectEdge.top, extent: 44))
+    }
+    geometryProbe?.topChromeRowHeight = topChromeRowHeight
+    if let payload = geometryProbe?.currentPayload { receiveGeometry(payload) }
+  }
+}
+
+
+
+final class WindowLayoutTopInsetView: ExpoView {
+  var additionalPadding: CGFloat = 0 {
+    didSet { updatePadding() }
+  }
+  var landscapePadding: CGFloat = 0 {
+    didSet { updatePadding() }
+  }
+  // A Modal has its own physical viewport outside the owning native layout root.
+  var unownedInset: CGFloat = 0 {
+    didSet { updatePadding() }
+  }
+  private weak var layoutSource: WindowLayoutView?
+  private var appliedHeight: CGFloat?
+
+  override func didMoveToSuperview() {
+    super.didMoveToSuperview()
+    bindSource()
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    bindSource()
+  }
+
+  deinit {
+    NotificationCenter.default.removeObserver(self, name: windowLayoutInsetsDidChange, object: nil)
+  }
+
+  private func bindSource() {
+    var ancestor = superview
+    var source: WindowLayoutView?
+    while let view = ancestor {
+      if let root = view as? WindowLayoutView {
+        source = root
+        break
       }
-      if edge != barEdge {
-        barEdge = edge
-        barGuide = edge == "none" ? nil : layoutGuide(
-          for: .bar(onEdge: edge == "trailing" ? .right : .left, extent: 44)
+      ancestor = view.superview
+    }
+    if layoutSource !== source {
+      NotificationCenter.default.removeObserver(
+        self, name: windowLayoutInsetsDidChange, object: layoutSource
+      )
+      layoutSource = source
+      if let source {
+        NotificationCenter.default.addObserver(
+          self, selector: #selector(insetsDidChange(_:)),
+          name: windowLayoutInsetsDidChange, object: source
         )
       }
     }
-    #endif
-    super.updateConstraints()
-    scheduleUpdate()
+    updatePadding()
   }
 
-  private func scheduleUpdate() {
-    guard !updateScheduled else { return }
-    updateScheduled = true
-    DispatchQueue.main.async { [weak self] in
-      guard let self else { return }
-      self.updateScheduled = false
-      self.publish()
-    }
+  @objc private func insetsDidChange(_ notification: Notification) {
+    updatePadding()
   }
 
-  private func publish() {
-    guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
-    let bar = barGuide?.layoutFrame
-    var barPayload: Any = NSNull()
-    if let bar, bar.width > 0, bar.height > 0 { barPayload = rect(bar) }
-    // Before UIKit resolves the guide its frame has no height: publish null (the
-    // system inset applies) rather than a false zero clearance.
-    var bottomClearance: Any = NSNull()
-    if let bottomBar = bottomBarGuide?.layoutFrame, bottomBar.height > 0 {
-      bottomClearance = max(0, bounds.maxY - bottomBar.maxY)
+  private func updatePadding() {
+    guard window != nil else { return }
+    if layoutSource?.usesRootCommitter == true {
+      appliedHeight = nil
+      return
     }
-    var topBar: Any = NSNull()
-    if let frame = topBarGuide?.layoutFrame, frame.width > 0, frame.height > 0 {
-      topBar = rect(frame)
+    let height: CGFloat
+    if let source = layoutSource {
+      // A requested landscape gap replaces fallback padding, never the native safe clearance.
+      let padding = source.isLandscape && landscapePadding > 0
+        ? landscapePadding
+        : (source.hasTopBand ? 0 : additionalPadding)
+      height = source.topInset + padding
+    } else {
+      height = unownedInset
     }
-    let payload: [String: Any] = [
-      "bounds": rect(bounds),
-      "verticalBarEdge": barEdge,
-      "verticalBar": barPayload,
-      "bottomClearance": bottomClearance,
-      "topBar": topBar,
-      "occlusions": occlusions.map(rect),
-      "divisions": divisions.map(rect)
-    ]
-    guard !NSDictionary(dictionary: payload).isEqual(to: previousPayload ?? [:]) else { return }
-    previousPayload = payload
-    onGeometryChange(payload)
+    guard height != appliedHeight else { return }
+    appliedHeight = height
+    // Update Yoga on the native side; a JS geometry/context commit can trail rotation.
+    setStyleSize(nil, height: NSNumber(value: Double(height)))
+  }
+}
+
+final class WindowLayoutHorizontalInsetView: ExpoView {
+  var trailing = false { didSet { updateInset() } }
+  var compact = false { didSet { updateInset() } }
+  var unownedInset: CGFloat = 0 { didSet { updateInset() } }
+  private weak var layoutSource: WindowLayoutView?
+  private var appliedWidth: CGFloat?
+
+  override func didMoveToSuperview() {
+    super.didMoveToSuperview()
+    bindSource()
   }
 
-  private func rect(_ frame: CGRect) -> [String: CGFloat] {
-    ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height]
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    bindSource()
+  }
+
+  deinit {
+    NotificationCenter.default.removeObserver(self, name: windowLayoutInsetsDidChange, object: nil)
+  }
+
+  private func bindSource() {
+    var ancestor = superview
+    var source: WindowLayoutView?
+    while let view = ancestor {
+      if let root = view as? WindowLayoutView {
+        source = root
+        break
+      }
+      ancestor = view.superview
+    }
+    if layoutSource !== source {
+      NotificationCenter.default.removeObserver(
+        self, name: windowLayoutInsetsDidChange, object: layoutSource
+      )
+      layoutSource = source
+      if let source {
+        NotificationCenter.default.addObserver(
+          self, selector: #selector(insetsDidChange(_:)),
+          name: windowLayoutInsetsDidChange, object: source
+        )
+      }
+    }
+    updateInset()
+  }
+
+  @objc private func insetsDidChange(_ notification: Notification) {
+    updateInset()
+  }
+
+  private func updateInset() {
+    guard window != nil else { return }
+    if layoutSource?.usesRootCommitter == true {
+      appliedWidth = nil
+      return
+    }
+    let width: CGFloat
+    if let source = layoutSource {
+      width = compact && !source.hasVerticalBar
+        ? 0 : (trailing ? source.horizontalInsets.right : source.horizontalInsets.left)
+    } else {
+      width = unownedInset
+    }
+    guard width != appliedWidth else { return }
+    appliedWidth = width
+    setStyleSize(NSNumber(value: Double(width)), height: nil)
   }
 }

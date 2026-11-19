@@ -9,6 +9,9 @@ contracts.
 | Side pane        | Ordinary workspace content   | Created and closed like any workspace pane |
 | Sheets           | Compact look-ups             | One tab each, on the app-wide sheet stack  |
 
+Use [layout transition acceptance](layout-transitions.md) to check visible continuity across these
+hosts. The ownership rules below do not establish that their updates paint in the same frame.
+
 ## Panel host contract
 
 Every panel registers its supported `PaneHost` values and presentation. Launchers derive
@@ -25,6 +28,89 @@ retention. The shared Explorer owns its tab rail; its shared frame owns visibili
 close-gesture lifetime. Platform adapters own resizing and inset geometry.
 The host keeps three recently used tabs plus modified tabs; unmodified tabs beyond that budget
 can remount. Native retained content stays live, while web chat uses its existing deferred Freeze.
+
+On iOS, read window bounds, safe-area insets, and reserved regions from the same native snapshot
+through window-layout and `useAppWindowSize`. A vertical bar guide can reserve horizontal space even
+when UIKit reports a zero safe-area inset, notably in Duo's leading split. Resolve that clearance
+from the same snapshot. Sample after UIKit's layout transaction: a main-queue callback can still
+see new bounds with the previous safe area. Deliver the snapshot through provider-scoped module
+events, subscribing before native activation. Fabric view events add another event-beat turn after
+this end-of-layout sample. Bootstrap frame and inset contexts must stop driving consumers once the
+probe owns geometry; their earlier resize notifications otherwise redraw the previous snapshot.
+
+Publish the native geometry once at the window provider. Derive frame, aspect, insets, and the
+top band from that snapshot so the shell, header, sidebar, composer, and chat do not pick rules
+from different window states. A separate aspect event can collapse the composer with the previous
+window's clearance still in effect. A header-only subscription can receive the previous shell's
+allocation while the header itself reads new bounds. Pass the shell allocation and header
+eligibility together. On iOS, let Yoga size the undivided workspace between the inset spacers,
+whether navigation is docked or closed. Use projected widths for budgeting; pinning the workspace
+to one can retain the previous system bar's clearance after the native spacers have updated.
+Keep the saved dock width as intent and the drag width on the UI thread. The sidebar fill,
+divider, and resize grip must fill the dock's actual allocation, not retain its previous width
+when a viewport clamp changes. Otherwise the workspace starts at the right edge of an invisible gap.
+The iOS Explorer dock measures against its native workspace row. React supplies saved and live
+width intent, not a second width calculated from a previous window clearance. Keep the same
+gesture host for dock and overlay so changing how the pane fits does not recreate its content.
+Publish the resolved center pane width to the header, composer, and chat together, including when
+navigation and Explorer resize. Composer density must not wait for its own `onLayout` when the
+shell already knows the width. Keep local measurements for self-sized panes and for fitting
+actual text; window aspect does not describe the width of a split or docked pane.
+
+Keep shell backgrounds, dividers, and resize boundaries at the window edge; only controls consume
+top and corner clearance. The Fabric commit hook writes top and horizontal spacers in the
+window's root transaction. React seeds their sizes once; replaying later padding can restore an
+old clearance. Cold and reloaded Expo runtimes both have to bind to that writer. Modals outside
+that root use local geometry. Changes to the native probe or spacer require a client rebuild;
+a Metro reload cannot apply them.
+
+Portrait controls follow UIKit's inset top-bar guide so they share a row with the system status
+region. Do not replace that guide with either zero or the full rectangular top inset. Native and JS
+must choose the same origin; only windows without a reusable guide use the ordinary safe top.
+
+On native landscape windows, the retained top spacer owns 8 points of breathing room above the
+workspace header, Explorer rail, ordinary page headers, and first navigation row, docked or overlaid.
+Choose landscape from the full owning window-layout root's bounds, never the narrowed pane or
+keyboard viewport. Update the spacer's Yoga height when that condition changes even if its safe
+top inset stays zero. The landscape spacing is one padding value, not another safe-area inset;
+header variants and navigation groups must not add it again. Keep target-width header selection
+and dock visibility in the same commit, with one visible header and no spacer remount.
+
+Portrait keeps the UIKit guide origin without extra padding when a reusable top band exists.
+Otherwise navigation keeps its ordinary 16-point top gap. Native navigation puts that fallback in
+the spacer rather than its scrollable row group; browser navigation retains its group padding.
+Settings follows the same first-row top and corner ownership as app navigation. Keep its ordinary
+row gutters; adding safe-area padding to the whole Settings sidebar creates a second resize timeline.
+
+When iOS places workspace controls in the system top band, opt chat and file scrollers out of
+UIKit's status-bar tap-to-top gesture. Use window-layout context to identify that ownership;
+safe-area insets alone miss Duo's reserved vertical bar. Keep standard status-bar tap behavior
+when the system owns the top edge.
+
+The shared sidebar toggle reserves extra rounded-corner clearance on touch layouts only while
+navigation is collapsed. When navigation is open, use the ordinary leading inset so workspace and
+other page headers stay aligned; pointer layouts keep their existing inset in both states.
+On compact or system-split windows with a resolved native bar, app navigation lives in the shell's
+bar on workspace, New workspace, History, and other menu pages. A wide window covering its entire
+display keeps left navigation in the leading header when the native bar is on the trailing edge;
+do not move that entry across the page into the right bar. A leading bar can carry navigation.
+The shell's navigation slot precedes the active page's actions in one window-coordinate frame;
+retained pages must not mount another bar frame or duplicate the navigation toggle. Opening an
+overlay replaces covered bar controls with its close action. Without a bar, keep navigation in the
+content header when there are no leading system window controls, even when a docked sidebar owns
+the physical corner. Corner ownership controls clearance, not access to navigation.
+
+Opening Explorer transfers the top-right clearance to Explorer. A local `WindowChromeProvider`
+that refreshes the header's native snapshot must preserve its inherited corner ownership;
+resetting it to both corners reserves the status region again inside the narrowed center column.
+
+On iOS, subtract owned corner clearance from the allocated header width before deciding whether
+Git actions fit independently. Explorer and split panes can narrow a header inside a wide window.
+Keep the independent Git control when space returns or when actions live in the system bar, and
+reuse the same action rows and runner in the overflow menu.
+For iOS inline workspace chrome, layout both destinations before positioning the same
+controls in Fabric. Moving only a UIKit layer leaves `measureInWindow` for an open menu at
+the shadow-tree position. Keep the title's action reservation separate from the button views.
 
 ## Sheets
 
@@ -61,7 +147,8 @@ host: a workspace-local host sits behind the app-level left sidebar. The sheet p
 (`useSheetPaneBridge`) preserves existing editing sessions, caches, file-link resolution and
 supported navigation context without moving their providers. Keep this capability at the workspace
 boundary; new sheet callers must not assemble provider internals. Wide layouts retain local hosting
-and pane geometry. Both hosts forward the same Gorhom modal queue; neither creates another stack.
+and pane geometry unless the [native sheet window](floating-panels.md#gotcha-6--bottom-sheet-refs-are-not-lifecycle-truth)
+owns presentation. Every host forwards the same Gorhom modal queue; none creates another stack.
 See
 [floating-panels.md Gotcha 7](floating-panels.md#gotcha-7--a-sheet-cannot-read-context-from-its-call-site).
 
@@ -81,6 +168,43 @@ Ordinary leaf routes retain the stack appearance policy.
 The shell is outside the workspace split canvas so it divides the full workspace, including the header. It has its own persisted width and resize handle. Main-pane splits
 never read or modify that width.
 
+Budget workspace headers and the Explorer dock against the same target allocation, including live
+navigation and Explorer resize widths. Commit dock visibility and width with header presentation
+and corner ownership in React. A separate UI-thread reveal can trail the header commit, exposing
+a full-width header between the requested and rendered dock states. Gestures publish live resize
+width through the shared geometry store so the dock frame and header budget consume the same value.
+
+Navigation keeps a UI-thread resize carrier through gesture finalization while publishing that same
+width to the allocation store. Switching immediately to the last React width can snap back before
+the queued width commit arrives; keep the carrier until canonical allocation catches up.
+
+A retained native stack can report its previous docked frame for one layout pass; using that
+measurement makes Explorer open at its old clamped width and then shift again. Size the rendered
+header row to the target width as well as budgeting its children against it. Keep the coupled hosts
+on [React-owned native geometry](unistyles.md#react-owned-native-geometry); registering their styles
+with a second native writer can stretch the old presentation before React replaces its children.
+Keep the top-clearance spacer and intrinsic measurements above the header branches, without a
+hidden duplicate header that can paint overlapping navigation during relayout.
+
+On iOS, measure the retained title and project line in the same Fabric layout that budgets the
+rail against the allocated pane. A hidden React title measurement can arrive after a new pane
+has painted and change the rail budget again. Other platforms retain title-only and
+title-with-project measurements keyed by content and typography. Retain tab-label measurements
+independently of the visible track; reading-position and disclosure saves must not invalidate them.
+
+Retained headers switch between a fixed title track and a flexible picker. Explicitly reset the
+previous title width in the flexible presentation and bound text to its allocation; omitting width
+can leave a pre-rotation native frame painting over the actions.
+
+Recreating the native spacer when Explorer narrows the workspace can expose a zero-height first
+layout before its native height reaches Yoga. A newly mounted workspace has the same gap: seed
+the spacer's initial Yoga height from the current window geometry and inset context, then leave
+subsequent changes to the native spacer. Do not keep that seed reactive; a delayed JS snapshot must
+not overwrite a native rotation update. Header variants under that owner must not add another top
+inset. Pane tab strips without a workspace header and focus mode do not reserve header clearance.
+The stable chrome wrapper also paints the retained top clearance and header rows as one surface.
+Full and inline headers use `surface0`; compact headers keep their workspace surface.
+
 `packages/app/src/workspace-tabs/open-supporting-view.ts` owns semantic Changes and pull-request
 opens. Compact and wide native layouts select the matching workspace tab in Explorer. Desktop Changes opens
 follow the shared diff preference. Desktop pull requests use their Main panel, On the side, or
@@ -99,8 +223,14 @@ Explorer uses the shared workspace tab row and ordinary tab context menus. Files
 hide their close buttons through the panel manifest; close them from the tab context menu.
 Other tabs reveal the close control on hover. Compact layouts show no inline close on any tab,
 since a narrow X beside the label is easy to hit by accident; the long-press menu closes it.
-Compact tabs also keep their natural width and the rail scrolls as soon as they overflow, while
-pointer layouts shrink tabs toward the clickable minimum first. A rail that scrolls never truncates.
+Compact, native Explorer, and embedded landscape rails keep their natural width and scroll as soon
+as they overflow. Other pointer rails shrink tabs toward the clickable minimum first. A rail that
+scrolls never truncates. Native Explorer keeps + in one slot outside a content-sized scroller that
+Yoga shrinks to the available rail width. Viewport measurements may update scroll state, but must
+not change chip widths or move + between the scroller and toolbar during a status transition.
+On Duo's landscape bar layout, the title and tabs share one row. The boxed picker depends on the
+available track width, not the tab count: a few natural-width tabs can stay inline below the usual
+scrolling-rail budget.
 The + menu opens compatible panels in the dock, including Agent and terminal profiles. Compact
 layouts omit Diff from it because compact Changes shows each file's diff inline.
 Web also supports dragging agents and terminals into Explorer.
@@ -113,10 +243,21 @@ Cmd+E shows or hides Explorer without changing its selected view. All layouts us
 workspace tabs, launcher, and panel host. Below 600 points the shell is the swipeable Explorer
 overlay; at 600 points and above it reserves width beside the workspace. Native docking keeps its
 touch resize handle. Full workspace splits remain a separate web-only capability.
+Size a compact Explorer overlay from its allocated content viewport, not the full window: the
+window surface may already have removed a leading or trailing native bar. Its motion and content
+must use the same width. With a resolved native bar, the overlay's close action lives in that bar;
+the covered workspace actions become inactive. Without a bar, keep close in the overlay header.
 
-The dock reserves at least 240 points and the workspace 360. App navigation yields when it cannot
-share the remaining width with both. This keeps a portrait tablet from rendering three unusably
-narrow columns; widening restores navigation without changing its saved open state.
+Opening app navigation or Explorer never changes system status-bar visibility. Non-portrait
+windows may share reusable top chrome beside a corner occlusion; portrait uses the inset top-bar
+guide described above. Keep the ordinary system-region avoidance when a rail shares that space.
+
+Explorer keeps its preferred width and reserves at least 240 points, leaving 360 for the workspace.
+App navigation yields when it cannot share that allocation without narrowing Explorer. Navigation
+buttons, shortcuts, and commands then toggle its overlay, not its saved dock preference. Widening
+restores that preference. A reserved display
+division keeps the workspace allocation fixed when navigation closes; it does not force navigation
+open.
 
 Compact panel gestures own overlay visibility; the workspace layout owns its tab selection and
 contents on every platform. Explicit pane destinations bypass compact sheet placement, so choosing
@@ -128,6 +269,13 @@ actual destination before revealing it, including deduplicated targets.
 Compact overlay selection and saved dock visibility are independent. Folding changes geometry,
 not either mode’s visibility intent. Native workspace retention remains one workspace; web retains
 up to ten with its existing inactive TTL.
+
+Native agent reading positions live in persisted workspace tab state, so restoring a chat does not
+require retaining its view. Preserve row-relative position and disclosure state, not an absolute
+scroll offset. Resolve unloaded history before initial placement, and leave bottom following
+detached until the reader explicitly returns to the end. Committed archives purge the tab state;
+keep it through the Undo window. Reconnect cleanup must use authoritative directory removals or a
+complete snapshot, never absence from a partial cache.
 
 PR discovery belongs to the active workspace: split layouts discover while active, and other
 layouts discover while Explorer is active. The rail requests summary status; selected visible PR

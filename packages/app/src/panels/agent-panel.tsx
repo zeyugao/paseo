@@ -8,6 +8,7 @@ import React, {
   memo,
   type ReactNode,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -34,10 +35,6 @@ import {
   useComposerFullscreen,
   type ComposerEditingSession,
 } from "@/composer/editing-session";
-import {
-  resolveComposerTrackControlClearance,
-  resolveComposerTrackTailClearance,
-} from "@/composer/pill-styles";
 import { getActiveMessageSubmissions } from "@/composer/submission/model";
 import { RewindComposerRestoreProvider } from "@/components/rewind/composer-restore";
 import { useAgentDescriptor } from "@/agent-presentation";
@@ -58,6 +55,7 @@ import {
 } from "@/hooks/use-agent-screen-state-machine";
 import { useArchiveAgent } from "@/hooks/use-archive-agent";
 import { useContainerWidthBelow } from "@/hooks/use-container-width";
+import { ComposerLayoutWidthContext } from "@/composer/dock/content-insets";
 import { reconcileMissingAgentStateWithPresentAgent } from "@/panels/agent-panel-load-state";
 import { TimelineSyncStatus } from "@/timeline/sync-status";
 import { usePaneContext, usePaneFocus } from "@/panels/pane-context";
@@ -104,6 +102,7 @@ import { derivePendingPermissionKey, normalizeAgentSnapshot } from "@/utils/agen
 import { applyLegacyDaemonWorkspaceOwnership } from "@/workspace/legacy-daemon-workspaces";
 import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
 import { buildDraftAgentSetup, type ClientSlashCommand } from "@/client-slash-commands";
+import { useAgentReadingPosition } from "./agent-reading-position";
 
 interface ChatAgentStateShape {
   serverId: string | null;
@@ -1189,6 +1188,18 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
     onAttentionInputFocus();
     return false;
   }, [onAttentionInputFocus]);
+  const bottomBarContent = useMemo(
+    () =>
+      hasActiveComposer && !draft ? (
+        <AgentTracks
+          serverId={serverId}
+          workspaceId={workspaceId}
+          agentId={agentId}
+          parentAgentId={parentPillAgentId}
+        />
+      ) : null,
+    [hasActiveComposer, draft, serverId, workspaceId, agentId, parentPillAgentId],
+  );
   const streamContent = (
     <View
       style={animatedStaticStyles.content}
@@ -1210,19 +1221,11 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
             !showHistorySyncError
           }
           revealInitialHistory={hasCachedHistory || showHistorySyncError}
-          hasActiveComposer={hasActiveComposer}
+          bottomBarContent={bottomBarContent}
           toast={toastApi}
           onOpenWorkspaceFile={onOpenWorkspaceFile}
         />
       </RenderProfile>
-      {hasActiveComposer && !draft ? (
-        <AgentTracks
-          serverId={serverId}
-          workspaceId={workspaceId}
-          agentId={agentId}
-          parentAgentId={parentPillAgentId}
-        />
-      ) : null}
     </View>
   );
 
@@ -1367,6 +1370,39 @@ function SheetAgentFacts({ serverId, agentId }: { serverId: string; agentId: str
   return text ? <PaneSubtitle text={text} testID="agent-pane-subtitle" /> : null;
 }
 
+function useAgentStreamKey(
+  serverId: string,
+  draftId: string | undefined,
+  agentId: string | undefined,
+): string {
+  const identity = useRef({ serverId, draftId, agentId, key: `${serverId}:${draftId ?? agentId}` });
+  if (
+    identity.current.serverId !== serverId ||
+    identity.current.draftId !== draftId ||
+    identity.current.agentId !== agentId
+  ) {
+    // Creating an agent changes the owner of this conversation, not its viewport.
+    // A later retarget to another agent still starts a fresh stream view.
+    const previousDraftId = identity.current.draftId;
+    const pendingCreate = previousDraftId
+      ? useCreateFlowStore.getState().pendingByDraftId[previousDraftId]
+      : undefined;
+    const isDraftHandoff =
+      identity.current.serverId === serverId &&
+      draftId === undefined &&
+      pendingCreate?.serverId === serverId &&
+      pendingCreate.lifecycle === "sent" &&
+      pendingCreate.agentId === agentId;
+    identity.current = {
+      serverId,
+      draftId,
+      agentId,
+      key: isDraftHandoff ? identity.current.key : `${serverId}:${draftId ?? agentId}`,
+    };
+  }
+  return identity.current.key;
+}
+
 const AgentStreamSection = memo(function AgentStreamSection({
   streamViewRef,
   serverId,
@@ -1377,7 +1413,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   hasAppliedAuthoritativeHistory,
   isInitialHistoryLoading,
   revealInitialHistory,
-  hasActiveComposer,
+  bottomBarContent,
   toast,
   onOpenWorkspaceFile,
 }: {
@@ -1390,19 +1426,12 @@ const AgentStreamSection = memo(function AgentStreamSection({
   hasAppliedAuthoritativeHistory: boolean;
   isInitialHistoryLoading: boolean;
   revealInitialHistory: boolean;
-  hasActiveComposer: boolean;
+  bottomBarContent: ReactNode;
   toast: ReturnType<typeof useToastHost>["api"];
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
 }) {
-  const isCompactFormFactor = useIsCompactFormFactor();
-  // The track bar's space is reserved whenever the bar is mounted, pills or not: pills come and go
-  // every turn, and the transcript must not jump with them.
-  const bottomOverlayTailClearance = hasActiveComposer
-    ? resolveComposerTrackTailClearance(isCompactFormFactor)
-    : 0;
-  const bottomOverlayControlClearance = hasActiveComposer
-    ? resolveComposerTrackControlClearance(isCompactFormFactor)
-    : 0;
+  const streamKey = useAgentStreamKey(serverId, draft?.draftId, agentId);
+  const readingPosition = useAgentReadingPosition();
   const streamItemsRaw = useAgentStreamTail(serverId, agentId);
   const pendingMessageSubmissions = useSessionStore(
     useShallow((state) =>
@@ -1452,14 +1481,14 @@ const AgentStreamSection = memo(function AgentStreamSection({
   if (draftTimeline) {
     return (
       <AgentStreamView
+        key={streamKey}
         ref={streamViewRef}
         agentId={draftTimeline.agent.id}
         serverId={serverId}
         context={draftTimeline.agent}
         streamItems={draftTimeline.streamItems}
         pendingPermissions={EMPTY_PENDING_PERMISSIONS}
-        bottomOverlayTailClearance={bottomOverlayTailClearance}
-        bottomOverlayControlClearance={bottomOverlayControlClearance}
+        bottomBarContent={bottomBarContent}
         toast={toast}
         pendingMessageSubmissions={draftTimeline.pendingMessageSubmissions}
         turnPresentation={draftTimeline.turnPresentation}
@@ -1472,6 +1501,8 @@ const AgentStreamSection = memo(function AgentStreamSection({
   }
   return (
     <AgentStreamView
+      key={streamKey}
+      readingPosition={readingPosition}
       ref={streamViewRef}
       agentId={agent.id}
       serverId={serverId}
@@ -1482,8 +1513,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
       isAuthoritativeHistoryReady={hasAppliedAuthoritativeHistory}
       isInitialHistoryLoading={isInitialHistoryLoading}
       revealInitialHistory={revealInitialHistory}
-      bottomOverlayTailClearance={bottomOverlayTailClearance}
-      bottomOverlayControlClearance={bottomOverlayControlClearance}
+      bottomBarContent={bottomBarContent}
       toast={toast}
       pendingMessageSubmissions={pendingMessageSubmissions}
       turnPresentation={turnPresentation}
@@ -1612,9 +1642,10 @@ function ActiveAgentComposer({
   onMessageSent: () => void;
 }) {
   const isCompactFormFactor = useIsCompactFormFactor();
+  const paneWidth = useContext(ComposerLayoutWidthContext);
   const { onLayout: onInputAreaLayout, isBelow: isCompactComposerLayout } = useContainerWidthBelow(
     COMPACT_CONTENT_WIDTH,
-    { initialIsBelow: isCompactFormFactor },
+    { initialIsBelow: isCompactFormFactor, allocatedWidth: paneWidth },
   );
   const paneContext = usePaneContext();
   const openInSidePane = useSettings((settings) => settings.openInSidePane);
@@ -1685,7 +1716,10 @@ function ActiveAgentComposer({
   );
 
   return (
-    <View style={animatedStaticStyles.inputAreaWrapper} onLayout={onInputAreaLayout}>
+    <View
+      style={animatedStaticStyles.inputAreaWrapper}
+      onLayout={paneWidth === null ? onInputAreaLayout : undefined}
+    >
       <Composer
         agentId={agentId}
         serverId={serverId}

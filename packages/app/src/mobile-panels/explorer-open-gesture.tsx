@@ -10,6 +10,7 @@ import { isWeb } from "@/constants/platform";
 interface CompactExplorerOpenGestureSurfaceProps {
   children: ReactNode;
   enabled: boolean;
+  minWidth?: number;
   onOpenExplorer: () => void;
 }
 
@@ -18,6 +19,7 @@ const COMPACT_WEB_GESTURE_TOUCH_ACTION = isWeb ? "auto" : "pan-y";
 function CompactExplorerOpenGestureSurface({
   children,
   enabled,
+  minWidth,
   onOpenExplorer,
 }: CompactExplorerOpenGestureSurfaceProps) {
   const explorerOpenGesture = useOpenFileExplorerGesture({
@@ -27,7 +29,7 @@ function CompactExplorerOpenGestureSurface({
 
   return (
     <GestureDetector gesture={explorerOpenGesture} touchAction={COMPACT_WEB_GESTURE_TOUCH_ACTION}>
-      <View style={styles.fill}>{children}</View>
+      <View style={[styles.fill, { minWidth }]}>{children}</View>
     </GestureDetector>
   );
 }
@@ -35,9 +37,11 @@ function CompactExplorerOpenGestureSurface({
 export function WorkspaceExplorerOpenGesture({
   children,
   enabled,
+  minWidth,
 }: {
   children: ReactNode;
   enabled: boolean;
+  minWidth?: number;
 }) {
   const selection = useActiveWorkspaceSelection();
   const workspace = useWorkspace(selection?.serverId ?? null, selection?.workspaceId ?? null);
@@ -51,6 +55,7 @@ export function WorkspaceExplorerOpenGesture({
   return (
     <CompactExplorerOpenGestureSurface
       enabled={enabled && Boolean(workspace)}
+      minWidth={minWidth}
       onOpenExplorer={handleOpen}
     >
       {children}

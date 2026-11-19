@@ -267,7 +267,11 @@ export function SplitContainer({
         <WindowChromeRegion corners={mainColumnWindowChromeCorners}>
           <View style={mainColumnStyle}>
             {panesShareWorkspaceHeader ? (
-              <AdaptiveWorkspaceChrome compactHeader={sharedCompactHeader}>
+              <AdaptiveWorkspaceChrome
+                compactHeader={sharedCompactHeader}
+                tabMeasurement={null}
+                fullHeaderVisible={!focusModeEnabled}
+              >
                 {renderMainHeader?.()}
               </AdaptiveWorkspaceChrome>
             ) : null}
@@ -695,6 +699,23 @@ const SplitPaneView = memo(function SplitPaneView({
       })),
     [activeTabDescriptor?.key, closingTabIds, hoveredCloseTabKey, paneTabs],
   );
+  const tabMeasurementInput = useMemo(
+    () => ({
+      tabs: desktopTabRowItems,
+      normalizedServerId,
+      normalizedWorkspaceId,
+      showPaneSplitActions: !focusModeEnabled,
+      showPaneMaximizeAction: workspaceHasMultiplePanes && !focusModeEnabled,
+      focusModeEnabled: Boolean(focusModeEnabled),
+    }),
+    [
+      desktopTabRowItems,
+      normalizedServerId,
+      normalizedWorkspaceId,
+      focusModeEnabled,
+      workspaceHasMultiplePanes,
+    ],
+  );
 
   useEffect(() => {
     if (isNative) {
@@ -828,7 +849,11 @@ const SplitPaneView = memo(function SplitPaneView({
         style={styles.pane}
         testID={`workspace-pane-${pane.id}`}
       >
-        <AdaptiveWorkspaceChrome compactHeader={compactHeader}>
+        <AdaptiveWorkspaceChrome
+          compactHeader={compactHeader}
+          tabMeasurement={tabMeasurementInput}
+          fullHeaderVisible={ownsWorkspaceHeader && !focusModeEnabled}
+        >
           {ownsWorkspaceHeader ? renderMainHeader?.() : null}
           <WindowChromeRegion corners={focusModeEnabled ? "both" : "none"}>
             <WindowChromeSafeArea placement="inline" style={styles.paneTabs}>

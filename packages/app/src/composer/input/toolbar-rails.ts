@@ -7,6 +7,10 @@ import {
 } from "@/components/ui/control-geometry";
 import { bySizing } from "@/components/ui/control-sizing";
 
+export const COMPOSER_ACTION_DISC_SIZE = 28;
+export const COMPOSER_ACTION_ICON_SIZE = 16;
+export const COMPOSER_ACTION_TARGET_SIZE = 36;
+
 /** The control at one end of the composer toolbar, which decides how far the row hangs out. */
 export type ComposerToolbarEdge = "attach" | "label" | "disc" | "none";
 

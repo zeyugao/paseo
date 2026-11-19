@@ -39,6 +39,22 @@ export function resolveComposerSurfacePresentation(
   return showOverlay ? OVERLAY_PRESENTATION : INPUT_PRESENTATION;
 }
 
+/** Settings borrow keyboard focus without changing the layout their trigger opened from. */
+export function resolveComposerCollapsed(input: {
+  native: boolean;
+  isLandscape: boolean;
+  fullscreen: boolean;
+  editorFocused: boolean;
+  settingsEditorFocused: boolean | null;
+}): boolean {
+  return (
+    input.native &&
+    input.isLandscape &&
+    !input.fullscreen &&
+    !(input.settingsEditorFocused ?? input.editorFocused)
+  );
+}
+
 interface StopRealtimeVoiceContext {
   voice: { stopVoice: () => Promise<unknown> } | null | undefined;
   isRealtimeVoiceForCurrentAgent: boolean;

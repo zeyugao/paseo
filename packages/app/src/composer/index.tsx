@@ -31,17 +31,21 @@ import {
 import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
+import { useAppWindowIsLandscape } from "@/hooks/use-app-window-size";
 import {
   controlSizingForLayout,
   TOOLBAR_CONTROL_GAP,
-  TOOLBAR_DISC_GLYPH_SIZES,
-  TOOLBAR_DISC_SIZE,
   TOOLBAR_RINGS,
   toolbarGlyphsFor,
   toolbarGlyphTone,
   type ToolbarGlyph,
   toolbarSlot,
 } from "@/components/ui/control-geometry";
+import {
+  COMPOSER_ACTION_DISC_SIZE,
+  COMPOSER_ACTION_ICON_SIZE,
+  COMPOSER_ACTION_TARGET_SIZE,
+} from "./input/toolbar-rails";
 import { usePanelStore, type MobilePanelView } from "@/stores/panel-store";
 import { usePointerCapabilities } from "@/hooks/pointer-capabilities";
 import { useShallow } from "zustand/shallow";
@@ -59,6 +63,7 @@ import {
 } from "lucide-react-native";
 import * as Clipboard from "expo-clipboard";
 import { FOOTER_HEIGHT } from "@/constants/layout";
+import { WindowLayoutVariantView } from "@/window-layout/variant-view";
 import {
   AgentControls,
   DraftAgentControls,
@@ -1094,7 +1099,6 @@ function ComposerForgeBinding({
 }
 
 interface ComposerCancelButtonProps {
-  discGlyphSize: number;
   cancelButtonStyle: (state: PressableStateCallbackType) => object[];
   handleCancelAgent: () => void;
   isConnected: boolean;
@@ -1104,7 +1108,6 @@ interface ComposerCancelButtonProps {
 }
 
 function ComposerCancelButton({
-  discGlyphSize,
   cancelButtonStyle,
   handleCancelAgent,
   isConnected,
@@ -1118,7 +1121,7 @@ function ComposerCancelButton({
   const icon = isCancellingAgent ? (
     <LoadingSpinner size="small" color="white" />
   ) : (
-    <Square size={discGlyphSize} color="white" fill="white" />
+    <Square size={COMPOSER_ACTION_ICON_SIZE} color="white" fill="white" />
   );
   const shortcutNode = agentInterruptKeys ? <Shortcut chord={agentInterruptKeys} /> : null;
   return (
@@ -1186,7 +1189,7 @@ function ComposerVoiceModeButton({
             <LoadingSpinner size="small" color="white" />
           ) : (
             <ThemedAudioLines
-              size={glyph.size}
+              size={COMPOSER_ACTION_ICON_SIZE}
               strokeWidth={glyph.strokeWidth}
               uniProps={colorMapping}
             />
@@ -1265,6 +1268,11 @@ type ComposerContentProps = Omit<ComposerProps, "isPaneFocused">;
 
 const ComposerContent = memo(ComposerContentImpl);
 
+const INPUT_AREA_LAYOUT = {
+  expanded: { minHeight: FOOTER_HEIGHT },
+  collapsed: { minHeight: 0 },
+};
+
 // oxlint-disable-next-line complexity
 function ComposerContentImpl({
   agentId,
@@ -1338,10 +1346,10 @@ function ComposerContentImpl({
   const setQueuedMessages = useSessionStore((state) => state.setQueuedMessages);
 
   const isCompactFormFactor = useIsCompactFormFactor();
+  const isLandscape = useAppWindowIsLandscape();
   const isCompactLayout = resolveCompactLayout(isCompactLayoutOverride, isCompactFormFactor);
   const controlSizing = controlSizingForLayout(isCompactFormFactor);
   const toolbarGlyph = toolbarGlyphsFor(controlSizing).icon;
-  const discGlyphSize = TOOLBAR_DISC_GLYPH_SIZES[controlSizing];
   const isDesktopWebBreakpoint = resolveIsDesktopWebBreakpoint(isCompactFormFactor);
   const { finePointer: hasFinePointer } = usePointerCapabilities();
   const isDesktopLayout = resolveIsDesktopWebBreakpoint(isCompactLayout);
@@ -2141,7 +2149,6 @@ function ComposerContentImpl({
   const activeActionContent = useMemo(
     () => (
       <ComposerCancelButton
-        discGlyphSize={discGlyphSize}
         cancelButtonStyle={cancelButtonStyle}
         handleCancelAgent={handleCancelAgent}
         isConnected={isConnected}
@@ -2150,15 +2157,7 @@ function ComposerContentImpl({
         t={t}
       />
     ),
-    [
-      agentInterruptKeys,
-      discGlyphSize,
-      cancelButtonStyle,
-      handleCancelAgent,
-      isCancellingAgent,
-      isConnected,
-      t,
-    ],
+    [agentInterruptKeys, cancelButtonStyle, handleCancelAgent, isCancellingAgent, isConnected, t],
   );
 
   const voiceModeContent = useMemo(
@@ -2559,7 +2558,12 @@ function ComposerContentImpl({
       >
         <AttachmentLightbox source={lightboxSource} onClose={handleLightboxClose} />
         {/* Input area */}
-        <View style={inputAreaContainerStyle}>
+        <WindowLayoutVariantView
+          style={inputAreaContainerStyle}
+          variants={isFullscreen ? undefined : INPUT_AREA_LAYOUT}
+          collapsed={isNative && isLandscape}
+          collapseInLandscape={isNative}
+        >
           <View style={inputAreaContentStyle}>
             {isFullscreen ? null : queueList}
             {!isFullscreen && sendErrorNode}
@@ -2656,7 +2660,7 @@ function ComposerContentImpl({
               {pluginAttachments.picker}
             </ComposerAutocompleteBinding>
           </View>
-        </View>
+        </WindowLayoutVariantView>
       </View>
     </>
   );
@@ -2685,9 +2689,9 @@ const styles = StyleSheet.create((theme: Theme) => ({
   inputAreaContainer: {
     flexShrink: 1,
     position: "relative",
-    minHeight: FOOTER_HEIGHT,
     marginHorizontal: "auto",
     alignItems: "center",
+    justifyContent: "flex-end",
     width: "100%",
     overflow: "visible",
     paddingHorizontal: theme.spacing[4],
@@ -2719,13 +2723,14 @@ const styles = StyleSheet.create((theme: Theme) => ({
     gap: theme.spacing[3],
   },
   cancelButton: {
-    ...toolbarSlot(),
+    width: COMPOSER_ACTION_TARGET_SIZE,
+    height: COMPOSER_ACTION_TARGET_SIZE,
     alignItems: "center",
     justifyContent: "center",
   },
   cancelButtonDisc: {
-    width: TOOLBAR_DISC_SIZE,
-    height: TOOLBAR_DISC_SIZE,
+    width: COMPOSER_ACTION_DISC_SIZE,
+    height: COMPOSER_ACTION_DISC_SIZE,
     borderRadius: theme.borderRadius.full,
     backgroundColor: theme.colors.palette.red[600],
     alignItems: "center",
@@ -2743,15 +2748,16 @@ const styles = StyleSheet.create((theme: Theme) => ({
     justifyContent: "center",
   },
   voiceModeDisc: {
-    width: TOOLBAR_DISC_SIZE,
-    height: TOOLBAR_DISC_SIZE,
+    width: COMPOSER_ACTION_DISC_SIZE,
+    height: COMPOSER_ACTION_DISC_SIZE,
     borderRadius: theme.borderRadius.full,
     backgroundColor: theme.colors.surface3,
     alignItems: "center",
     justifyContent: "center",
   },
   realtimeVoiceButton: {
-    ...toolbarSlot(),
+    width: COMPOSER_ACTION_TARGET_SIZE,
+    height: COMPOSER_ACTION_TARGET_SIZE,
     borderRadius: theme.borderRadius.full,
     alignItems: "center",
     justifyContent: "center",

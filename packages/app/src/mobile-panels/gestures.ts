@@ -23,6 +23,15 @@ export function usePanelAwareHorizontalScrollGesture() {
   );
 }
 
+/** Vertical page scrolling can coexist with a horizontal panel-opening pan. */
+export function usePanelAwareVerticalScrollGesture() {
+  const { leftOpenGestureRef, rightOpenGestureRef } = useMobilePanelsRuntime();
+  return useMemo(
+    () => Gesture.Native().simultaneousWithExternalGesture(leftOpenGestureRef, rightOpenGestureRef),
+    [leftOpenGestureRef, rightOpenGestureRef],
+  );
+}
+
 function isCurrentSelection(startedRevision: number): boolean {
   return usePanelStore.getState().mobilePanel.revision === startedRevision;
 }

@@ -52,10 +52,12 @@ export type ExpandedPathsUpdate = string[] | ((currentPaths: string[]) => string
 export interface PanelState {
   // Mobile: React's durable target plus the generation that owns it.
   mobilePanel: MobilePanelSelection;
-  layout: PanelLayout;
 
   // Desktop: independent sidebar toggles
   desktop: DesktopSidebarState;
+
+  // Current window allocation, never persisted with the user's dock preference.
+  layout: PanelLayout;
 
   // File explorer settings (shared between mobile/desktop)
   expandedPathsByWorkspace: Record<string, string[]>;
@@ -79,10 +81,8 @@ export interface PanelState {
   showMobileAgent: () => void;
   showMobileAgentList: () => void;
   showMobileFileExplorer: () => void;
-  toggleMobileAgentList: () => void;
   openDesktopAgentList: () => void;
   closeDesktopAgentList: () => void;
-  toggleDesktopAgentList: () => void;
   openAgentListForLayout: (input: PanelLayoutInput) => void;
   closeAgentListForLayout: (input: PanelLayoutInput) => void;
   toggleAgentListForLayout: (input: PanelLayoutInput) => void;
@@ -121,7 +121,7 @@ export const usePanelStore = create<PanelState>()(
     (set) => ({
       // Mobile always starts at agent view
       mobilePanel: { target: "agent", revision: 0 },
-      layout: { isCompact: false, leftSidebar: "hidden" },
+      layout: { isCompact: false, leftSidebar: "hidden", canDockAgentList: false },
 
       // Desktop defaults based on platform
       desktop: {
@@ -157,14 +157,6 @@ export const usePanelStore = create<PanelState>()(
       showMobileFileExplorer: () =>
         set((state) => setMobilePanelTargetPatch(state, "file-explorer")),
 
-      toggleMobileAgentList: () =>
-        set((state) =>
-          setMobilePanelTargetPatch(
-            state,
-            state.mobilePanel.target === "agent-list" ? "agent" : "agent-list",
-          ),
-        ),
-
       openDesktopAgentList: () =>
         set((state) => (state.desktop.agentListOpen ? state : dockAgentListPatch(state))),
 
@@ -176,16 +168,9 @@ export const usePanelStore = create<PanelState>()(
           return { desktop: { ...state.desktop, agentListOpen: false } };
         }),
 
-      toggleDesktopAgentList: () =>
-        set((state) =>
-          state.desktop.agentListOpen
-            ? { desktop: { ...state.desktop, agentListOpen: false } }
-            : dockAgentListPatch(state),
-        ),
-
       openAgentListForLayout: ({ isCompact }) =>
         set((state) => {
-          if (isCompact) {
+          if (isCompact || !state.layout.canDockAgentList) {
             return setMobilePanelTargetPatch(state, "agent-list");
           }
           return state.desktop.agentListOpen ? state : dockAgentListPatch(state);
@@ -193,7 +178,7 @@ export const usePanelStore = create<PanelState>()(
 
       closeAgentListForLayout: ({ isCompact }) =>
         set((state) => {
-          if (isCompact) {
+          if (isCompact || !state.layout.canDockAgentList) {
             return setMobilePanelTargetPatch(state, "agent");
           }
           return state.desktop.agentListOpen
@@ -203,7 +188,7 @@ export const usePanelStore = create<PanelState>()(
 
       toggleAgentListForLayout: ({ isCompact }) =>
         set((state) => {
-          if (isCompact) {
+          if (isCompact || !state.layout.canDockAgentList) {
             return setMobilePanelTargetPatch(
               state,
               state.mobilePanel.target === "agent-list" ? "agent" : "agent-list",
@@ -219,7 +204,8 @@ export const usePanelStore = create<PanelState>()(
           const mobilePanel = reconcileMobilePanel(state.mobilePanel, layout);
           const layoutUnchanged =
             state.layout.isCompact === layout.isCompact &&
-            state.layout.leftSidebar === layout.leftSidebar;
+            state.layout.leftSidebar === layout.leftSidebar &&
+            state.layout.canDockAgentList === layout.canDockAgentList;
           return mobilePanel === state.mobilePanel && layoutUnchanged
             ? state
             : { mobilePanel, layout };

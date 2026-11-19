@@ -50,6 +50,10 @@ The UI worklet owns transient motion:
 
 React publishes the active panel only when the canonical target and the UI-thread position agree at
 the final anchor. Retained content never observes gesture previews, progress, or an unsettled target.
+Window-bar controls follow the requested target instead: the navigation toggle and sidebar close
+replace one another in the same slot in that commit. Do not publish a second close action from the
+sidebar's settled activity; it leaves an empty bar on opening and appends X below restored page actions
+on closing.
 The gesture hosts stay mounted. A pointer capture on a paragraph confines browser selection to that
 paragraph, so the Gesture Handler web patch keeps it off: initially disabled hosts register no
 pointer listeners, and an enabled host captures only a pointer its handler still tracks after
@@ -64,10 +68,11 @@ appearance keys; see [Unistyles appearance boundaries](unistyles.md#runtime-them
 ## Why one position
 
 Both transforms and both backdrop opacities are derived from the same normalized position. Panel
-width is only a projection input: the window width on the right, and on the left the width
-`MobilePanelsProvider` resolves (the full window on compact layouts, the saved sidebar width
-clamped to the viewport on wide ones). The dock, the overlay, and their gestures read that one
-value. Rotation changes the projection, not the panel state.
+width is only a projection input: each overlay uses its allocated viewport, not an unconditionally
+full window. `MobilePanelsProvider` resolves the left panel's preferred width (the window on compact
+layouts, the saved sidebar width on wide ones); the overlay clamps it to its available allocation.
+The dock, the overlay, and their gestures read that one value. Rotation changes the projection,
+not the panel state.
 
 This makes these invalid states unrepresentable:
 
@@ -111,6 +116,12 @@ definition, no longer eligible to begin.
 - Phone web opens a drawer only from the 32px edge it slides in from, so interior swipes stay with
   terminals, code blocks, and diff scrollers. Native drawers and the wide overlay open from anywhere.
   Horizontal-scroll ownership and the open-gesture blocker still take precedence.
+- New workspace, History, and Schedules use the shell's navigation pan too. Disable native-stack
+  swipe-to-pop on these destinations; otherwise UIKit can pop the page instead of revealing the
+  sidebar, including while navigation is already docked open.
+  Vertical page scrollers use `usePanelAwareVerticalScrollGesture` so native list scrolling does not
+  preempt horizontal navigation. Backdrop dismissal uses the ordinary `Pressable` click path;
+  a nested native Tap recognizer can lose taps to the surrounding manual close pan.
 - A focused interactive surface may block panel-opening gestures through
   `useBlockMobilePanelOpenGestures`. Register only while the conflicting interaction is active and
   unregister when the surface is hidden or unfocused. The blocker never disables gestures that close
@@ -126,9 +137,13 @@ definition, no longer eligible to begin.
   Reanimated layout props: a width keyed on the presentation reaches Android after React commits the
   switch, and a lost update left the workspace at the dock width. The dock sizes to its content and
   the overlay host fills the window.
-- The overlay's backdrop covers the whole window; safe-area padding applies to the sidebar and
-  workspace content only. It closes by swiping back, tapping the backdrop, or picking a destination:
-  workspace destinations close the overlay before navigating. Settings suspends the compact
+- The overlay's backdrop covers its allocated viewport. A navigation overlay excludes the native
+  vertical bar on either edge, and consumes that horizontal clearance once before laying out its
+  content. The desktop sidebar's outer hook still sees the window's original safe area; do not add
+  it as inner padding after the overlay has allocated the bar. The reserved bar stays uncovered and
+  owns the close action; without a bar, close remains
+  beside the first navigation row. Swiping back, tapping the backdrop, or picking a destination
+  closes the overlay. Workspace destinations close it before navigating. Settings suspends the compact
   sidebar for the duration of its visit instead.
 - Animated panel nodes use React Native static styles plus inline theme values. Do not attach
   Unistyles-generated styles to those nodes; Unistyles and Reanimated patching the same Fabric node

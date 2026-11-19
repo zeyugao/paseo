@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { useReviewDraftStore, type ReviewDraftComment } from "./store";
 import { buildReviewableDiffTargetKey, type ReviewableDiffTarget } from "@/utils/diff-layout";
+import type * as Unistyles from "../../test-stubs/react-native-unistyles";
 import {
   getInlineReviewThreadState,
   getSplitInlineReviewThreadState,
@@ -67,14 +68,19 @@ vi.mock("react-native", async (importOriginal) => {
   };
 });
 
-vi.mock("react-native-unistyles", async () => {
+vi.mock("react-native-unistyles", async (importOriginal) => {
+  const actual = await importOriginal<typeof Unistyles>();
   const { darkTheme: theme } = await import("@/styles/theme");
+  const runtime = { breakpoint: "md" };
   return {
+    ...actual,
     StyleSheet: {
+      ...actual.StyleSheet,
       create: (factory: unknown) => (typeof factory === "function" ? factory(theme) : factory),
     },
+    UnistylesRuntime: runtime,
     withUnistyles: <T,>(component: T) => component,
-    useUnistyles: () => ({ theme, rt: { breakpoint: "md" } }),
+    useUnistyles: () => ({ theme, rt: runtime }),
   };
 });
 

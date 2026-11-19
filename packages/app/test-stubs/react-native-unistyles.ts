@@ -1,5 +1,6 @@
 import { createElement, type ElementType } from "react";
 import { lightHighlightColors } from "@getpaseo/highlight";
+import { LAYOUT_BREAKPOINTS } from "../src/constants/layout-breakpoints";
 import { lightTheme } from "../src/styles/theme";
 
 const pinnedTheme = {
@@ -106,15 +107,20 @@ function isStyleFactory<T>(styles: T | StyleFactory<T>): styles is StyleFactory<
   return typeof styles === "function";
 }
 
-// The app's breakpoints (src/styles/unistyles.ts), widest first.
-const BREAKPOINTS: [string, number][] = [
-  ["xl", 1200],
-  ["lg", 992],
-  ["md", 600],
-  ["sm", 576],
-  ["xs", 0],
-];
-const BREAKPOINT_NAMES = new Set(BREAKPOINTS.map(([name]) => name));
+type Breakpoint = keyof typeof LAYOUT_BREAKPOINTS;
+// Widest first, just as a style chooses the highest matching minimum width.
+const BREAKPOINTS = (Object.keys(LAYOUT_BREAKPOINTS) as Breakpoint[]).sort(
+  (a, b) => LAYOUT_BREAKPOINTS[b] - LAYOUT_BREAKPOINTS[a],
+);
+const BREAKPOINT_NAMES = new Set<string>(BREAKPOINTS);
+
+// The test adapter implements the breakpoint dependency consumed by the layout store.
+export const UnistyleDependency = { Breakpoints: 3 } as const;
+type Dependency = typeof UnistyleDependency.Breakpoints;
+
+function breakpointAt(width: number): Breakpoint | undefined {
+  return BREAKPOINTS.find((name) => width >= LAYOUT_BREAKPOINTS[name]);
+}
 
 function isBreakpointValue(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -125,8 +131,8 @@ function isBreakpointValue(value: unknown): value is Record<string, unknown> {
 /** Picks a breakpoint value for the window's width, the way Unistyles does at runtime. */
 function resolveBreakpointValue(value: Record<string, unknown>): unknown {
   const width = typeof window === "undefined" ? 0 : window.innerWidth;
-  for (const [name, minWidth] of BREAKPOINTS) {
-    if (width >= minWidth && name in value) return value[name];
+  for (const name of BREAKPOINTS) {
+    if (width >= LAYOUT_BREAKPOINTS[name] && name in value) return value[name];
   }
   return undefined;
 }
@@ -154,6 +160,20 @@ function resolveStyles<T>(styles: T): T {
 export const StyleSheet = {
   create: <T>(styles: T | StyleFactory<T>): T =>
     resolveStyles(isStyleFactory(styles) ? styles(testTheme, testRuntime) : styles),
+  addChangeListener(listener: (dependencies: Dependency[]) => void): () => void {
+    if (typeof window === "undefined") return () => {};
+
+    const target = window;
+    let breakpoint = breakpointAt(target.innerWidth);
+    const onResize = () => {
+      const next = breakpointAt(target.innerWidth);
+      if (next === breakpoint) return;
+      breakpoint = next;
+      listener([UnistyleDependency.Breakpoints]);
+    };
+    target.addEventListener("resize", onResize);
+    return () => target.removeEventListener("resize", onResize);
+  },
 };
 
 type UniPropsMapping = (
@@ -180,6 +200,9 @@ export const useUnistyles = () => ({
 });
 
 export const UnistylesRuntime = {
+  get breakpoint() {
+    return typeof window === "undefined" ? undefined : breakpointAt(window.innerWidth);
+  },
   setTheme: () => undefined,
   themeName: "light",
 };

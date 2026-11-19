@@ -192,8 +192,15 @@ export default defineConfig({
         ".json",
       ],
     },
-    // Bundle the CJS dependencies of the excluded gesture-handler package for the browser.
     include: [
+      // Prebundle React and the renderer with dnd-kit. A late optimizer reload can otherwise
+      // leave dnd-kit's hooks and the mounted renderer on different React instances.
+      "react",
+      "react-dom",
+      "react-dom/client",
+      "@dnd-kit/core",
+      "@dnd-kit/sortable",
+      "@dnd-kit/utilities",
       "react/jsx-runtime",
       "react/compiler-runtime",
       "expo-router/react-navigation",

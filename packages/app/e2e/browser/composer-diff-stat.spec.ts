@@ -513,6 +513,12 @@ test.describe("send review feedback", () => {
         await openReviewDiff(page, workspace);
         await closeAgentTab(page, historical.id);
         await openAgentRoute(page, { workspaceId: workspace.workspaceId, agentId: second.id });
+        // The route's open intent is consumed after the workspace directory hydrates. Wait for
+        // it to activate the requested agent so it cannot take the selection back from the diff.
+        await expect(page.getByTestId(`workspace-tab-agent_${second.id}`)).toHaveAttribute(
+          "aria-selected",
+          "true",
+        );
         await selectDiffTab(page);
         await addSavedReview(page, "Review for second agent");
       });

@@ -226,7 +226,7 @@ interface WorkspaceLayoutStore {
   unpinAgent: (workspaceKey: string, agentId: string) => void;
   hideAgent: (workspaceKey: string, agentId: string) => void;
   unhideAgent: (workspaceKey: string, agentId: string) => void;
-  purgeWorkspace: (workspaceKey: string) => void;
+  purgeWorkspace: (workspaceKey: string, options?: { preservePendingOpen?: boolean }) => void;
 }
 
 interface WorkspaceFocusRestorationState {
@@ -1754,8 +1754,12 @@ export function createWorkspaceLayoutStore(
               }
             }
             const sheetAgentGone = fittingSheets.length !== sheets.length;
+            // An unchanged default layout would expose New before its directories arrive.
+            // Known entities can still initialize the workspace from a partial snapshot.
             if (
-              state.layoutByWorkspace[normalizedWorkspaceKey] &&
+              (state.layoutByWorkspace[normalizedWorkspaceKey] ||
+                !snapshot.agentsHydrated ||
+                !snapshot.terminalsHydrated) &&
               nextLayout === rawLayout &&
               pinnedAgentIdsByWorkspace === state.pinnedAgentIdsByWorkspace &&
               !sheetAgentGone
@@ -2261,7 +2265,7 @@ export function createWorkspaceLayoutStore(
             };
           });
         },
-        purgeWorkspace: (workspaceKey) => {
+        purgeWorkspace: (workspaceKey, options) => {
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
           if (!normalizedWorkspaceKey) {
             return;
@@ -2283,8 +2287,12 @@ export function createWorkspaceLayoutStore(
             if (!hasAny) {
               return state;
             }
-            const { [normalizedWorkspaceKey]: _pendingOpen, ...pendingOpenByWorkspace } =
-              state.pendingOpenByWorkspace;
+            let pendingOpenByWorkspace = state.pendingOpenByWorkspace;
+            if (!options?.preservePendingOpen) {
+              const { [normalizedWorkspaceKey]: _pendingOpen, ...remainingPendingOpen } =
+                pendingOpenByWorkspace;
+              pendingOpenByWorkspace = remainingPendingOpen;
+            }
             const {
               [normalizedWorkspaceKey]: _autoOpened,
               ...pullRequestTabAutoOpenedByWorkspace

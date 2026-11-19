@@ -14,10 +14,12 @@ import {
   WorktreeTeardownError,
 } from "../utils/worktree.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
-import type {
-  PersistedWorkspaceRecord,
-  WorkspaceArchiveContext,
-  WorkspaceRegistry,
+import {
+  isWorkspaceVisibleToServer,
+  type PersistedWorkspaceRecord,
+  type WorkspaceArchiveContext,
+  WorkspaceCwdOwnershipError,
+  type WorkspaceRegistry,
 } from "./workspace-registry.js";
 import { createRealpathAwarePathMatcher } from "../utils/path.js";
 import { runWithGitCommandPriority } from "../utils/run-git-command.js";
@@ -30,6 +32,7 @@ export type ActiveWorkspaceRef = Pick<
 
 export interface ArchiveDependencies {
   paseoHome?: string;
+  serverId?: string;
   // Base directory that may hold worktrees across repositories.
   paseoWorktreesBaseRoot?: string;
   github: ForgeService;
@@ -56,8 +59,8 @@ export interface ArchiveDependencies {
   killTerminalsForWorkspace: (workspaceId: string) => Promise<void>;
   stopWorkspaceSetup?: (workspaceId: string) => Promise<void>;
   assertWorkspaceAutomationAllowed?: (workspaceId: string) => Promise<void>;
-  // Archive targets are resolved to the current host's workspace. Filesystem
-  // deletion still checks all active host records before removing a backing path.
+  // Path-based archive and worktree disk mutations check ownership separately
+  // from the workspace ID used for record-scoped archive.
   assertCwdWorkspaceOwnedByThisServer: (cwd: string) => Promise<void>;
   sessionLogger?: Logger;
 }
@@ -171,15 +174,8 @@ async function archiveByScopeWithPriority(
 
   checkpoint();
   const target = await resolveArchiveTarget(dependencies, request.scope);
-  // A backing directory can outlive its active workspace record. Gate the
-  // resolved backing path as well as teardown cwd values so an archived
-  // foreign record still prevents this host from deleting its worktree.
-  const ownershipTargets = [
-    ...(target.backing ? [target.backing.path] : []),
-    ...target.teardownTargets.map((teardownTarget) => teardownTarget.cwd),
-  ];
-  for (const cwd of uniqueCwds(ownershipTargets)) {
-    await dependencies.assertCwdWorkspaceOwnedByThisServer(cwd);
+  if (request.scope.kind === "worktree") {
+    await assertArchivePathsOwned(dependencies, target);
   }
   const targetWorkspaceIds = target.workspaceIds;
 
@@ -253,9 +249,12 @@ async function resolveArchiveTarget(
 
   if (scope.kind === "workspace") {
     const workspaceId = scope.workspaceId;
+    const persisted = await dependencies.getWorkspace?.(workspaceId);
+    if (persisted && !isWorkspaceVisibleToServer(persisted, dependencies.serverId)) {
+      throw new Error(`Workspace ${workspaceId} is owned by host ${persisted.hostId}`);
+    }
     const record =
-      (await dependencies.getWorkspace?.(workspaceId)) ??
-      activeWorkspaces.find((workspace) => workspace.workspaceId === workspaceId);
+      persisted ?? activeWorkspaces.find((workspace) => workspace.workspaceId === workspaceId);
     if (!record) {
       dependencies.sessionLogger?.warn(
         { workspaceId },
@@ -434,6 +433,35 @@ async function archiveTargetRecords(
   return { archivedAgents, archivedWorkspaceIds };
 }
 
+async function assertArchivePathsOwned(
+  dependencies: Pick<ArchiveDependencies, "assertCwdWorkspaceOwnedByThisServer">,
+  target: ArchiveTarget,
+): Promise<void> {
+  const paths = target.teardownTargets.map(({ cwd }) => cwd);
+  if (target.backing) paths.push(target.backing.path);
+  for (const cwd of uniqueCwds(paths)) {
+    await dependencies.assertCwdWorkspaceOwnedByThisServer(cwd);
+  }
+}
+
+async function canMutateArchivePaths(
+  dependencies: ArchiveDependencies,
+  target: ArchiveTarget,
+  requestId: string,
+): Promise<boolean> {
+  try {
+    await assertArchivePathsOwned(dependencies, target);
+    return true;
+  } catch (error) {
+    if (!(error instanceof WorkspaceCwdOwnershipError)) throw error;
+    dependencies.sessionLogger?.info(
+      { reason: error.message, targetPath: target.backing?.path, requestId },
+      "Worktree directory left in place during archive",
+    );
+    return false;
+  }
+}
+
 async function maybeRemoveDirectory(
   dependencies: ArchiveDependencies,
   request: { requestId: string; checkpoint: () => void },
@@ -460,6 +488,12 @@ async function maybeRemoveDirectory(
         directoryLeftBehind: { path: backing.path, reason },
       };
     }
+    return { removedDirectory: false };
+  }
+
+  // The local record is archived now and cannot authorize writes to a path
+  // still owned by a sibling host, even if that host's record is archived too.
+  if (!(await canMutateArchivePaths(dependencies, target, request.requestId))) {
     return { removedDirectory: false };
   }
 

@@ -801,6 +801,13 @@ export function isWorkspaceVisibleToServer(
   return serverId === undefined || record.hostId === undefined || record.hostId === serverId;
 }
 
+export class WorkspaceCwdOwnershipError extends Error {
+  constructor(workspace: PersistedWorkspaceRecord) {
+    super(`Workspace ${workspace.workspaceId} is owned by host ${workspace.hostId}`);
+    this.name = "WorkspaceCwdOwnershipError";
+  }
+}
+
 // Cwd operations are allowed when the current host has an active workspace
 // covering the path. Archived local records cannot authorize a foreign-only path.
 // Explicit workspace IDs always use the stricter owner check.
@@ -836,9 +843,7 @@ export function assertCwdWorkspaceRecordsOwnedByThisServer(
     }
   }
   if (firstForeignOverlap) {
-    throw new Error(
-      `Workspace ${firstForeignOverlap.workspaceId} is owned by host ${firstForeignOverlap.hostId}`,
-    );
+    throw new WorkspaceCwdOwnershipError(firstForeignOverlap);
   }
 }
 

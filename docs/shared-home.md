@@ -41,6 +41,10 @@ including records in foreign workspaces, are never repaired or resumed as writer
 | Attention push notifications                          | Sent only by the owning daemon, so a shared token list does not double-notify                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | Workspace label edits                                 | Serialized across daemons by a cross-process file lock (`projects/.labels.lock`) with an on-disk catalog re-read inside the lock, so concurrent edits from two daemons both survive. Assignment writes are host-scoped; a rename or delete is rejected when it would rewrite an assignment on another host's workspace.                                                                                                                                                                                     |
 
+Archiving by workspace ID changes only that host's workspace record and its contents, even if
+another host has a record for the same directory. Worktree teardown and removal still require
+access to the backing path; archiving a local record does not grant access to a foreign-only path.
+
 The original home owner (the persisted root `server-id`) adopts host-less legacy
 workspaces at startup unless an agent record attributes that workspace or cwd to another
 host. This restores missing-directory cleanup for single-host upgrades. Other hosts and

@@ -23,7 +23,11 @@ import {
   WorkspaceArchiveCanceledError,
 } from "./workspace-archive-service.js";
 import { WorkspaceAutomationBlockedError } from "./workspace-automation-gate.js";
-import { createPersistedWorkspaceRecord } from "./workspace-registry.js";
+import {
+  assertCwdWorkspaceOwnedByThisServer,
+  createPersistedWorkspaceRecord,
+  FileBackedWorkspaceRegistry,
+} from "./workspace-registry.js";
 
 const cleanupPaths: string[] = [];
 
@@ -853,9 +857,25 @@ describe("archiveByScope", () => {
     },
   );
 
-  test("checks an archived workspace backing path before deleting its owned worktree", async () => {
+  test("archives only the local record without mutating an archived foreign backing path", async () => {
     const { tempDir, repoDir } = createGitRepo();
     const paseoHome = path.join(tempDir, ".paseo");
+    const teardownMarker = path.join(repoDir, "foreign-teardown.log");
+    writeFileSync(
+      path.join(repoDir, "paseo.json"),
+      JSON.stringify({
+        worktree: {
+          teardown: [
+            "node -e \"require('fs').writeFileSync(process.env.PASEO_SOURCE_CHECKOUT_PATH + '/foreign-teardown.log', 'unsafe')\"",
+          ],
+        },
+      }),
+    );
+    execFileSync("git", ["add", "paseo.json"], { cwd: repoDir, stdio: "pipe" });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "foreign teardown"], {
+      cwd: repoDir,
+      stdio: "pipe",
+    });
     const worktree = await createPaseoOwnedWorktree(repoDir, paseoHome, "archived-foreign");
     const archivedWorkspace = createPersistedWorkspaceRecord({
       workspaceId: "ws-archived-foreign",
@@ -871,14 +891,27 @@ describe("archiveByScope", () => {
       updatedAt: "2026-09-01T01:00:00.000Z",
       archivedAt: "2026-09-01T01:00:00.000Z",
     });
-    const deps = createArchiveDeps({ paseoHome, activeWorkspaces: [] });
-    deps.getWorkspace = async () => archivedWorkspace;
-    deps.archiveWorkspaceRecord = vi.fn(deps.archiveWorkspaceRecord);
-    deps.assertCwdWorkspaceOwnedByThisServer = vi.fn(async (cwd: string) => {
-      if (createRealpathAwarePathMatcher(archivedWorkspace.cwd)(cwd)) {
-        throw new Error("Workspace ws-archived-foreign is owned by host srv-other");
-      }
+    const localWorkspace = createPersistedWorkspaceRecord({
+      ...archivedWorkspace,
+      workspaceId: "ws-local-shared-backing",
+      hostId: "srv-local",
+      archivedAt: null,
     });
+    const registry = new FileBackedWorkspaceRegistry(
+      path.join(tempDir, "workspaces.json"),
+      createLogger(),
+    );
+    await registry.upsert(archivedWorkspace);
+    await registry.upsert(localWorkspace);
+    const deps = createArchiveDeps({ paseoHome, activeWorkspaces: [localWorkspace] });
+    deps.serverId = "srv-local";
+    deps.getWorkspace = (id) => registry.get(id);
+    deps.archiveWorkspaceRecord = async (id, archivedAt) => {
+      await registry.archive(id, archivedAt);
+    };
+    deps.listActiveWorkspaces = deps.listAllActiveWorkspaces = () => registry.listActive();
+    deps.assertCwdWorkspaceOwnedByThisServer = (cwd) =>
+      assertCwdWorkspaceOwnedByThisServer(cwd, registry, deps.serverId);
 
     await expect(
       archiveByScope(deps, {
@@ -886,9 +919,31 @@ describe("archiveByScope", () => {
         requestId: "req-archived-foreign",
       }),
     ).rejects.toThrow("owned by host srv-other");
-    expect(deps.assertCwdWorkspaceOwnedByThisServer).toHaveBeenCalledWith(worktree.worktreePath);
+
+    const result = await archiveByScope(deps, {
+      scope: { kind: "workspace", workspaceId: localWorkspace.workspaceId },
+      requestId: "req-archive-local-shared-backing",
+    });
+
+    assertArchiveResult(result, {
+      archivedWorkspaceIds: [localWorkspace.workspaceId],
+      removedDirectory: false,
+    });
+    expect((await registry.get(localWorkspace.workspaceId))?.archivedAt).toEqual(
+      expect.any(String),
+    );
+    expect(await registry.get(archivedWorkspace.workspaceId)).toEqual(archivedWorkspace);
     expect(existsSync(worktree.worktreePath)).toBe(true);
-    expect(deps.archiveWorkspaceRecord).not.toHaveBeenCalled();
+    expect(existsSync(teardownMarker)).toBe(false);
+
+    await expect(
+      archiveByScope(deps, {
+        scope: { kind: "worktree", targetPath: worktree.worktreePath },
+        requestId: "req-archive-foreign-backing-path",
+      }),
+    ).rejects.toThrow("owned by host srv-other");
+    expect(existsSync(worktree.worktreePath)).toBe(true);
+    expect(existsSync(teardownMarker)).toBe(false);
   });
 
   test("marks archiving, emits an upsert carrying the archiving state, then clears it and emits a remove", async () => {

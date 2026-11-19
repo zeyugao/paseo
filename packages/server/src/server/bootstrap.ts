@@ -1439,6 +1439,7 @@ export async function createPaseoDaemon(
     archiveByScope(
       {
         paseoHome: config.paseoHome,
+        serverId,
         paseoWorktreesBaseRoot: config.worktreesRoot,
         github,
         workspaceGitService,
@@ -1559,6 +1560,7 @@ export async function createPaseoDaemon(
     await archiveByScope(
       {
         paseoHome: config.paseoHome,
+        serverId,
         paseoWorktreesBaseRoot: config.worktreesRoot,
         github,
         workspaceGitService,

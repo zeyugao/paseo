@@ -9402,50 +9402,80 @@ test("archive_workspace_request rejects a workspace owned by another host", asyn
 });
 
 test("archive_workspace_request allows a local target with a foreign path sibling", async () => {
-  const emitted: SessionOutboundMessage[] = [];
-  const session = asTestSession(
-    createSessionForWorkspaceTests({
+  const dir = mkdtempSync(path.join(tmpdir(), "paseo-archive-overlap-"));
+  try {
+    const cwd = path.join(dir, "checkout");
+    mkdirSync(cwd);
+    const workspaceRegistry = new FileBackedWorkspaceRegistry(
+      path.join(dir, "workspaces.json"),
+      createTestLogger(),
+    );
+    const foreign = { ...createForeignWorkspaceRecord(), cwd };
+    const local = createPersistedWorkspaceRecord({
+      workspaceId: "ws-local-overlap",
+      projectId: foreign.projectId,
+      cwd,
+      kind: "directory",
+      displayName: "local overlap",
+      hostId: "srv-local",
+      createdAt: "2026-03-01T12:00:00.000Z",
+      updatedAt: "2026-03-01T12:00:00.000Z",
+    });
+    await workspaceRegistry.upsert(foreign);
+    await workspaceRegistry.upsert(local);
+    const emitted: SessionOutboundMessage[] = [];
+    const session = createSessionForWorkspaceTests({
       serverId: "srv-local",
+      workspaceRegistry,
       onMessage: (message) => emitted.push(message),
-    }),
-  );
-  const foreign = createForeignWorkspaceRecord();
-  const local = createPersistedWorkspaceRecord({
-    workspaceId: "ws-local-overlap",
-    projectId: foreign.projectId,
-    cwd: foreign.cwd,
-    kind: "directory",
-    displayName: "local overlap",
-    hostId: "srv-local",
-    createdAt: "2026-03-01T12:00:00.000Z",
-    updatedAt: "2026-03-01T12:00:00.000Z",
-  });
-  const records: Record<string, PersistedWorkspaceRecord> = {
-    [local.workspaceId]: local,
-    [foreign.workspaceId]: foreign,
-  };
-  const archive = vi.fn(async () => {});
-  session.workspaceRegistry.get = async (workspaceId: string) => records[workspaceId] ?? null;
-  session.workspaceRegistry.listAll = async () => Object.values(records);
-  session.workspaceRegistry.listActive = async () =>
-    Object.values(records).filter((record) => !record.archivedAt);
-  session.workspaceRegistry.archive = archive;
+    });
 
-  await session.handleMessage({
-    type: "archive_workspace_request",
-    workspaceId: local.workspaceId,
-    requestId: "req-archive-local-overlap",
-  });
+    await session.handleMessage({
+      type: "archive_workspace_request",
+      workspaceId: local.workspaceId,
+      requestId: "req-archive-local-overlap",
+    });
 
-  expect(findByType(emitted, "archive_workspace_response")?.payload).toMatchObject({
-    requestId: "req-archive-local-overlap",
-    workspaceId: local.workspaceId,
-    error: null,
-  });
-  expect(findByType(emitted, "archive_workspace_response")?.payload.archivedAt).toEqual(
-    expect.any(String),
-  );
-  expect(archive).toHaveBeenCalledWith(local.workspaceId, expect.any(String), undefined);
+    const archivedAt = (await workspaceRegistry.get(local.workspaceId))?.archivedAt;
+    expect(archivedAt).toEqual(expect.any(String));
+    expect(findByType(emitted, "archive_workspace_response")?.payload).toMatchObject({
+      requestId: "req-archive-local-overlap",
+      workspaceId: local.workspaceId,
+      archivedAt,
+      error: null,
+    });
+
+    emitted.length = 0;
+    await session.handleMessage({
+      type: "archive_workspace_request",
+      workspaceId: local.workspaceId,
+      requestId: "req-retry-local-overlap",
+    });
+    expect(findByType(emitted, "archive_workspace_response")?.payload).toMatchObject({
+      requestId: "req-retry-local-overlap",
+      workspaceId: local.workspaceId,
+      archivedAt,
+      error: null,
+    });
+    expect(await workspaceRegistry.get(foreign.workspaceId)).toEqual(foreign);
+    expect(existsSync(cwd)).toBe(true);
+
+    await session.handleMessage({
+      type: "fs.entry.create.request",
+      cwd,
+      parentPath: ".",
+      name: "blocked-dir",
+      kind: "directory",
+      requestId: "req-write-archived-local-overlap",
+    });
+    expect(findByType(emitted, "rpc_error")?.payload).toMatchObject({
+      requestId: "req-write-archived-local-overlap",
+      error: expect.stringContaining("owned by host srv-other"),
+    });
+    expect(existsSync(path.join(cwd, "blocked-dir"))).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("workspace.label.assignment.set.request rejects a workspace owned by another host", async () => {

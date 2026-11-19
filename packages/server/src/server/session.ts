@@ -8320,10 +8320,10 @@ export class Session {
           if (!existing) {
             throw new Error(`Workspace not found: ${request.workspaceId}`);
           }
-          this.assertWorkspaceOwnedByThisServer(existing);
           return archiveByScope(
             {
               paseoHome: this.paseoHome,
+              serverId: this.serverId,
               paseoWorktreesBaseRoot: this.worktreesRoot,
               github: this.github,
               workspaceGitService: this.workspaceGitService,

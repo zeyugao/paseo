@@ -3430,6 +3430,7 @@ function archiveWorktreeDependencies(
   }
   return {
     paseoHome: options.paseoHome,
+    serverId: options.serverId,
     paseoWorktreesBaseRoot: options.worktreesRoot,
     github: options.github,
     workspaceGitService: options.workspaceGitService,

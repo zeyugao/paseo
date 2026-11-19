@@ -13,6 +13,9 @@ import { createUserMessageExpansion } from "@/components/user-message/expansion"
 import { UserMessageExpansionContext } from "@/components/user-message/expansion-context";
 import { DisclosureRow } from "./disclosure";
 import type { DisclosureTriggerEdge, StreamViewportHandle } from "./strategy";
+import { OverviewToolCallGroupView } from "@/tool-calls/detail-level/overview/view";
+import { buildOverviewGroup } from "@/tool-calls/detail-level/overview/model";
+import type { ThoughtItem } from "@/types/stream";
 
 // Load translations so the toggles expose their real accessible names.
 void testI18n;
@@ -286,4 +289,82 @@ describe("tool detail interaction", () => {
     await userEvent.keyboard("{Tab}");
     expect(document.activeElement).toBe(view().getByRole("button", { name: "Copy output" }));
   });
+});
+
+const toolDetailStyle = { height: 120 };
+function renderNestedToolDetails() {
+  return <div style={toolDetailStyle}>Tool output</div>;
+}
+
+function NestedTool({ index }: { index: number }) {
+  const [expanded, setExpanded] = React.useState(index < 3);
+  const toggle = React.useCallback(() => setExpanded((value) => !value), []);
+  return (
+    <ExpandableBadge
+      label={`Call ${index}`}
+      isExpanded={expanded}
+      onToggle={toggle}
+      renderDetails={renderNestedToolDetails}
+    />
+  );
+}
+
+const overviewGroups = [20, 6].map((count, groupIndex) => {
+  const calls: ThoughtItem[] = Array.from({ length: count }, (_, index) => ({
+    kind: "thought",
+    id: `call-${groupIndex}-${index}`,
+    text: "Checking",
+    status: "ready",
+    timestamp: new Date(0),
+  }));
+  return buildOverviewGroup({
+    id: `overview-${groupIndex}`,
+    calls,
+    latest: calls[calls.length - 1]!,
+    isSealed: true,
+  });
+});
+const ignoreOverviewToggle = () => {};
+
+it("keeps a nested tool trigger in place while multiple summaries are open", async () => {
+  container.style.width = "500px";
+  const groups = overviewGroups.map((group, groupIndex) => (
+    <OverviewToolCallGroupView
+      key={group.run.id}
+      group={group}
+      expanded
+      isLastInSequence={groupIndex === overviewGroups.length - 1}
+      onExpandedChange={ignoreOverviewToggle}
+    >
+      {group.run.calls.map((call, index) => (
+        <NestedTool key={call.id} index={index + groupIndex * 20} />
+      ))}
+    </OverviewToolCallGroupView>
+  ));
+  act(() => root.render(groups));
+  const settle = () =>
+    act(async () => {
+      for (let frame = 0; frame < 4; frame += 1) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    });
+  await settle();
+  const scroll = Array.from(container.querySelectorAll<HTMLElement>("div")).find(
+    (element) =>
+      getComputedStyle(element).overflowY === "auto" && element.scrollHeight > element.clientHeight,
+  );
+  if (!scroll) throw new Error("Expected an overflowing tool summary");
+  const trigger = view().getByRole("button", { name: /^Call 5$/ });
+  scroll.scrollTop +=
+    trigger.getBoundingClientRect().top - scroll.getBoundingClientRect().top - 100;
+  const top = trigger.getBoundingClientRect().top;
+  const offset = scroll.scrollTop;
+  await page.getByRole("button", { name: "Call 5", exact: true }).click();
+  await settle();
+  expect(trigger.getBoundingClientRect().top).toBe(top);
+  expect(scroll.scrollTop).toBe(offset);
+  await page.getByRole("button", { name: "Call 5", exact: true }).click();
+  await settle();
+  expect(trigger.getBoundingClientRect().top).toBe(top);
+  expect(scroll.scrollTop).toBe(offset);
 });

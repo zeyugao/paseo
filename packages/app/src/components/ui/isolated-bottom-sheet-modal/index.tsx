@@ -1,5 +1,6 @@
 import {
   BottomSheetModal as GorhomBottomSheetModal,
+  useBottomSheetModalInternal,
   type BottomSheetModalProps,
   type BottomSheetBackdropProps,
 } from "@gorhom/bottom-sheet";
@@ -7,6 +8,7 @@ import React from "react";
 import {
   forwardRef,
   useCallback,
+  useContext,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -14,6 +16,7 @@ import {
   useState,
 } from "react";
 import { useDismissibleOverlay } from "@/components/ui/overlay-dismissal";
+import { useDerivedValue } from "react-native-reanimated";
 import type { ElementRef, ReactNode } from "react";
 import { systemBackPress } from "./back-press";
 import {
@@ -26,8 +29,12 @@ import {
   type SheetContentDragGesture,
 } from "@/components/ui/bottom-sheet-scope";
 import { SheetBackdrop } from "./sheet-backdrop";
+import { SheetWindowContext } from "./window-host-context";
+import { resolveSheetSnapPoint } from "./snap-points";
 
 type GorhomBottomSheetModalMethods = ElementRef<typeof GorhomBottomSheetModal>;
+
+const EMPTY_SNAP_POINTS: (string | number)[] = [];
 
 /**
  * Re-establishes React context on the far side of the portal.
@@ -85,6 +92,8 @@ export const IsolatedBottomSheetModal = forwardRef<
   // Gorhom puts this ref into its provider queue and reads `.current` for stack operations.
   // A callback ref accepts the handle but leaves that queue unable to dismiss or restore it.
   const modalRef = useRef<GorhomBottomSheetModalMethods>(null);
+  const sheetWindow = useContext(SheetWindowContext);
+  const { containerLayoutState } = useBottomSheetModalInternal();
   useImperativeHandle(
     ref,
     () => ({
@@ -105,6 +114,7 @@ export const IsolatedBottomSheetModal = forwardRef<
     contextBridge,
     backdropOpacity,
     enableDismissOnClose = true,
+    snapPoints: providedSnapPoints,
     waitFor,
     simultaneousHandlers,
     ...bottomSheetProps
@@ -130,6 +140,20 @@ export const IsolatedBottomSheetModal = forwardRef<
       ],
     };
   }, [contentDragGesture, waitFor, simultaneousHandlers]);
+  const topInset = sheetWindow.enabled
+    ? Math.max(bottomSheetProps.topInset ?? 0, sheetWindow.topInset)
+    : bottomSheetProps.topInset;
+  const bottomInset = bottomSheetProps.bottomInset ?? 0;
+  const snapPoints = useDerivedValue(() => {
+    const points = Array.isArray(providedSnapPoints)
+      ? providedSnapPoints
+      : providedSnapPoints?.value;
+    return (
+      points?.map((point) =>
+        resolveSheetSnapPoint(point, containerLayoutState.value.height, topInset ?? 0, bottomInset),
+      ) ?? EMPTY_SNAP_POINTS
+    );
+  }, [providedSnapPoints, containerLayoutState, topInset, bottomInset]);
   const renderBackdrop = useCallback(
     (backdropProps: BottomSheetBackdropProps) => (
       <SheetBackdrop
@@ -143,6 +167,8 @@ export const IsolatedBottomSheetModal = forwardRef<
   const modal = (
     <GorhomBottomSheetModal
       {...bottomSheetProps}
+      topInset={topInset}
+      snapPoints={providedSnapPoints === undefined ? undefined : snapPoints}
       ref={modalRef}
       enableDismissOnClose={enableDismissOnClose}
       stackBehavior={presentation}

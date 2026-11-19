@@ -45,11 +45,12 @@ vi.mock("@gorhom/portal", () => ({
 const sheetWaitFor = vi.hoisted(() => [] as unknown[]);
 const sheetSimultaneousHandlers = vi.hoisted(() => [] as unknown[]);
 
-vi.mock("@gorhom/bottom-sheet", async () => {
+vi.mock("@gorhom/bottom-sheet", async (importOriginal) => {
+  const gorhom = await importOriginal<Record<string, unknown>>();
   const { Portal } = await import("@gorhom/portal");
   return {
-    BottomSheetModalProvider: ({ children }: { children?: React.ReactNode }) =>
-      React.createElement("div", { "data-bottom-sheet-provider": true }, children),
+    // Reuse the test project's existing layout context and public provider exports.
+    ...gorhom,
     BottomSheetModal: React.forwardRef(
       (
         {

@@ -90,7 +90,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   desktopOverlay: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    backgroundColor: isWeb ? "rgba(0,0,0,0.55)" : "transparent",
     justifyContent: "center",
     alignItems: "center",
     padding: theme.spacing[6],
@@ -861,6 +861,7 @@ export function AdaptiveModalSheet({
       enableDynamicSizing={false}
       onChange={handleSheetChange}
       onDismiss={handleDismiss}
+      backdropOpacity={0.55}
       handleComponent={null}
       backgroundStyle={styles.nativeDialogBackground}
       enablePanDownToClose={false}

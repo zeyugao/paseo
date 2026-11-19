@@ -1,16 +1,26 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 
 import { beforeEach, afterEach, describe, expect, test } from "vitest";
 
 import { createTestLogger } from "../test-utils/test-logger.js";
 import { writeJsonFileAtomic } from "./atomic-file.js";
 import {
+  assertCwdWorkspaceOwnedByThisServer,
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
   FileBackedProjectRegistry,
   FileBackedWorkspaceRegistry,
+  resolveCwdWorkspaceHost,
   resolveWorkspaceDisplayName,
   resolveWorkspaceName,
   type WorkspaceMutation,
@@ -144,6 +154,57 @@ describe("workspace registries", () => {
     await registry.update(project.projectId, (current) => ({ ...current, customName: "Changed" }));
     expect(writes).toBe(2);
   });
+  test.skipIf(process.platform === "win32")(
+    "preserves symlinked project and workspace registry files",
+    async () => {
+      const projectsDirectory = path.join(tmpDir, "projects");
+      const targetDirectory = path.join(tmpDir, "registry-target");
+      mkdirSync(projectsDirectory, { recursive: true });
+      mkdirSync(targetDirectory, { recursive: true });
+
+      const projectPath = path.join(projectsDirectory, "projects.json");
+      const workspacePath = path.join(projectsDirectory, "workspaces.json");
+      const projectTargetPath = path.join(targetDirectory, "projects.json");
+      const workspaceTargetPath = path.join(targetDirectory, "workspaces.json");
+      writeFileSync(projectTargetPath, "[]\n");
+      writeFileSync(workspaceTargetPath, "[]\n");
+      symlinkSync(path.relative(projectsDirectory, projectTargetPath), projectPath);
+      symlinkSync(path.relative(projectsDirectory, workspaceTargetPath), workspacePath);
+
+      const project = createPersistedProjectRecord({
+        projectId: "project-symlink",
+        rootPath: "/tmp/project-symlink",
+        kind: "non_git",
+        displayName: "project-symlink",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      });
+      const workspace = createPersistedWorkspaceRecord({
+        workspaceId: "workspace-symlink",
+        projectId: project.projectId,
+        cwd: "/tmp/project-symlink",
+        kind: "directory",
+        displayName: "project-symlink",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      });
+
+      await projectRegistry.upsert(project);
+      await workspaceRegistry.upsert(workspace);
+
+      expect(lstatSync(projectPath).isSymbolicLink()).toBe(true);
+      expect(lstatSync(workspacePath).isSymbolicLink()).toBe(true);
+      expect(JSON.parse(readFileSync(projectTargetPath, "utf8"))).toEqual([project]);
+      expect(JSON.parse(readFileSync(workspaceTargetPath, "utf8"))).toEqual([workspace]);
+
+      const reloadedProjects = new FileBackedProjectRegistry(projectPath, logger);
+      const reloadedWorkspaces = new FileBackedWorkspaceRegistry(workspacePath, logger);
+      await reloadedProjects.initialize();
+      await reloadedWorkspaces.initialize();
+      expect(await reloadedProjects.get(project.projectId)).toEqual(project);
+      expect(await reloadedWorkspaces.get(workspace.workspaceId)).toEqual(workspace);
+    },
+  );
 
   test("preserves a concurrent project update when archiving", async () => {
     let pauseNextWrite = false;
@@ -471,6 +532,7 @@ describe("workspace registries", () => {
         cwd: "/tmp/repo",
         kind: "local_checkout",
         displayName: "main",
+        hostId: "srv-a",
         createdAt: "2026-03-01T00:00:00.000Z",
         updatedAt: "2026-03-01T00:00:00.000Z",
       }),
@@ -483,15 +545,24 @@ describe("workspace registries", () => {
         cwd: "/tmp/repo",
         kind: "local_checkout",
         displayName: "feature/workspace",
+        hostId: "srv-a",
         createdAt: "2026-03-01T00:00:00.000Z",
         updatedAt: "2026-03-02T00:00:00.000Z",
       }),
     );
+    await workspaceRegistry.update("/tmp/repo", (record) => ({
+      ...record,
+      hostId: undefined,
+      displayName: "feature/workspace",
+    }));
     await workspaceRegistry.archive("/tmp/repo", "2026-03-03T00:00:00.000Z");
 
     const archived = await workspaceRegistry.get("/tmp/repo");
-    expect(archived?.displayName).toBe("feature/workspace");
-    expect(archived?.archivedAt).toBe("2026-03-03T00:00:00.000Z");
+    expect(archived).toMatchObject({
+      displayName: "feature/workspace",
+      archivedAt: "2026-03-03T00:00:00.000Z",
+      hostId: "srv-a",
+    });
 
     await workspaceRegistry.remove("/tmp/repo");
     expect(mutations.at(-1)).toEqual({
@@ -501,6 +572,83 @@ describe("workspace registries", () => {
     });
     expect(await workspaceRegistry.get("/tmp/repo")).toBeNull();
     expect(await workspaceRegistry.listAll()).toEqual([]);
+  });
+
+  test("reloads project and workspace records after an external file write", async () => {
+    await projectRegistry.initialize();
+    await workspaceRegistry.initialize();
+    const projectsPath = path.join(tmpDir, "projects", "projects.json");
+    const workspacesPath = path.join(tmpDir, "projects", "workspaces.json");
+    mkdirSync(path.dirname(projectsPath), { recursive: true });
+    const project = createPersistedProjectRecord({
+      projectId: "external-project",
+      rootPath: "/tmp/external-project",
+      kind: "non_git",
+      displayName: "external-project",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+    const workspace = createPersistedWorkspaceRecord({
+      workspaceId: "external-workspace",
+      projectId: project.projectId,
+      cwd: project.rootPath,
+      kind: "directory",
+      displayName: "external-workspace",
+      hostId: "srv-other",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+    writeFileSync(projectsPath, JSON.stringify([project]));
+    writeFileSync(workspacesPath, JSON.stringify([workspace]));
+
+    await expect(projectRegistry.get(project.projectId)).resolves.toEqual(project);
+    await expect(workspaceRegistry.listAll()).resolves.toEqual([workspace]);
+    await expect(workspaceRegistry.listActive()).resolves.toEqual([workspace]);
+
+    const archivedWorkspace = {
+      ...workspace,
+      updatedAt: "2026-03-02T00:00:00.000Z",
+      archivedAt: "2026-03-02T00:00:00.000Z",
+    };
+    writeFileSync(workspacesPath, JSON.stringify([archivedWorkspace]));
+
+    await expect(workspaceRegistry.listActive()).resolves.toEqual([]);
+    await expect(workspaceRegistry.listAll()).resolves.toEqual([archivedWorkspace]);
+  });
+
+  test("keeps the last valid cache when a registry reload fails", async () => {
+    const projectsPath = path.join(tmpDir, "projects", "projects.json");
+    const existing = createPersistedProjectRecord({
+      projectId: "existing-project",
+      rootPath: "/tmp/existing-project",
+      kind: "non_git",
+      displayName: "existing-project",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+    const added = createPersistedProjectRecord({
+      projectId: "added-project",
+      rootPath: "/tmp/added-project",
+      kind: "non_git",
+      displayName: "added-project",
+      createdAt: "2026-03-02T00:00:00.000Z",
+      updatedAt: "2026-03-02T00:00:00.000Z",
+    });
+    await projectRegistry.upsert(existing);
+
+    writeFileSync(projectsPath, "{not-json");
+    await expect(projectRegistry.list()).resolves.toEqual([existing]);
+
+    // Mutations are blocked while the file is unreadable: writing the stale
+    // cache would silently destroy concurrent records from other daemons.
+    await expect(projectRegistry.upsert(added)).rejects.toThrow(
+      "Workspace registry file is unreadable",
+    );
+
+    // Repairing the file unblocks mutations.
+    writeFileSync(projectsPath, JSON.stringify([existing]));
+    await projectRegistry.upsert(added);
+    expect(JSON.parse(readFileSync(projectsPath, "utf8"))).toEqual([existing, added]);
   });
 
   test("preserves the first workspace archive and reports whether a queued archive applied", async () => {
@@ -603,5 +751,109 @@ describe("workspace registries", () => {
       title: "Payments work",
       pinnedAt: "2026-03-03T00:00:00.000Z",
     });
+  });
+  test.skipIf(process.platform === "win32")(
+    "rejects a symlinked path that resolves inside a foreign workspace",
+    async () => {
+      const foreignRoot = path.join(tmpDir, "foreign-root");
+      const symlinkRoot = path.join(tmpDir, "symlink-root");
+      const target = path.join(symlinkRoot, "nested");
+      mkdirSync(path.join(foreignRoot, "nested"), { recursive: true });
+      symlinkSync(foreignRoot, symlinkRoot, "dir");
+      const foreignWorkspace = createPersistedWorkspaceRecord({
+        workspaceId: "ws-foreign",
+        projectId: "proj-foreign",
+        cwd: foreignRoot,
+        kind: "local_checkout",
+        displayName: "foreign",
+        hostId: "srv-other",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      });
+
+      await expect(
+        assertCwdWorkspaceOwnedByThisServer(
+          target,
+          { listAll: async () => [foreignWorkspace] },
+          "srv-local",
+        ),
+      ).rejects.toThrow("owned by host srv-other");
+    },
+  );
+  test.skipIf(process.platform === "win32")(
+    "rejects a nonexistent path beneath a symlink into a foreign workspace",
+    async () => {
+      const foreignRoot = path.join(tmpDir, "foreign-nonexistent-root");
+      const symlinkRoot = path.join(tmpDir, "symlink-nonexistent-root");
+      mkdirSync(foreignRoot);
+      symlinkSync(foreignRoot, symlinkRoot, "dir");
+      const foreignWorkspace = createPersistedWorkspaceRecord({
+        workspaceId: "ws-foreign-nonexistent",
+        projectId: "proj-foreign",
+        cwd: foreignRoot,
+        kind: "local_checkout",
+        displayName: "foreign",
+        hostId: "srv-other",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      });
+
+      await expect(
+        assertCwdWorkspaceOwnedByThisServer(
+          path.join(symlinkRoot, "not-created", "child"),
+          { listAll: async () => [foreignWorkspace] },
+          "srv-local",
+        ),
+      ).rejects.toThrow("owned by host srv-other");
+    },
+  );
+});
+
+describe("resolveCwdWorkspaceHost", () => {
+  const record = (workspaceId: string, cwd: string, hostId?: string) =>
+    createPersistedWorkspaceRecord({
+      workspaceId,
+      projectId: "proj-1",
+      cwd,
+      kind: "local_checkout",
+      displayName: workspaceId,
+      hostId,
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+
+  test("returns the only host covering the path", async () => {
+    const registry = {
+      listAll: async () => [
+        record("ws-a", "/workspace/repo", "srv-a"),
+        record("ws-b", "/workspace", "srv-a"),
+      ],
+    };
+    await expect(resolveCwdWorkspaceHost("/workspace/repo/sub", registry)).resolves.toBe("srv-a");
+  });
+
+  test("returns null when overlapping records name different hosts", async () => {
+    const registry = {
+      listAll: async () => [
+        record("ws-a", "/workspace/repo", "srv-a"),
+        record("ws-b", "/workspace", "srv-b"),
+      ],
+    };
+    await expect(resolveCwdWorkspaceHost("/workspace/repo", registry)).resolves.toBeNull();
+  });
+
+  test("returns null when a legacy host-less record overlaps", async () => {
+    const registry = {
+      listAll: async () => [
+        record("ws-a", "/workspace/repo", "srv-a"),
+        record("ws-legacy", "/workspace"),
+      ],
+    };
+    await expect(resolveCwdWorkspaceHost("/workspace/repo", registry)).resolves.toBeNull();
+  });
+
+  test("returns null when nothing overlaps", async () => {
+    const registry = { listAll: async () => [record("ws-a", "/elsewhere", "srv-a")] };
+    await expect(resolveCwdWorkspaceHost("/workspace/repo", registry)).resolves.toBeNull();
   });
 });

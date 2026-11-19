@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -214,6 +214,43 @@ describe("workspace labels", () => {
     expect((await registry.get("wks_one"))?.labels).toBeUndefined();
   });
 
+  test("rejects rename and delete when either would rewrite a foreign workspace", async () => {
+    await labels.setAssignment({
+      workspaceId: "wks_one",
+      label: { name: "Blocked", color: "red" },
+      assigned: true,
+    });
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "wks_foreign",
+        projectId: "prj_one",
+        cwd: "/foreign/repo",
+        kind: "local_checkout",
+        displayName: "foreign",
+        hostId: "srv-other",
+        labels: ["Blocked"],
+        createdAt: "2026-08-14T00:00:00.000Z",
+        updatedAt: "2026-08-14T00:00:00.000Z",
+      }),
+    );
+    const localLabels = createWorkspaceLabelService({
+      paseoHome,
+      workspaceRegistry: registry,
+      serverId: "srv-local",
+    });
+
+    await expect(localLabels.update({ name: "Blocked", newName: "Waiting" })).rejects.toThrow(
+      "Workspace wks_foreign is owned by host srv-other",
+    );
+    await expect(localLabels.delete("Blocked")).rejects.toThrow(
+      "Workspace wks_foreign is owned by host srv-other",
+    );
+
+    expect((await localLabels.list()).labels).toEqual([{ name: "Blocked", color: "red" }]);
+    expect((await registry.get("wks_one"))?.labels).toEqual(["Blocked"]);
+    expect((await registry.get("wks_foreign"))?.labels).toEqual(["Blocked"]);
+  });
+
   test("applies a name and a colour in one commit, or neither", async () => {
     const changes: unknown[] = [];
     const subscription = await labels.subscribe({ onChange: (change) => changes.push(change) });
@@ -415,6 +452,235 @@ describe("workspace labels", () => {
       sync: { headSeq: 1 },
     });
     snapshot.unsubscribe();
+  });
+
+  test("recovers two prepared journals independently", async () => {
+    const recoveryHome = join(paseoHome, "multiple-prepared");
+    const recoveryRegistry = new FileBackedWorkspaceRegistry(
+      join(recoveryHome, "projects", "workspaces.json"),
+      createTestLogger(),
+    );
+    const beforeUpdatedAt = "2026-08-14T00:00:00.000Z";
+    const afterUpdatedAt = "2026-08-14T01:00:00.000Z";
+    await recoveryRegistry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "wks_first",
+        projectId: "prj_one",
+        cwd: "/repo/first",
+        kind: "local_checkout",
+        displayName: "first",
+        createdAt: beforeUpdatedAt,
+        updatedAt: afterUpdatedAt,
+        labels: ["Priority"],
+      }),
+    );
+    await recoveryRegistry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "wks_second",
+        projectId: "prj_one",
+        cwd: "/repo/second",
+        kind: "local_checkout",
+        displayName: "second",
+        createdAt: beforeUpdatedAt,
+        updatedAt: afterUpdatedAt,
+        labels: ["Review"],
+      }),
+    );
+    const projectsPath = join(recoveryHome, "projects");
+    await writeJsonFileAtomic(join(projectsPath, "workspace-labels.json"), [
+      { name: "Priority", color: "red" },
+      { name: "Review", color: "sky" },
+    ]);
+    const journal = (workspaceId: string, label: { name: string; color: string }) => ({
+      phase: "prepared",
+      beforeLabels: [],
+      afterLabels: [label],
+      beforeWorkspaces: [{ workspaceId, updatedAt: beforeUpdatedAt }],
+      afterWorkspaces: [{ workspaceId, labels: [label.name], updatedAt: afterUpdatedAt }],
+    });
+    await writeJsonFileAtomic(
+      join(projectsPath, "workspace-labels.transaction.tx-first.json"),
+      journal("wks_first", { name: "Priority", color: "red" }),
+    );
+    await writeJsonFileAtomic(
+      join(projectsPath, "workspace-labels.transaction.tx-second.json"),
+      journal("wks_second", { name: "Review", color: "sky" }),
+    );
+
+    const recovered = createWorkspaceLabelService({
+      paseoHome: recoveryHome,
+      workspaceRegistry: recoveryRegistry,
+    });
+    await recovered.initialize();
+
+    expect(await recoveryRegistry.get("wks_first")).toMatchObject({
+      updatedAt: beforeUpdatedAt,
+    });
+    expect((await recoveryRegistry.get("wks_first"))?.labels).toBeUndefined();
+    expect(await recoveryRegistry.get("wks_second")).toMatchObject({
+      updatedAt: beforeUpdatedAt,
+    });
+    expect((await recoveryRegistry.get("wks_second"))?.labels).toBeUndefined();
+    expect((await recovered.subscribe({ onChange: () => undefined })).snapshot.labels).toEqual([]);
+    await expect(readdir(projectsPath)).resolves.not.toEqual(
+      expect.arrayContaining([
+        "workspace-labels.transaction.tx-first.json",
+        "workspace-labels.transaction.tx-second.json",
+      ]),
+    );
+  });
+
+  test("abandons a prepared rollback when a workspace has advanced", async () => {
+    const recoveryHome = join(paseoHome, "prepared-conflict");
+    const projectsPath = join(recoveryHome, "projects");
+    const recoveryRegistry = new FileBackedWorkspaceRegistry(
+      join(projectsPath, "workspaces.json"),
+      createTestLogger(),
+    );
+    const beforeUpdatedAt = "2026-08-14T00:00:00.000Z";
+    const afterUpdatedAt = "2026-08-14T01:00:00.000Z";
+    const foreignUpdatedAt = "2026-08-14T02:00:00.000Z";
+    await recoveryRegistry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "wks_conflict",
+        projectId: "prj_one",
+        cwd: "/repo/conflict",
+        kind: "local_checkout",
+        displayName: "conflict",
+        createdAt: beforeUpdatedAt,
+        updatedAt: foreignUpdatedAt,
+        labels: ["Foreign"],
+      }),
+    );
+    await writeJsonFileAtomic(join(projectsPath, "workspace-labels.json"), [
+      { name: "Priority", color: "red" },
+    ]);
+    const transactionName = "workspace-labels.transaction.tx-conflict.json";
+    await writeJsonFileAtomic(join(projectsPath, transactionName), {
+      phase: "prepared",
+      beforeLabels: [{ name: "Urgent", color: "red" }],
+      afterLabels: [{ name: "Priority", color: "red" }],
+      beforeWorkspaces: [
+        { workspaceId: "wks_conflict", labels: ["Urgent"], updatedAt: beforeUpdatedAt },
+      ],
+      afterWorkspaces: [
+        { workspaceId: "wks_conflict", labels: ["Priority"], updatedAt: afterUpdatedAt },
+      ],
+    });
+
+    const recovered = createWorkspaceLabelService({
+      paseoHome: recoveryHome,
+      workspaceRegistry: recoveryRegistry,
+    });
+    await recovered.initialize();
+
+    expect(await recoveryRegistry.get("wks_conflict")).toMatchObject({
+      labels: ["Foreign"],
+      updatedAt: foreignUpdatedAt,
+    });
+    expect((await recovered.subscribe({ onChange: () => undefined })).snapshot.labels).toEqual([
+      { name: "Priority", color: "red" },
+    ]);
+    await expect(readdir(projectsPath)).resolves.not.toContain(transactionName);
+  });
+
+  test("cleans a committed journal while preserving durable data", async () => {
+    const committedHome = join(paseoHome, "committed-journal");
+    const committedRegistry = new FileBackedWorkspaceRegistry(
+      join(committedHome, "projects", "workspaces.json"),
+      createTestLogger(),
+    );
+    await committedRegistry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "wks_committed",
+        projectId: "prj_one",
+        cwd: "/repo",
+        kind: "local_checkout",
+        displayName: "main",
+        createdAt: "2026-08-14T00:00:00.000Z",
+        updatedAt: "2026-08-14T01:00:00.000Z",
+        labels: ["Priority"],
+      }),
+    );
+    const projectsPath = join(committedHome, "projects");
+    await writeJsonFileAtomic(join(projectsPath, "workspace-labels.json"), [
+      { name: "Priority", color: "red" },
+    ]);
+    await writeJsonFileAtomic(
+      join(projectsPath, "workspace-labels.transaction.tx-committed.json"),
+      {
+        phase: "committed",
+        beforeLabels: [],
+        afterLabels: [{ name: "Priority", color: "red" }],
+        beforeWorkspaces: [],
+        afterWorkspaces: [],
+      },
+    );
+
+    const recovered = createWorkspaceLabelService({
+      paseoHome: committedHome,
+      workspaceRegistry: committedRegistry,
+    });
+    await recovered.initialize();
+
+    expect((await recovered.subscribe({ onChange: () => undefined })).snapshot.labels).toEqual([
+      { name: "Priority", color: "red" },
+    ]);
+    expect((await committedRegistry.get("wks_committed"))?.labels).toEqual(["Priority"]);
+    await expect(readdir(projectsPath)).resolves.not.toEqual(
+      expect.arrayContaining(["workspace-labels.transaction.tx-committed.json"]),
+    );
+  });
+
+  test("does not treat catalog, workspace, or near-match files as journals", async () => {
+    const globHome = join(paseoHome, "journal-glob");
+    const globRegistry = new FileBackedWorkspaceRegistry(
+      join(globHome, "projects", "workspaces.json"),
+      createTestLogger(),
+    );
+    const projectsPath = join(globHome, "projects");
+    await globRegistry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "wks_glob",
+        projectId: "prj_one",
+        cwd: "/repo",
+        kind: "local_checkout",
+        displayName: "main",
+        createdAt: "2026-08-14T00:00:00.000Z",
+        updatedAt: "2026-08-14T00:00:00.000Z",
+      }),
+    );
+    await writeJsonFileAtomic(join(projectsPath, "workspace-labels.json"), [
+      { name: "Stable", color: "teal" },
+    ]);
+    for (const fileName of [
+      "workspace-labels.transaction.json",
+      "workspace-labels.transaction..json",
+      "workspace-labels.transaction.tx.json.bak",
+      "workspace-labels.transactions.tx.json",
+    ]) {
+      await writeJsonFileAtomic(join(projectsPath, fileName), { not: "a journal" });
+    }
+
+    const globLabels = createWorkspaceLabelService({
+      paseoHome: globHome,
+      workspaceRegistry: globRegistry,
+    });
+    await globLabels.initialize();
+
+    expect((await globLabels.subscribe({ onChange: () => undefined })).snapshot.labels).toEqual([
+      { name: "Stable", color: "teal" },
+    ]);
+    await expect(readdir(projectsPath)).resolves.toEqual(
+      expect.arrayContaining([
+        "workspace-labels.json",
+        "workspaces.json",
+        "workspace-labels.transaction.json",
+        "workspace-labels.transaction..json",
+        "workspace-labels.transaction.tx.json.bak",
+        "workspace-labels.transactions.tx.json",
+      ]),
+    );
   });
 
   test("rolls back an interrupted compound rename after restart without publishing transient changes", async () => {
@@ -1055,5 +1321,45 @@ describe("workspace labels", () => {
     });
     expired.unsubscribe();
     checkpoint.unsubscribe();
+  });
+
+  test("serializes concurrent commits from two daemons sharing PASEO_HOME without losing a label", async () => {
+    const registryB = new FileBackedWorkspaceRegistry(
+      join(paseoHome, "projects", "workspaces.json"),
+      createTestLogger(),
+    );
+    const labelsB = createWorkspaceLabelService({ paseoHome, workspaceRegistry: registryB });
+    await labelsB.initialize();
+
+    // Both daemons staged their catalogs before either commit landed; without the
+    // cross-daemon lock the later write would clobber the earlier one.
+    await Promise.all([
+      labels.setAssignment({
+        workspaceId: "wks_one",
+        label: { name: "Alpha", color: "red" },
+        assigned: true,
+      }),
+      labelsB.setAssignment({
+        workspaceId: "wks_one",
+        label: { name: "Beta", color: "sky" },
+        assigned: true,
+      }),
+    ]);
+
+    const reloaded = createWorkspaceLabelService({
+      paseoHome,
+      workspaceRegistry: new FileBackedWorkspaceRegistry(
+        join(paseoHome, "projects", "workspaces.json"),
+        createTestLogger(),
+      ),
+    });
+    expect(
+      (await reloaded.list()).labels.slice().sort((a, b) => a.name.localeCompare(b.name)),
+    ).toEqual([
+      { name: "Alpha", color: "red" },
+      { name: "Beta", color: "sky" },
+    ]);
+    const reloadedWorkspace = await registryB.get("wks_one");
+    expect(reloadedWorkspace?.labels?.slice().sort()).toEqual(["Alpha", "Beta"]);
   });
 });

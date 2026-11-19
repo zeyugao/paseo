@@ -176,6 +176,7 @@ for (const seeder of ["setup", "shell", "setup-bom"] as const) {
         }
         expect((await readdir(target)).sort()).toEqual(["agents", "config.json"]);
         const config = readPersistedConfig(target);
+        expect(config.agents?.resumeOnStartup).toBe(false);
         const copied = new AgentStorage(join(target, "agents"), createTestLogger());
         const dispatched: string[] = [];
         const recovery = createRestartRecovery({
@@ -184,6 +185,7 @@ for (const seeder of ["setup", "shell", "setup-bom"] as const) {
             enabled: config.agents?.resumeOnStartup === true,
             prompt: "Continue",
           }),
+          mutable: async (record) => record.hostId === undefined,
           eligible: async () => true,
           dispatch: async (id) => {
             dispatched.push(id);

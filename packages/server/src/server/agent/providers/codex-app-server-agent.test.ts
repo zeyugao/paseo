@@ -101,7 +101,7 @@ import {
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { asInternals as castInternals, createStub } from "../../test-utils/class-mocks.js";
 import { AgentManager } from "../agent-manager.js";
-import { AgentStorage } from "../agent-storage.js";
+import { AgentStorage, parseStoredAgentRecord } from "../agent-storage.js";
 import { buildProviderRegistry } from "../provider-registry.js";
 
 interface CollaborationModeRecord {
@@ -2567,26 +2567,45 @@ describe("Codex app-server provider", () => {
   });
 
   test("persists an acknowledged instruction snapshot before a turn on repeated opens", async () => {
-    const artifactDir = path.resolve(process.cwd(), "../../.artifacts");
-    mkdirSync(artifactDir, { recursive: true });
-    const dir = await mkdtemp(path.join(artifactDir, "codex-receipt-"));
+    const dir = await mkdtemp(path.join(tmpdir(), "paseo-codex-receipt-"));
     const storage = new AgentStorage(dir, createTestLogger());
     const codex = createReopenableCodexAgent({}, storage);
     try {
-      let handle = codex.handle;
+      const timestamp = "2026-01-01T00:00:00.000Z";
+      await storage.upsert(
+        parseStoredAgentRecord({
+          id: codex.agentId,
+          provider: codex.handle.provider,
+          cwd: codex.config.cwd,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          lastStatus: "closed",
+          persistence: codex.handle,
+        }),
+      );
       for (let i = 0; i < 3; i++) {
-        await codex.manager.resumeAgentFromPersistence(handle, codex.config, codex.agentId);
-        await storage.flush();
-        const saved = await storage.get(codex.agentId);
-        expect(saved?.persistence?.metadata?.paseoInstructionReceipt).toEqual(expect.any(Object));
-        handle = saved!.persistence!;
+        const stored = await storage.getFresh(codex.agentId);
+        if (!stored?.persistence) throw new Error("Missing persisted Codex thread");
+        await codex.manager.resumeAgentFromPersistence(
+          stored.persistence,
+          codex.config,
+          codex.agentId,
+        );
+        const saved = await storage.getFresh(codex.agentId);
+        expect(saved?.persistence?.metadata?.paseoInstructionReceipt).toEqual({
+          threadId: codex.handle.sessionId,
+          digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
         await codex.manager.closeAgent(codex.agentId);
       }
-      expect(
-        codex.appServers
-          .flatMap((server) => server.requests())
-          .filter((request) => request.method === "thread/inject_items"),
-      ).toHaveLength(1);
+      const injectionsPerOpen: number[] = [];
+      for (const appServer of codex.appServers) {
+        const methods = appServer.requests().map((request) => request.method);
+        injectionsPerOpen.push(methods.filter((method) => method === "thread/inject_items").length);
+        expect(methods).not.toContain("turn/start");
+      }
+      expect(injectionsPerOpen).toEqual([1, 0, 0]);
+      for (const appServer of codex.appServers) appServer.assertNoErrors();
     } finally {
       if (codex.manager.getAgent(codex.agentId)) await codex.manager.closeAgent(codex.agentId);
       await storage.flush();

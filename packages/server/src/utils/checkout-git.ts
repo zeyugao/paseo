@@ -1731,6 +1731,13 @@ function resolveMergeTargetBranch(baseRef: string): string {
   return branchNameFromRef(baseRef);
 }
 
+export async function getMergeToBaseWorktreePath(
+  cwd: string,
+  baseRef: string,
+): Promise<string | null> {
+  return getWorktreePathForBranch(cwd, resolveMergeTargetBranch(baseRef));
+}
+
 async function doesGitRefExist(
   cwd: string,
   fullRef: string,
@@ -3686,18 +3693,29 @@ export async function snapshotComparisonIndex(cwd: string) {
     });
     const source = resolveGitRevParsePath(cwd, index.stdout);
     if (!source) throw new Error("Git did not return an index path");
+    let sourceMtime: number | null = null;
     try {
       const { atime, mtimeMs } = await statFile(source);
+      sourceMtime = Math.floor(mtimeMs / 1000);
       await copyFile(source, indexFile);
-      await utimes(indexFile, atime, Math.floor(mtimeMs / 1000));
+      await utimes(indexFile, atime, sourceMtime);
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+      sourceMtime = null;
       await runGitCommand(["read-tree", "--empty"], {
         cwd,
         envOverlay: { ...READ_ONLY_GIT_ENV, GIT_INDEX_FILE: indexFile },
       });
     }
-    return { indexFile, cleanup: () => rm(directory, { recursive: true, force: true }) };
+    return {
+      indexFile,
+      // Git's racy-clean check compares entry mtimes with the index mtime.
+      // Restore it after write-tree/update-index, before reading the working tree.
+      restoreTimestamp: async () => {
+        if (sourceMtime !== null) await utimes(indexFile, sourceMtime, sourceMtime);
+      },
+      cleanup: () => rm(directory, { recursive: true, force: true }),
+    };
   } catch (error) {
     await rm(directory, { recursive: true, force: true });
     throw error;
@@ -3720,6 +3738,7 @@ export async function getCheckoutDiff(
   const index =
     compare.mode === "all" ? await prepareAllChangesIndex(cwd, refsForDiff.baseRef) : null;
   try {
+    await index?.restoreTimestamp();
     return await readCheckoutDiff(
       cwd,
       compare,
@@ -4015,7 +4034,7 @@ export async function mergeToBase(
     throw new Error("Cannot merge a branch into itself");
   }
 
-  const baseWorktree = await getWorktreePathForBranch(cwd, normalizedBaseRef);
+  const baseWorktree = await getMergeToBaseWorktreePath(cwd, baseRef);
   const operationCwd = baseWorktree ?? currentWorktreeRoot;
   const isSameCheckout = resolve(operationCwd) === resolve(currentWorktreeRoot);
   const originalBranch = await getCurrentBranch(operationCwd);

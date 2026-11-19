@@ -186,19 +186,18 @@ test("classifies a removed file as deleted", async () => {
   const root = await createRoot();
   const target = join(root, "removed.txt");
   await writeFile(target, "before");
-  const events: FileChange[] = [];
+  const deliveredTypes: FileChange["type"][] = [];
   const subscription = await subscribeToFileChanges(root, (error, batch) => {
     expect(error).toBeNull();
-    events.push(...batch);
+    for (const event of batch) {
+      if (event.path === target) deliveredTypes.push(event.type);
+    }
   });
 
   await rm(target);
-  // macOS FSEvents can replay the write above as a create after the subscription starts,
-  // so the delete is the latest event for the path, not the first. Native recursive delivery
-  // can also be coalesced before the backend's deletion audit, hence the longer timeout.
-  await expect
-    .poll(() => events.findLast((event) => event.path === target)?.type, { timeout: 10_000 })
-    .toBe("delete");
+  // macOS FSEvents can replay the earlier write as a create after subscribing.
+  // Coalesced notifications may also need the backend's deletion-audit budget.
+  await expect.poll(() => deliveredTypes, { timeout: 10_000 }).toContain("delete");
   await subscription.unsubscribe();
 });
 

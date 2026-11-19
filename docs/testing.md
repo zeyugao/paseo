@@ -4,6 +4,8 @@
 
 Tests prove behavior, not structure. Every test should answer: "what user-visible or API-visible behavior does this verify?"
 
+Assert geometry against content fit and containment, not a fixed pixel minimum. A text input must fit a rendered line, and its container must contain the input.
+
 ## Test-driven development
 
 Work in vertical slices: one test, one implementation, repeat. Each test responds to what you learned from the previous cycle.
@@ -41,6 +43,14 @@ Tests must produce the same result every run:
 - No reliance on timing, randomness, or network jitter
 - No weak assertions (`toBeTruthy`, `toBeDefined`)
 - Assert the full intended behavior, not fragments
+
+Filesystem observers can deliver multiple notifications for one write. Assert the resulting state, not an exact number of downstream computations.
+
+Restart tests reopen the saved home without replaying configuration or installation. Otherwise setup can repair the state the test is meant to verify.
+
+Endpoints reused across daemon stop/start must stay outside the default ephemeral client range.
+A released `listen(0)` probe does not reserve the endpoint for the next start; a concurrent client
+socket can claim it between launches.
 
 ```typescript
 // Bad: conditional and weak
@@ -102,6 +112,9 @@ function createTestEmailSender() {
 ## End-to-end means end-to-end
 
 When a test is labeled end-to-end, it calls the real service. No environment variable gates, no conditional skipping, no mocking the external dependency.
+
+Lifecycle E2E tests assert public CLI status and both supervisor and worker process lifetimes.
+Log wording and PID file layout are not lifecycle contracts; see [shared-home ownership](shared-home.md#identity-and-per-instance-state).
 
 ### Packaged desktop smoke
 
@@ -177,7 +190,14 @@ Codex MultiAgentV2 real tests use local Codex authentication rather than the Ope
 ### Test setup
 
 - Server: `packages/server/src/test-utils/vitest-setup.ts` loads `.env.test`, sets `PASEO_SUPERVISED=0`, and disables Git/SSH prompts. Add new global env shims here, not in individual tests.
+- Agent lifecycle fixtures must survive a fresh disk read before reopening. A cached record can hide serialization errors that appear after restart or on another host.
 - App: `packages/app/vitest.setup.ts` provides `expo`/`__DEV__` shims and stubs a few native-only modules (`react-native-unistyles`, `react-native-svg`, `expo-linking`, `@xterm/addon-ligatures`). Stubbing here is for modules that have no meaningful Node behavior — not a license to mock app code.
+
+Browser ESM validates native-only named imports before platform guards run. Keep those import shims in the shared React Native adapter; verify native UI interactions on the native surface rather than simulating a menu choice in the browser.
+
+Playwright loads the daemon SDK from built workspace packages. Keep the client, protocol, and relay
+`dist` graphs outside its transpiler so Node owns their ESM exports. Build those packages before
+starting the browser run; do not repair a missing export by adding loader retries.
 
 ## Running tests locally
 
@@ -192,6 +212,7 @@ Test suites in this repo are heavy. Running them in bulk freezes the machine, es
 - App Playwright shares one warmed Metro server per run and gives every Playwright worker its own isolated daemon and `PASEO_HOME`. Spec files run concurrently without exposing one file's projects, agents, terminals, history, or provider configuration to another worker; tests within a file remain together so file-level setup is not repeated.
 - Playwright specs that exercise only the daemon import `daemonTest` from the shared fixtures so they do not create a browser context or page.
 - Helpers that create projects or workspaces own those records until cleanup. Their clients remove the daemon project on close, and an automatic fixture fails any test that still leaks a project record. Deleting only the temporary directory is not cleanup. Agent helpers pass the intended `workspaceId` through to agent creation; they never infer ownership from `cwd`.
+- Read the trace snapshot at the failing action before relying on Playwright's `error-context` or failure screenshot. A spec's `finally` cleanup runs before those attachments; removing its project can replace the failing view with `Workspace unavailable`.
 - Tests whose subject is daemon-global state, such as an empty history or daemon restart, start a dedicated host explicitly. Filenames and directories describe product behavior, never execution order or isolation mechanics.
 - Global setup accepts Metro as ready only when `/status` returns `packager-status:running`, then fetches the document's scripts so the cold bundle compilation finishes before Playwright's per-test timeout starts. A generic TCP listener is not sufficient readiness evidence. The browser suite uses direct local daemon connections and does not start a relay. Automated Metro launches set `EXPO_UNSTABLE_HEADLESS=1` so Expo does not download the native DevTools shell into temporary test homes; its read-only cache breaks teardown. Browser fixtures and the standalone Electron browser runner share the developer-toast dismissal helper while retaining console logs. A pointer click moves hover away from the tested control and stalls behind app modal backdrops.
 - The app Playwright harness boots on Windows as well as POSIX. Spawn Node entrypoints through `process.execPath`, not `npx` or `node_modules/.bin` shims: Node refuses to spawn `.cmd` or `.bat` without `shell: true`, and shell mode concatenates argv without escaping and sends kill signals to `cmd.exe` instead of the real child.

@@ -204,6 +204,7 @@ async function readComparisonList(
       ...(privateIndex ? { GIT_INDEX_FILE: privateIndex.indexFile } : {}),
     },
   };
+  await privateIndex?.restoreTimestamp();
   const tracked = await readTrackedFiles(compare, args, options);
   const files = tracked.files;
   const worktreeInputs = tracked.worktreeInputs;

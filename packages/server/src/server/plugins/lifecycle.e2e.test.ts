@@ -7,6 +7,7 @@ import { expect, onTestFinished, test } from "vitest";
 import { DaemonClient } from "../test-utils/daemon-client.js";
 import { createTestPaseoDaemon } from "../test-utils/paseo-daemon.js";
 import { resolveDaemonVersion } from "../daemon-version.js";
+import { readPersistedConfig } from "../persisted-config.js";
 import { BuiltinPluginLoader } from "./builtin/index.js";
 import { createPaseoApi } from "@getpaseo/client";
 
@@ -476,7 +477,13 @@ export default function contribute(server) {
       await first.close();
     }
 
-    const second = await createTestPaseoDaemon({ paseoHomeRoot: root, cleanup: false });
+    const persisted = readPersistedConfig(first.paseoHome);
+    const second = await createTestPaseoDaemon({
+      paseoHomeRoot: root,
+      cleanup: false,
+      pluginsEnabled: persisted.pluginsEnabled,
+      plugins: persisted.plugins,
+    });
     const secondClient = new DaemonClient({ url: `ws://127.0.0.1:${second.port}/ws` });
     try {
       await secondClient.connect();
@@ -488,8 +495,6 @@ export default function contribute(server) {
         "c.workspace": [],
       });
       await secondClient.fetchAgents({ subscribe: {} });
-      await secondClient.patchDaemonConfig({ pluginsEnabled: true });
-      await secondClient.installDirectoryPlugin(pluginDirectory);
       await secondClient.refreshAgent(agentId);
       await expect
         .poll(async () => {

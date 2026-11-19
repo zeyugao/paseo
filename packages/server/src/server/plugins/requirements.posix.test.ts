@@ -33,6 +33,12 @@ async function writePlugin(root: string, paseo?: string, build?: string[][]) {
 }
 async function host(version = "0.8.0", pluginPath?: string) {
   const home = await directory();
+  const plugins = pluginPath
+    ? { example: { source: "directory" as const, path: pluginPath, enabled: true } }
+    : {};
+  // Production builds the store from the persisted config; initial plugins
+  // must exist in config.json for plugin mutations that re-read it on disk.
+  await writeFile(path.join(home, "config.json"), `${JSON.stringify({ plugins }, null, 2)}\n`);
   const store = new DaemonConfigStore(home, {
     mcp: { injectIntoAgents: true },
     browserTools: { enabled: false },
@@ -42,9 +48,7 @@ async function host(version = "0.8.0", pluginPath?: string) {
     enableTerminalAgentHooks: false,
     appendSystemPrompt: "",
     pluginsEnabled: true,
-    plugins: pluginPath
-      ? { example: { source: "directory", path: pluginPath, enabled: true } }
-      : {},
+    plugins,
   });
   const service = new PluginService(pino({ level: "silent" }), store, version, {
     managedSources: new ManagedPluginSources(home),

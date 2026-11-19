@@ -29,6 +29,7 @@ export const OverviewToolCallGroupView = memo(function OverviewToolCallGroupView
 }: OverviewGroupProps) {
   const isCompact = useIsCompactFormFactor();
   const aggregateSummary = useOverviewSummaryLabel(group.summary);
+  const callCount = group.run.calls.length;
   const hold = useDisclosureHold();
   const toggle = useCallback(() => {
     const apply = () => onExpandedChange(group.run.id, !expanded);
@@ -56,7 +57,12 @@ export const OverviewToolCallGroupView = memo(function OverviewToolCallGroupView
           isLastInSequence={isLastInSequence}
           onToggle={toggle}
         />
-        <OverviewToolCallGroupSheet visible={expanded} summary={aggregateSummary} onClose={close}>
+        <OverviewToolCallGroupSheet
+          visible={expanded}
+          summary={aggregateSummary}
+          callCount={callCount}
+          onClose={close}
+        >
           {children}
         </OverviewToolCallGroupSheet>
       </>

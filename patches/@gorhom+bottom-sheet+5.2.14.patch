@@ -58,10 +58,45 @@ index ee51e76..5fe8f75 100644
        _providedOnChange(_index, _position, _type);
      }
 diff --git a/node_modules/@gorhom/bottom-sheet/lib/commonjs/hooks/useAnimatedLayout.js b/node_modules/@gorhom/bottom-sheet/lib/commonjs/hooks/useAnimatedLayout.js
-index 973d05c..b484b5f 100644
+index 973d05c..799e011 100644
 --- a/node_modules/@gorhom/bottom-sheet/lib/commonjs/hooks/useAnimatedLayout.js
 +++ b/node_modules/@gorhom/bottom-sheet/lib/commonjs/hooks/useAnimatedLayout.js
-@@ -86,7 +86,7 @@ function useAnimatedLayout(containerLayoutState, topInset, bottomInset, modal, s
+@@ -57,7 +57,10 @@ function useAnimatedLayout(containerLayoutState, topInset, bottomInset, modal, s
+   //#endregion
+ 
+   //#region effects
+-  (0, _reactNativeReanimated.useAnimatedReaction)(() => state.value.rawContainerHeight, (result, previous) => {
++  (0, _reactNativeReanimated.useAnimatedReaction)(() => {
++    const height = state.value.rawContainerHeight;
++    return !modal || height === _constants.INITIAL_LAYOUT_VALUE ? height : height - verticalInset;
++  }, (result, previous) => {
+     if (result === previous) {
+       return;
+     }
+@@ -67,11 +70,14 @@ function useAnimatedLayout(containerLayoutState, topInset, bottomInset, modal, s
+     state.modify(_state => {
+       'worklet';
+ 
+-      _state.containerHeight = modal ? result - verticalInset : result;
++      _state.containerHeight = result;
+       return _state;
+     });
+   }, [state, verticalInset, modal]);
+-  (0, _reactNativeReanimated.useAnimatedReaction)(() => containerLayoutState?.get().height, (result, previous) => {
++  (0, _reactNativeReanimated.useAnimatedReaction)(() => {
++    const height = containerLayoutState?.get().height;
++    return height === undefined || !modal || height === _constants.INITIAL_LAYOUT_VALUE ? height : height - verticalInset;
++  }, (result, previous) => {
+     if (!result || result === previous) {
+       return;
+     }
+@@ -81,12 +87,12 @@ function useAnimatedLayout(containerLayoutState, topInset, bottomInset, modal, s
+     state.modify(_state => {
+       'worklet';
+ 
+-      _state.containerHeight = modal ? result - verticalInset : result;
++      _state.containerHeight = result;
+       return _state;
      });
    }, [state, verticalInset, modal]);
    (0, _react.useEffect)(() => {
@@ -70,7 +105,7 @@ index 973d05c..b484b5f 100644
        window
      }) => {
        state.modify(_state => {
-@@ -96,6 +96,7 @@ function useAnimatedLayout(containerLayoutState, topInset, bottomInset, modal, s
+@@ -96,6 +102,7 @@ function useAnimatedLayout(containerLayoutState, topInset, bottomInset, modal, s
          return _state;
        });
      });
@@ -164,10 +199,45 @@ index 94fabdb..d870aa7 100644
        _providedOnChange(_index, _position, _type);
      }
 diff --git a/node_modules/@gorhom/bottom-sheet/lib/module/hooks/useAnimatedLayout.js b/node_modules/@gorhom/bottom-sheet/lib/module/hooks/useAnimatedLayout.js
-index b0eec93..67713a2 100644
+index b0eec93..29093ce 100644
 --- a/node_modules/@gorhom/bottom-sheet/lib/module/hooks/useAnimatedLayout.js
 +++ b/node_modules/@gorhom/bottom-sheet/lib/module/hooks/useAnimatedLayout.js
-@@ -82,7 +82,7 @@ export function useAnimatedLayout(containerLayoutState, topInset, bottomInset, m
+@@ -53,7 +53,10 @@ export function useAnimatedLayout(containerLayoutState, topInset, bottomInset, m
+   //#endregion
+ 
+   //#region effects
+-  useAnimatedReaction(() => state.value.rawContainerHeight, (result, previous) => {
++  useAnimatedReaction(() => {
++    const height = state.value.rawContainerHeight;
++    return !modal || height === INITIAL_LAYOUT_VALUE ? height : height - verticalInset;
++  }, (result, previous) => {
+     if (result === previous) {
+       return;
+     }
+@@ -63,11 +66,14 @@ export function useAnimatedLayout(containerLayoutState, topInset, bottomInset, m
+     state.modify(_state => {
+       'worklet';
+ 
+-      _state.containerHeight = modal ? result - verticalInset : result;
++      _state.containerHeight = result;
+       return _state;
+     });
+   }, [state, verticalInset, modal]);
+-  useAnimatedReaction(() => containerLayoutState?.get().height, (result, previous) => {
++  useAnimatedReaction(() => {
++    const height = containerLayoutState?.get().height;
++    return height === undefined || !modal || height === INITIAL_LAYOUT_VALUE ? height : height - verticalInset;
++  }, (result, previous) => {
+     if (!result || result === previous) {
+       return;
+     }
+@@ -77,12 +83,12 @@ export function useAnimatedLayout(containerLayoutState, topInset, bottomInset, m
+     state.modify(_state => {
+       'worklet';
+ 
+-      _state.containerHeight = modal ? result - verticalInset : result;
++      _state.containerHeight = result;
+       return _state;
      });
    }, [state, verticalInset, modal]);
    useEffect(() => {
@@ -176,7 +246,7 @@ index b0eec93..67713a2 100644
        window
      }) => {
        state.modify(_state => {
-@@ -92,6 +92,7 @@ export function useAnimatedLayout(containerLayoutState, topInset, bottomInset, m
+@@ -92,6 +98,7 @@ export function useAnimatedLayout(containerLayoutState, topInset, bottomInset, m
          return _state;
        });
      });
@@ -310,10 +380,53 @@ index 2954b3f..936300b 100644
        if (_providedOnChange) {
          _providedOnChange(_index, _position, _type);
 diff --git a/node_modules/@gorhom/bottom-sheet/src/hooks/useAnimatedLayout.ts b/node_modules/@gorhom/bottom-sheet/src/hooks/useAnimatedLayout.ts
-index 68c674d..564833c 100644
+index 68c674d..1dcbddc 100644
 --- a/node_modules/@gorhom/bottom-sheet/src/hooks/useAnimatedLayout.ts
 +++ b/node_modules/@gorhom/bottom-sheet/src/hooks/useAnimatedLayout.ts
-@@ -106,13 +106,14 @@ export function useAnimatedLayout(
+@@ -70,7 +70,11 @@ export function useAnimatedLayout(
+ 
+   //#region effects
+   useAnimatedReaction(
+-    () => state.value.rawContainerHeight,
++    // Compare usable heights so an inset change does not look like an unchanged host.
++    () => {
++      const height = state.value.rawContainerHeight;
++      return !modal || height === INITIAL_LAYOUT_VALUE ? height : height - verticalInset;
++    },
+     (result, previous) => {
+       if (result === previous) {
+         return;
+@@ -81,14 +85,19 @@ export function useAnimatedLayout(
+ 
+       state.modify(_state => {
+         'worklet';
+-        _state.containerHeight = modal ? result - verticalInset : result;
++        _state.containerHeight = result;
+         return _state;
+       });
+     },
+     [state, verticalInset, modal]
+   );
+   useAnimatedReaction(
+-    () => containerLayoutState?.get().height,
++    () => {
++      const height = containerLayoutState?.get().height;
++      return height === undefined || !modal || height === INITIAL_LAYOUT_VALUE
++        ? height
++        : height - verticalInset;
++    },
+     (result, previous) => {
+       if (!result || result === previous) {
+         return;
+@@ -99,20 +108,21 @@ export function useAnimatedLayout(
+ 
+       state.modify(_state => {
+         'worklet';
+-        _state.containerHeight = modal ? result - verticalInset : result;
++        _state.containerHeight = result;
+         return _state;
+       });
+     },
      [state, verticalInset, modal]
    );
    useEffect(() => {

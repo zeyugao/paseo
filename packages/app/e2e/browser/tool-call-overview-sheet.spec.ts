@@ -56,37 +56,29 @@ function cloneToolCallWithId(
 ): string {
   const raw = typeof message === "string" ? message : message.toString("utf8");
   const envelope = JSON.parse(raw) as {
-    message?: { payload?: { seq?: number; event?: { item?: { callId?: string } } } };
+    message?: {
+      payload?: {
+        seq?: number;
+        event?: { item?: { callId?: string; detail?: { type?: string; filePath?: string } } };
+      };
+    };
   };
   const payload = envelope.message?.payload;
   const item = payload?.event?.item;
-  if (!payload || !item?.callId || typeof payload.seq !== "number") {
-    throw new Error("Expected a tool-call session message");
+  const detail = item?.detail;
+  if (
+    !payload ||
+    !item?.callId ||
+    typeof payload.seq !== "number" ||
+    detail?.type !== "read" ||
+    typeof detail.filePath !== "string"
+  ) {
+    throw new Error("Expected a read tool-call session message");
   }
   item.callId = callId;
+  detail.filePath = `${detail.filePath}.${sequenceOffset}`;
   payload.seq += sequenceOffset;
   return JSON.stringify(envelope);
-}
-
-function shiftTimelineSequence(
-  message: WebSocketMessage,
-  sequenceOffset: number,
-): WebSocketMessage {
-  if (sequenceOffset === 0) {
-    return message;
-  }
-  const raw = typeof message === "string" ? message : message.toString("utf8");
-  try {
-    const envelope = JSON.parse(raw) as { message?: { payload?: { seq?: number } } };
-    const payload = envelope.message?.payload;
-    if (typeof payload?.seq !== "number") {
-      return message;
-    }
-    payload.seq += sequenceOffset;
-    return JSON.stringify(envelope);
-  } catch {
-    return message;
-  }
 }
 
 async function holdStreamAfterFirstCompletedToolCall(page: Page, agentId: string) {
@@ -94,7 +86,6 @@ async function holdStreamAfterFirstCompletedToolCall(page: Page, agentId: string
   let firstCompletedMessage: WebSocketMessage | null = null;
   let isHolding = false;
   let sequenceOffset = 0;
-  const heldMessages: WebSocketMessage[] = [];
   let sendToPage: ((message: WebSocketMessage) => void) | null = null;
   let resolveFirstCompleted!: () => void;
   const firstCompleted = new Promise<void>((resolve) => {
@@ -107,11 +98,10 @@ async function holdStreamAfterFirstCompletedToolCall(page: Page, agentId: string
     ws.onMessage((message) => server.send(message));
     server.onMessage((message) => {
       if (isHolding) {
-        heldMessages.push(message);
         return;
       }
 
-      ws.send(shiftTimelineSequence(message, sequenceOffset));
+      ws.send(message);
       const toolCall = getToolCallStatus(message, agentId);
       firstCallId ??= toolCall?.callId ?? null;
       if (toolCall?.callId === firstCallId && toolCall.status === "completed") {
@@ -140,13 +130,6 @@ async function holdStreamAfterFirstCompletedToolCall(page: Page, agentId: string
   return {
     waitForFirstCompleted: () => firstCompleted,
     appendCompletedCalls,
-    release(extraCompletedCalls = 0) {
-      isHolding = false;
-      appendCompletedCalls(extraCompletedCalls);
-      for (const message of heldMessages.splice(0)) {
-        sendToPage?.(shiftTimelineSequence(message, sequenceOffset));
-      }
-    },
   };
 }
 
@@ -196,38 +179,11 @@ async function openOverviewAgent(
 
 function hasScrolledToLatest(root: HTMLElement): boolean {
   for (const node of root.querySelectorAll<HTMLElement>("*")) {
-    if (node.scrollHeight <= node.clientHeight) {
-      continue;
-    }
+    if (node.scrollHeight <= node.clientHeight) continue;
     const maximumScrollTop = node.scrollHeight - node.clientHeight;
-    return maximumScrollTop > 0 && Math.abs(node.scrollTop - maximumScrollTop) <= 1;
+    return Math.abs(node.scrollTop - maximumScrollTop) <= 1;
   }
   return false;
-}
-
-function readScrollMetrics(root: HTMLElement) {
-  const badgeElements = root.querySelectorAll<HTMLElement>("[data-testid=tool-call-badge]");
-  const latestBadge = badgeElements.item(badgeElements.length - 1);
-  const scrollables = [];
-  for (const node of root.querySelectorAll<HTMLElement>("*")) {
-    if (node.scrollHeight <= node.clientHeight) {
-      continue;
-    }
-    scrollables.push({
-      className: node.className,
-      clientHeight: node.clientHeight,
-      rect: node.getBoundingClientRect().toJSON(),
-      scrollHeight: node.scrollHeight,
-      scrollTop: node.scrollTop,
-      tagName: node.tagName,
-    });
-  }
-  return {
-    latestBadgeRect: latestBadge?.getBoundingClientRect().toJSON(),
-    rootRect: root.getBoundingClientRect().toJSON(),
-    scrollables,
-    viewport: { height: window.innerHeight, width: window.innerWidth },
-  };
 }
 
 const FIRST_CALL_DETAILS = "export function ConversationList()";
@@ -258,6 +214,18 @@ async function topOf(row: Locator): Promise<number> {
   const box = await row.boundingBox();
   if (!box) throw new Error("Expected a visible timeline row");
   return box.y;
+}
+
+async function scrollTopOf(scroll: Locator): Promise<number> {
+  return scroll.evaluate((node) => node.scrollTop);
+}
+
+async function topWithinOverviewScroll(row: Locator): Promise<number> {
+  return row.evaluate((node) => {
+    const scroll = node.closest('[data-testid="tool-call-group-sheet-scroll"]');
+    if (!scroll) throw new Error("Expected a tool call inside the group scroll viewport");
+    return node.getBoundingClientRect().top - scroll.getBoundingClientRect().top;
+  });
 }
 
 test.describe("compact overview tool calls", () => {
@@ -292,16 +260,35 @@ test.describe("compact overview tool calls", () => {
       await expect(sheet).toBeVisible();
       const initialSummary = await summary.innerText();
 
-      gate.release(10);
+      gate.appendCompletedCalls(10);
       const badges = sheet.getByTestId("tool-call-badge");
-      await expect.poll(() => badges.count(), { timeout: 30_000 }).toBeGreaterThanOrEqual(11);
+      await expect(badges).toHaveCount(12);
       await expect(summary).not.toHaveText(initialSummary);
-      await expect.poll(() => sheet.evaluate(hasScrolledToLatest)).toBe(true);
-      const scrollMetrics = await sheet.evaluate(readScrollMetrics);
-      await testInfo.attach("compact-overview-scroll-metrics", {
-        body: JSON.stringify(scrollMetrics, null, 2),
-        contentType: "application/json",
-      });
+      await expect(badges.last()).toBeInViewport({ ratio: 1 });
+
+      const scroll = sheet.getByTestId("tool-call-group-sheet-scroll");
+      const scrollBox = await scroll.boundingBox();
+      if (!scrollBox) throw new Error("Expected the group sheet's scroll viewport");
+      await page.mouse.move(scrollBox.x + scrollBox.width / 2, scrollBox.y + scrollBox.height / 2);
+      await page.mouse.wheel(0, -1000);
+      await expect.poll(() => scrollTopOf(scroll)).toBe(0);
+      await expect(badges.first()).toBeInViewport({ ratio: 1 });
+      await expect(badges.last()).not.toBeInViewport();
+      const readingTop = await topWithinOverviewScroll(badges.first());
+
+      gate.appendCompletedCalls(3);
+      await expect(badges).toHaveCount(15);
+      await expect(badges.first()).toBeInViewport({ ratio: 1 });
+      await expect(badges.last()).not.toBeInViewport();
+      expect(
+        Math.abs((await topWithinOverviewScroll(badges.first())) - readingTop),
+      ).toBeLessThanOrEqual(1);
+
+      await page.mouse.wheel(0, 1000);
+      await expect(badges.last()).toBeInViewport({ ratio: 1 });
+      gate.appendCompletedCalls(3);
+      await expect(badges).toHaveCount(18);
+      await expect(badges.last()).toBeInViewport({ ratio: 1 });
 
       await badges.last().click();
       const detailClose = page.getByTestId("tool-call-sheet-close");

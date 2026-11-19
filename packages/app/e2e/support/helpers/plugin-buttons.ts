@@ -223,12 +223,27 @@ async function expectCompactDetails(page: Page) {
 }
 
 /** Resolves once `subject` renders the same pixels twice in a row: entering animations are done. */
-async function expectStill(subject: Locator) {
+async function expectStill(page: Page, subject: Locator) {
   let previous: Buffer | null = null;
   await expect
     .poll(
       async () => {
-        const current = await subject.screenshot();
+        // Theme switching can replace the toolbar. Sample the currently rendered
+        // region without holding its DOM node through the screenshot.
+        const clip = await subject.evaluateAll((nodes) => {
+          if (nodes.length !== 1) return null;
+          const bounds = nodes[0]!.getBoundingClientRect();
+          const x = Math.max(0, Math.ceil(bounds.left));
+          const y = Math.max(0, Math.ceil(bounds.top));
+          const width = Math.floor(Math.min(window.innerWidth, bounds.right)) - x;
+          const height = Math.floor(Math.min(window.innerHeight, bounds.bottom)) - y;
+          return width > 0 && height > 0 ? { x, y, width, height } : null;
+        });
+        if (!clip) {
+          previous = null;
+          return false;
+        }
+        const current = await page.screenshot({ clip });
         const still = previous !== null && current.equals(previous);
         previous = current;
         return still;
@@ -242,7 +257,7 @@ async function expectStill(subject: Locator) {
 async function captureSchemes(page: Page, info: TestInfo, name: string, subject: Locator) {
   for (const colorScheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme });
-    await expectStill(subject);
+    await expectStill(page, subject);
     const file = info.outputPath(`${name}-${colorScheme}.png`);
     await info.attach(`${name}-${colorScheme}`, {
       body: await page.screenshot({ path: file }),
@@ -287,7 +302,10 @@ async function expectHeaderTextTruncated(page: Page) {
   expect(actionsBox).not.toBeNull();
   expect(titleBox!.x + titleBox!.width).toBeLessThanOrEqual(actionsBox!.x);
   expect(subtitleBox!.x + subtitleBox!.width).toBeLessThanOrEqual(actionsBox!.x);
-  const hostIcon = page.getByLabel("localhost", { exact: true }).locator("svg");
+  const hostIcon = page
+    .getByLabel("localhost", { exact: true })
+    .and(page.locator(':not([aria-hidden="true"] *)'))
+    .locator("svg");
   await expect.poll(async () => (await hostIcon.boundingBox())?.width).toBe(12);
 }
 

@@ -25,6 +25,13 @@ const labels = {
   short: { title: "main", project: "Paseo" },
 };
 
+function headerHostBadge(page: Page) {
+  return page
+    .getByTestId(`host-badge-${getServerId()}`)
+    .and(page.locator(':not([aria-hidden="true"] *)'))
+    .filter({ visible: true });
+}
+
 async function openNamedWorkspace(page: Page, names: typeof labels.long) {
   const workspace = await seedWorkspace({ repoPrefix: "header-width-", title: names.title });
   try {
@@ -40,9 +47,7 @@ async function openNamedWorkspace(page: Page, names: typeof labels.long) {
     await openAgentRoute(page, { workspaceId: workspace.workspaceId, agentId: agent.id });
     await expect(page.getByTestId("workspace-header-title")).toHaveText(names.title);
     await expect(page.getByTestId("workspace-header-subtitle")).toHaveText(names.project);
-    await expect(
-      page.getByTestId(`host-badge-${getServerId()}`).filter({ visible: true }),
-    ).toHaveCount(1);
+    await expect(headerHostBadge(page)).toHaveCount(1);
     return workspace;
   } catch (error) {
     await workspace.cleanup();
@@ -54,7 +59,7 @@ async function expectHeaderContentsFit(page: Page, info: TestInfo, long: boolean
   const menu = page.getByTestId("menu-button").filter({ visible: true });
   const title = page.getByTestId("workspace-header-title");
   const project = page.getByTestId("workspace-header-subtitle");
-  const badge = page.getByTestId(`host-badge-${getServerId()}`).filter({ visible: true });
+  const badge = headerHostBadge(page);
   const trigger = page.getByRole("button", { name: /Switch tabs/ });
   const measure = async () => ({
     menu: await menu.boundingBox(),

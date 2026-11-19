@@ -53,11 +53,19 @@ export default function contribute(client) {
 }
 `;
 
-// The meta line the badges draw on. Each item sits in one wrapper of its own, so the line is two up.
 const LABELS = { review: "In review", docs: "Docs" } as const;
 
-function badgeLine(page: Page, itemId: keyof typeof LABELS) {
-  return badge(page, itemId).locator("xpath=../..");
+function badgeLineText(page: Page, itemId: keyof typeof LABELS) {
+  const row = page.getByTestId("sidebar-workspace-meta-row").filter({ has: badge(page, itemId) });
+  return row.evaluate((element) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let text = "";
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (!node.parentElement?.closest('[aria-hidden="true"]')) text += node.textContent ?? "";
+    }
+    return text;
+  });
 }
 
 function badge(page: Page, itemId: keyof typeof LABELS) {
@@ -100,7 +108,7 @@ test("a plugin badge shows on workspace rows, hides quietly, and follows its Sho
       await expect(badge(page, "review")).toBeVisible();
       await expect(badge(page, "review")).toContainText("In review");
       // The null and throwing items after them draw nothing, and the line adds nothing of its own.
-      await expect(badgeLine(page, "review")).toHaveText("In reviewDocs");
+      await expect.poll(() => badgeLineText(page, "review")).toMatch(/In reviewDocs$/);
       // An icon-only badge is named by its item's title.
       await expect(
         page.getByLabel("Icon state", { exact: true }).locator("visible=true"),
@@ -123,7 +131,7 @@ test("a plugin badge shows on workspace rows, hides quietly, and follows its Sho
       await closeSidebarDisplayPreferences(page);
       await expect(badge(page, "review")).toHaveCount(0);
       // The first badge is gone, so the next one leads the line without a "·".
-      await expect(badgeLine(page, "docs")).toHaveText("Docs");
+      await expect.poll(() => badgeLineText(page, "docs")).toMatch(/^(?!.*·\s*Docs$).*Docs$/);
       await toggleShowItem(page, "Review state", false);
       await expect(badge(page, "review")).toBeVisible();
     });

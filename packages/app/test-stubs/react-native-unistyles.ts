@@ -99,7 +99,8 @@ const testTheme = {
   },
 };
 
-type StyleFactory<T> = (theme: typeof testTheme) => T;
+const testRuntime = { fontScale: 1 };
+type StyleFactory<T> = (theme: typeof testTheme, runtime: typeof testRuntime) => T;
 
 function isStyleFactory<T>(styles: T | StyleFactory<T>): styles is StyleFactory<T> {
   return typeof styles === "function";
@@ -152,17 +153,20 @@ function resolveStyles<T>(styles: T): T {
 
 export const StyleSheet = {
   create: <T>(styles: T | StyleFactory<T>): T =>
-    resolveStyles(isStyleFactory(styles) ? styles(testTheme) : styles),
+    resolveStyles(isStyleFactory(styles) ? styles(testTheme, testRuntime) : styles),
 };
 
-type UniPropsMapping = (theme: typeof testTheme, runtime: object) => Record<string, unknown>;
+type UniPropsMapping = (
+  theme: typeof testTheme,
+  runtime: typeof testRuntime,
+) => Record<string, unknown>;
 
 /** Applies `uniProps` with the test theme, the way Unistyles maps theme values onto props. */
 export const withUnistyles = <T>(Component: T): T => {
   function ThemedComponent({ uniProps, ...props }: { uniProps?: UniPropsMapping }) {
     // Explicit props win over mapped ones, as in Unistyles' `deepMergeObjects(mappings, uniProps, props)`.
     return createElement(Component as ElementType, {
-      ...(uniProps ? uniProps(testTheme, {}) : {}),
+      ...(uniProps ? uniProps(testTheme, testRuntime) : {}),
       ...props,
     });
   }
@@ -171,7 +175,7 @@ export const withUnistyles = <T>(Component: T): T => {
 
 export const useUnistyles = () => ({
   theme: testTheme,
-  rt: {},
+  rt: testRuntime,
   breakpoint: undefined,
 });
 

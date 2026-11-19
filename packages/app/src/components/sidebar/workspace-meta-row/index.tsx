@@ -1,9 +1,9 @@
 import { PressHighlight as Pressable } from "@/components/ui/press-highlight";
-import { Fragment, useCallback, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Text, View, type GestureResponderEvent } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { ExternalLink, Folder, GitBranch, Globe } from "lucide-react-native";
+import { ExternalLink, Folder, GitBranch, Globe, Tags } from "lucide-react-native";
 import {
   workspaceLabelKey,
   type WorkspaceLabelDefinition,
@@ -16,7 +16,6 @@ import { getForgePresentation, normalizeForge } from "@/git/forge";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { useSidebarMetaPreferences } from "@/components/sidebar/display-preferences/model";
 import type { Theme } from "@/styles/theme";
-import type { SidebarSurfaceBackdrop } from "@/styles/surface-backdrop";
 import { PullRequestStateIcon } from "@/git/pull-request-state-icon";
 import {
   PluginWorkspaceRowBadgeItems,
@@ -25,6 +24,14 @@ import {
 import { CheckIndicator } from "./check-indicator";
 import type { CheckSummary, CheckSummaryState } from "./check-summary";
 import { selectMetaRowItems, type MetaRowItem } from "./meta-items";
+import {
+  createMetaRowTextField,
+  MetaRowLayout,
+  MetaRowSlot,
+  META_ITEM_GAP,
+  type MetaRowField,
+} from "./row-layout";
+import type { MetaRowTextPriority } from "./presentation";
 import { workspaceServiceLabelKey, type WorkspaceServiceSummary } from "./service-summary";
 
 export {
@@ -33,42 +40,18 @@ export {
   type WorkspaceServiceSummary,
 } from "./service-summary";
 
-/**
- * One size for every glyph on the line. The items are peers — host, change request, CI,
- * running service — so a glyph that differs in size reads as a different rank. The host badge
- * owns the size because it is the one item that also appears off this line.
- */
 const META_ICON_SIZE = HOST_BADGE_ICON_SIZE;
-
+const EMPTY_LABELS: readonly WorkspaceLabelDefinition[] = [];
 const ThemedExternalLink = withUnistyles(ExternalLink);
 const ThemedFolder = withUnistyles(Folder);
 const ThemedGitBranch = withUnistyles(GitBranch);
 const ThemedGlobe = withUnistyles(Globe);
-
-/** Stable identity so a row without labels doesn't re-select its items on every render. */
-const EMPTY_LABELS: readonly WorkspaceLabelDefinition[] = [];
-
+const ThemedTags = withUnistyles(Tags);
 const foregroundMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const mutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const dangerMapping = (theme: Theme) => ({ color: theme.colors.statusDanger });
+const successMapping = (theme: Theme) => ({ color: theme.colors.statusSuccess });
 
-/**
- * The subtitle under a workspace title: which host it lives on, its change request, that
- * change request's CI, any running service, and the labels someone put on it. Everything the
- * row knows about a workspace that isn't its name.
- *
- * Items are peers separated by a dot rather than ranked by chrome. The host used to be a
- * tinted pill on the title line, which made it the loudest thing in a row whose subject is
- * the title; flattening it lets the line read as one piece of secondary text.
- *
- * Labels are the one exception, and a deliberate one. Everything else here reports state, and
- * state has its own colors — a label is a name a person chose, so it carries its own identity
- * color on a tint instead (see `WorkspaceLabelChip`). It sits last so the reported facts are
- * read first, and it stays the same height as the rest of the line.
- *
- * Plugin items follow everything the row knows itself. A plugin renders its slot as it likes:
- * the row adds no separator, since only the plugin knows whether it has anything to say.
- */
 export function WorkspaceMetaRow({
   currentBranch,
   projectName,
@@ -77,7 +60,6 @@ export function WorkspaceMetaRow({
   serviceSummary,
   labels = EMPTY_LABELS,
   workspace = null,
-  backdrop,
 }: {
   currentBranch: string | null;
   projectName: string | null;
@@ -85,9 +67,7 @@ export function WorkspaceMetaRow({
   prHint: PrHint | null;
   serviceSummary: WorkspaceServiceSummary | null;
   labels?: readonly WorkspaceLabelDefinition[];
-  /** The real workspace behind the row; previews leave it out and get no plugin items. */
   workspace?: { serverId: string; workspaceId: string } | null;
-  backdrop: SidebarSurfaceBackdrop;
 }) {
   const { rowItems, checksDisplay } = useSidebarMetaPreferences();
   const items = selectMetaRowItems({
@@ -101,31 +81,16 @@ export function WorkspaceMetaRow({
     checksDisplay,
   });
   const pluginItems = usePluginWorkspaceRowBadgeItems(workspace?.serverId ?? null);
-
   if (items.length === 0 && (!workspace || pluginItems.length === 0)) return null;
-
   return (
-    <View style={styles.row}>
+    <MetaRowLayout>
       {items.map((item, index) => (
-        <Fragment key={item.kind}>
-          {index > 0 ? (
-            <Text
-              style={[
-                styles.separator,
-                backdrop === "surfaceSidebarHover" && styles.separatorHovered,
-                backdrop === "surfaceSidebarSelected" && styles.separatorSelected,
-              ]}
-            >
-              ·
-            </Text>
-          ) : null}
-          <MetaItemNode item={item} hostBadge={hostBadge} leading={index === 0} />
-        </Fragment>
+        <MetaItemNode key={item.kind} item={item} hostBadge={hostBadge} leading={index === 0} />
       ))}
       {workspace ? (
         <PluginWorkspaceRowBadgeItems targets={pluginItems} workspaceId={workspace.workspaceId} />
       ) : null}
-    </View>
+    </MetaRowLayout>
   );
 }
 
@@ -136,58 +101,116 @@ function MetaItemNode({
 }: {
   item: MetaRowItem;
   hostBadge: HostBadgeModel | null;
-  /** First on the line, so this item's ink sets the rail the title above it already uses. */
   leading: boolean;
 }): ReactNode {
-  if (item.kind === "branch") {
-    return <IdentityItem kind="branch" name={item.name} />;
-  }
-  if (item.kind === "project") {
-    return <IdentityItem kind="project" name={item.name} />;
+  if (item.kind === "branch" || item.kind === "project") {
+    return <IdentityItem kind={item.kind} name={item.name} leading={leading} />;
   }
   if (item.kind === "host") {
-    return hostBadge ? <HostBadge badge={hostBadge} /> : null;
+    return hostBadge ? <HostItem badge={hostBadge} leading={leading} /> : null;
   }
   if (item.kind === "changeRequest") {
-    return <PullRequestItem hint={item.hint} />;
+    return <PullRequestItem hint={item.hint} leading={leading} />;
   }
   if (item.kind === "checks") {
-    return <ChecksItem summary={item.summary} label={item.label} />;
+    return <ChecksItem summary={item.summary} label={item.label} leading={leading} />;
   }
-  if (item.kind === "labels") {
-    return <LabelsItem labels={item.labels} leading={leading} />;
-  }
-  return <ServiceItem summary={item.summary} />;
+  if (item.kind === "labels") return <LabelsItem labels={item.labels} leading={leading} />;
+  return <ServiceItem summary={item.summary} leading={leading} />;
 }
 
-function IdentityItem({ kind, name }: { kind: "branch" | "project"; name: string }) {
-  const Icon = kind === "branch" ? ThemedGitBranch : ThemedFolder;
-  return (
-    <View style={styles.identityItem} testID={`sidebar-workspace-${kind}`}>
-      <View style={styles.identityIcon}>
-        <Icon size={META_ICON_SIZE} uniProps={mutedMapping} />
-      </View>
-      <Text style={styles.identityText} numberOfLines={1}>
-        {name}
-      </Text>
-    </View>
+function useTextFields({
+  id,
+  priority,
+  text,
+  enabled = true,
+}: {
+  id: string;
+  priority: MetaRowTextPriority;
+  text: string;
+  enabled?: boolean;
+}): readonly MetaRowField[] {
+  return useMemo(
+    () => (enabled ? [createMetaRowTextField({ id, priority, text })] : []),
+    [id, priority, text, enabled],
   );
 }
 
-/**
- * Every label on the workspace, in one run. The chips sit closer to each other than the line's
- * items do to each other, so several labels still read as one item rather than as new peers,
- * and they take no separator between them — each chip's ground already ends it.
- *
- * The run shrinks and clips, the way the host badge does. A `+N` counter would be a second
- * thing to read on a line that exists to be skimmed.
- *
- * A workspace whose only meta item is its labels puts a chip where every other row puts a glyph,
- * and a chip's ground is chrome — so it hangs left by its own padding and the label's first
- * letter lands on the rail the title above it uses. Mid-line the ground stays in the flow: there
- * is a separator to its left, and pulling the tint up against that dot buys nothing.
- */
+function HostItem({ badge, leading }: { badge: HostBadgeModel; leading: boolean }) {
+  const iconBadge = useMemo(() => ({ ...badge, showLabel: false }), [badge]);
+  const fields = useTextFields({
+    id: "host",
+    priority: "host",
+    text: badge.label,
+    enabled: badge.showLabel,
+  });
+  return (
+    <MetaRowSlot id="host" fields={fields} separator={!leading} accessibilityLabel={badge.label}>
+      {(visible) => <HostBadge badge={visible.has("host") ? badge : iconBadge} />}
+    </MetaRowSlot>
+  );
+}
+
+function IdentityItem({
+  kind,
+  name,
+  leading,
+}: {
+  kind: "branch" | "project";
+  name: string;
+  leading: boolean;
+}) {
+  const Icon = kind === "branch" ? ThemedGitBranch : ThemedFolder;
+  const fields = useTextFields({ id: kind, priority: kind, text: name });
+  return (
+    <MetaRowSlot id={kind} fields={fields} separator={!leading} accessibilityLabel={name}>
+      {(visible) => (
+        <View style={styles.item} testID={`sidebar-workspace-${kind}`}>
+          <Icon size={META_ICON_SIZE} uniProps={mutedMapping} />
+          {visible.has(kind) ? (
+            <Text style={styles.text} numberOfLines={1}>
+              {name}
+            </Text>
+          ) : null}
+        </View>
+      )}
+    </MetaRowSlot>
+  );
+}
+
 function LabelsItem({
+  labels,
+  leading,
+}: {
+  labels: readonly WorkspaceLabelDefinition[];
+  leading: boolean;
+}) {
+  const fields = useMemo<readonly MetaRowField[]>(
+    () => [
+      {
+        id: "labels",
+        priority: "labels",
+        widthAdjustment: -META_ICON_SIZE - (leading ? WORKSPACE_LABEL_CHIP_INSET : 0),
+        measurement: <LabelChips labels={labels} leading={false} />,
+      },
+    ],
+    [labels, leading],
+  );
+  const names = labels.map((label) => label.name).join(", ");
+  return (
+    <MetaRowSlot id="labels" fields={fields} separator={!leading} accessibilityLabel={names}>
+      {(visible) =>
+        visible.has("labels") ? (
+          <LabelChips labels={labels} leading={leading} />
+        ) : (
+          <ThemedTags size={META_ICON_SIZE} uniProps={mutedMapping} />
+        )
+      }
+    </MetaRowSlot>
+  );
+}
+
+function LabelChips({
   labels,
   leading,
 }: {
@@ -203,21 +226,28 @@ function LabelsItem({
   );
 }
 
-/**
- * The only thing on the line that navigates, so it is the only thing that answers the
- * pointer: it brightens to full foreground and its icon becomes an external-link arrow,
- * saying where the click goes before you spend it.
- *
- * `onHoverIn`/`onHoverOut` with local state is safe here despite the usual rule in
- * docs/hover.md — the state never leaves this Pressable, and nothing pressable is nested
- * inside it, so there is no second hover state machine to fight. Both icons are the same
- * size, so the swap can't move the target out from under the cursor.
- */
-function PullRequestItem({ hint }: { hint: PrHint }) {
+function PullRequestItem({ hint, leading }: { hint: PrHint; leading: boolean }) {
   const { t } = useTranslation();
   const [isHovered, setIsHovered] = useState(false);
   const presentation = getForgePresentation(normalizeForge(hint.forge));
-
+  const number = String(hint.number);
+  const state = hint.state === "open" ? "" : t(PR_STATE_LABEL_KEYS[hint.state]);
+  const fields = useMemo(() => {
+    const numberField = createMetaRowTextField({
+      id: "changeRequestNumber",
+      priority: "changeRequestNumber",
+      text: number,
+    });
+    if (!state) return [numberField];
+    return [
+      numberField,
+      createMetaRowTextField({
+        id: "changeRequestState",
+        priority: "changeRequestState",
+        text: state,
+      }),
+    ];
+  }, [number, state]);
   const handlePress = useCallback(
     (event: GestureResponderEvent) => {
       event.stopPropagation();
@@ -228,64 +258,113 @@ function PullRequestItem({ hint }: { hint: PrHint }) {
   const handlePressIn = useCallback((event: GestureResponderEvent) => event.stopPropagation(), []);
   const handleHoverIn = useCallback(() => setIsHovered(true), []);
   const handleHoverOut = useCallback(() => setIsHovered(false), []);
-
+  const requestLabel = t("workspace.git.pr.accessibility.pullRequest", {
+    number: hint.number,
+    context: presentation.changeRequestContext,
+  });
+  const accessibleLabel = state ? `${requestLabel}, ${state}` : requestLabel;
+  const textStyle = isHovered ? styles.prTextHovered : styles.text;
   return (
-    <Pressable
-      accessibilityRole="link"
-      accessibilityLabel={t("workspace.git.pr.accessibility.pullRequest", {
-        number: hint.number,
-        context: presentation.changeRequestContext,
-      })}
-      hitSlop={4}
-      onPressIn={handlePressIn}
-      onPress={handlePress}
-      onHoverIn={handleHoverIn}
-      onHoverOut={handleHoverOut}
-      style={pressableItemStyle}
+    <MetaRowSlot
+      id="changeRequest"
+      fields={fields}
+      separator={!leading}
+      accessibilityLabel={accessibleLabel}
+      accessible={false}
     >
-      {isHovered ? (
-        <ThemedExternalLink size={META_ICON_SIZE} uniProps={foregroundMapping} />
-      ) : (
-        <PullRequestStateIcon state={hint.state} size={META_ICON_SIZE} />
+      {(visible) => (
+        <Pressable
+          accessibilityRole="link"
+          accessibilityLabel={accessibleLabel}
+          hitSlop={4}
+          onPressIn={handlePressIn}
+          onPress={handlePress}
+          onHoverIn={handleHoverIn}
+          onHoverOut={handleHoverOut}
+          style={pressableItemStyle}
+        >
+          {isHovered ? (
+            <ThemedExternalLink size={META_ICON_SIZE} uniProps={foregroundMapping} />
+          ) : (
+            <PullRequestStateIcon state={hint.state} size={META_ICON_SIZE} />
+          )}
+          {visible.has("changeRequestNumber") ? (
+            <Text style={textStyle} numberOfLines={1}>
+              {number}
+            </Text>
+          ) : null}
+          {visible.has("changeRequestState") ? (
+            <Text style={textStyle} numberOfLines={1}>
+              {state}
+            </Text>
+          ) : null}
+        </Pressable>
       )}
-      <Text style={isHovered ? styles.prTextHovered : styles.prText} numberOfLines={1}>
-        {hint.number}
-        {/* An open change request is the unremarkable case and says nothing extra; a merged
-            or closed one is why the row still looks like it has work in it. */}
-        {hint.state === "open" ? "" : ` ${t(PR_STATE_LABEL_KEYS[hint.state])}`}
-      </Text>
-    </Pressable>
+    </MetaRowSlot>
   );
 }
 
-/**
- * By default every state says its own name. A tick on its own has no subject — the reader has to
- * already know the glyph is about CI to read it at all, and sitting after a host and a change
- * request it reads as something left over. One short word costs less than that ambiguity, which
- * is why icon-and-text is the default and dropping the word is something you ask for.
- *
- * The words are the outcome, not the noun: "passed" against "failed", both naming how a finished
- * run ended, "running" for one still deciding. Repeating the subject on every healthy row —
- * "checks passed" — is the noise worth avoiding; naming the outcome is not.
- *
- * The accessible name is on the wrapper either way, so turning the word off shrinks the row
- * without taking the state away from a screen reader.
- */
-function ChecksItem({ summary, label }: { summary: CheckSummary; label: boolean }) {
+function ChecksItem({
+  summary,
+  label,
+  leading,
+}: {
+  summary: CheckSummary;
+  label: boolean;
+  leading: boolean;
+}) {
   const { t } = useTranslation();
+  const text = t(CHECK_STATE_LABEL_KEYS[summary.state]);
+  const fields = useTextFields({ id: "checks", priority: "checks", text, enabled: label });
   return (
-    <View
-      style={styles.item}
+    <MetaRowSlot
+      id="checks"
+      fields={fields}
+      separator={!leading}
       accessibilityLabel={t(CHECK_STATE_ACCESSIBLE_KEYS[summary.state])}
-      testID={`sidebar-workspace-checks-${summary.state}`}
     >
-      <CheckIndicator summary={summary} size={META_ICON_SIZE} />
-      {label ? (
-        <Text style={checksTextStyle(summary.state)} numberOfLines={1}>
-          {t(CHECK_STATE_LABEL_KEYS[summary.state])}
-        </Text>
-      ) : null}
-    </View>
+      {(visible) => (
+        <View style={styles.item} testID={`sidebar-workspace-checks-${summary.state}`}>
+          <CheckIndicator summary={summary} size={META_ICON_SIZE} />
+          {visible.has("checks") ? (
+            <Text style={checksTextStyle(summary.state)} numberOfLines={1}>
+              {text}
+            </Text>
+          ) : null}
+        </View>
+      )}
+    </MetaRowSlot>
+  );
+}
+
+function ServiceItem({ summary, leading }: { summary: WorkspaceServiceSummary; leading: boolean }) {
+  const { t } = useTranslation();
+  const unhealthy = summary.health === "unhealthy";
+  const fields = useTextFields({ id: "services", priority: "services", text: summary.name });
+  return (
+    <MetaRowSlot
+      id="services"
+      fields={fields}
+      separator={!leading}
+      accessibilityLabel={t(workspaceServiceLabelKey(summary), { name: summary.name })}
+    >
+      {(visible) => (
+        <View
+          style={styles.item}
+          testID={unhealthy ? "workspace-service-unhealthy" : "workspace-service"}
+        >
+          <ThemedGlobe
+            size={META_ICON_SIZE}
+            uniProps={unhealthy ? dangerMapping : successMapping}
+          />
+          {visible.has("services") ? (
+            <Text style={unhealthy ? styles.textDanger : styles.textSuccess} numberOfLines={1}>
+              {summary.name}
+            </Text>
+          ) : null}
+        </View>
+      )}
+    </MetaRowSlot>
   );
 }
 
@@ -294,40 +373,11 @@ const CHECK_STATE_LABEL_KEYS = {
   failed: "workspace.git.pr.checksSummary.failedLabel",
   running: "workspace.git.pr.checksSummary.runningLabel",
 } as const;
-
 const CHECK_STATE_ACCESSIBLE_KEYS = {
   passed: "workspace.git.pr.checksSummary.passedAccessible",
   failed: "workspace.git.pr.checksSummary.failedAccessible",
   running: "workspace.git.pr.checksSummary.runningAccessible",
 } as const;
-
-/**
- * A running service, named. It is the one item on the line whose text is arbitrary — everything
- * else is a number, a short word, or a host label the user already picked — so it is also the
- * only one allowed to shrink, and it truncates rather than pushing the line past the row.
- *
- * A failed health check turns the whole item danger, glyph and name together. Colouring only the
- * glyph would leave the name reading as fine, and the name is the part you look at.
- */
-function ServiceItem({ summary }: { summary: WorkspaceServiceSummary }) {
-  const { t } = useTranslation();
-  const unhealthy = summary.health === "unhealthy";
-  return (
-    <View
-      style={styles.serviceItem}
-      accessibilityLabel={t(workspaceServiceLabelKey(summary), { name: summary.name })}
-      testID={unhealthy ? "workspace-service-unhealthy" : "workspace-service"}
-    >
-      <ThemedGlobe size={META_ICON_SIZE} uniProps={unhealthy ? dangerMapping : successMapping} />
-      <Text style={unhealthy ? styles.serviceNameUnhealthy : styles.serviceName} numberOfLines={1}>
-        {summary.name}
-      </Text>
-    </View>
-  );
-}
-
-const successMapping = (theme: Theme) => ({ color: theme.colors.statusSuccess });
-
 const PR_STATE_LABEL_KEYS = {
   merged: "workspace.git.pr.states.merged",
   closed: "workspace.git.pr.states.closed",
@@ -338,81 +388,9 @@ function pressableItemStyle({ pressed }: { pressed: boolean }) {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[1.5],
-    minWidth: 0,
-  },
-  item: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 3,
-    minWidth: 0,
-    flexShrink: 0,
-  },
-  identityItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 3,
-    minWidth: 0,
-    flexShrink: 1,
-  },
-  identityIcon: {
-    flexShrink: 0,
-  },
-  identityText: {
-    color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
-    lineHeight: 16,
-    flexShrink: 1,
-  },
-  itemPressed: {
-    opacity: 0.82,
-  },
-  separator: {
-    color: theme.colors.foregroundExtraMuted,
-    fontSize: theme.fontSize.sm,
-    lineHeight: 16,
-    flexShrink: 0,
-  },
-  separatorHovered: { color: theme.colors.foregroundSidebarHover },
-  separatorSelected: { color: theme.colors.foregroundSidebarSelected },
-  // Tighter than the line's own gap so a run of chips reads as one item — see `LabelsItem`.
-  // Shrinks at the same weight as the service name: both are arbitrary text somebody chose, so
-  // a crowded line takes from the two of them in proportion rather than emptying one of them.
-  // The host badge still gives up its space before either — see `flexShrink` in host-badge.tsx.
-  labels: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[1],
-    minWidth: 0,
-    flexShrink: 1,
-  },
-  labelsLeading: {
-    marginLeft: -WORKSPACE_LABEL_CHIP_INSET,
-  },
-  // The one item that gives way when the line runs out of room — see `ServiceItem`.
-  serviceItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 3,
-    minWidth: 0,
-    flexShrink: 1,
-  },
-  serviceName: {
-    color: theme.colors.statusSuccess,
-    fontSize: theme.fontSize.sm,
-    lineHeight: 16,
-    flexShrink: 1,
-  },
-  serviceNameUnhealthy: {
-    color: theme.colors.statusDanger,
-    fontSize: theme.fontSize.sm,
-    lineHeight: 16,
-    flexShrink: 1,
-  },
-  prText: {
+  item: { flexDirection: "row", alignItems: "center", gap: META_ITEM_GAP, flexShrink: 0 },
+  itemPressed: { opacity: 0.82 },
+  text: {
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
     lineHeight: 16,
@@ -424,20 +402,21 @@ const styles = StyleSheet.create((theme) => ({
     lineHeight: 16,
     flexShrink: 0,
   },
-  // Matches the indicator — see COLOR_MAPPINGS in check-indicator.tsx.
-  checksTextPassed: {
+  labels: { flexDirection: "row", alignItems: "center", gap: theme.spacing[1], flexShrink: 0 },
+  labelsLeading: { marginLeft: -WORKSPACE_LABEL_CHIP_INSET },
+  textSuccess: {
     color: theme.colors.statusSuccess,
     fontSize: theme.fontSize.sm,
     lineHeight: 16,
     flexShrink: 0,
   },
-  checksTextFailed: {
+  textDanger: {
     color: theme.colors.statusDanger,
     fontSize: theme.fontSize.sm,
     lineHeight: 16,
     flexShrink: 0,
   },
-  checksTextRunning: {
+  textWarning: {
     color: theme.colors.statusWarning,
     fontSize: theme.fontSize.sm,
     lineHeight: 16,
@@ -445,11 +424,8 @@ const styles = StyleSheet.create((theme) => ({
   },
 }));
 
-// Read inside render, never into a module-scope table: touching `styles.x` at module load
-// materializes the Unistyles proxy before the persisted theme has resolved, and the style
-// freezes on whatever theme happened to be active first. See docs/unistyles.md.
 function checksTextStyle(state: CheckSummaryState) {
-  if (state === "failed") return styles.checksTextFailed;
-  if (state === "running") return styles.checksTextRunning;
-  return styles.checksTextPassed;
+  if (state === "passed") return styles.textSuccess;
+  if (state === "failed") return styles.textDanger;
+  return styles.textWarning;
 }

@@ -1,8 +1,13 @@
 import type { WorkspaceRowBadgeProps, WorkspaceRowBadgeTone } from "@getpaseo/plugin/client/ui";
-import { createContext, useContext, useMemo } from "react";
+import { createContext, useContext, useId, useMemo } from "react";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { HOST_BADGE_ICON_SIZE } from "@/hosts/host-badge";
+import { Puzzle } from "lucide-react-native";
+import {
+  createMetaRowTextField,
+  MetaRowSlot,
+} from "@/components/sidebar/workspace-meta-row/row-layout";
 import type { Theme } from "@/styles/theme";
 import { parsePluginIcon, PluginIconView } from "../icons";
 
@@ -10,6 +15,7 @@ import { parsePluginIcon, PluginIconView } from "../icons";
 export const WorkspaceRowBadgeTitleContext = createContext<string | undefined>(undefined);
 
 const ThemedPluginIconView = withUnistyles(PluginIconView);
+const ThemedPuzzle = withUnistyles(Puzzle);
 
 function toneColor(theme: Theme, tone: WorkspaceRowBadgeTone): string {
   if (tone === "success") return theme.colors.statusSuccess;
@@ -39,27 +45,54 @@ export function WorkspaceRowBadge({
   accessibilityLabel,
 }: WorkspaceRowBadgeProps) {
   const itemTitle = useContext(WorkspaceRowBadgeTitleContext);
-  // Parsed at render, not registration, so an invalid icon throws to the item's boundary.
+  const id = useId();
+  const fieldId = `${id}:label`;
   const parsedIcon = useMemo(
     () => (icon === undefined ? null : parsePluginIcon("Workspace row badge", icon)),
     [icon],
   );
+  const fields = useMemo(
+    () =>
+      label
+        ? [
+            createMetaRowTextField({
+              id: fieldId,
+              priority: "plugin",
+              text: label,
+              widthAdjustment: parsedIcon ? 3 : -HOST_BADGE_ICON_SIZE,
+            }),
+          ]
+        : [],
+    [fieldId, label, parsedIcon],
+  );
   if (!parsedIcon && !label) return null;
   return (
-    <View style={styles.item} accessibilityLabel={accessibilityLabel ?? (label || itemTitle)}>
-      {parsedIcon ? (
-        <ThemedPluginIconView
-          icon={parsedIcon}
-          size={HOST_BADGE_ICON_SIZE}
-          uniProps={TONE_MAPPINGS[tone]}
-        />
-      ) : null}
-      {label ? (
-        <Text style={[styles.text, textToneStyle(tone)]} numberOfLines={1}>
-          {label}
-        </Text>
-      ) : null}
-    </View>
+    <MetaRowSlot
+      id={id}
+      fields={fields}
+      separator={false}
+      accessibilityLabel={accessibilityLabel ?? (label || itemTitle || "")}
+    >
+      {(visible) => (
+        <View style={styles.item}>
+          {parsedIcon ? (
+            <ThemedPluginIconView
+              icon={parsedIcon}
+              size={HOST_BADGE_ICON_SIZE}
+              uniProps={TONE_MAPPINGS[tone]}
+            />
+          ) : null}
+          {!parsedIcon && !visible.has(fieldId) ? (
+            <ThemedPuzzle size={HOST_BADGE_ICON_SIZE} uniProps={TONE_MAPPINGS[tone]} />
+          ) : null}
+          {label && visible.has(fieldId) ? (
+            <Text style={[styles.text, textToneStyle(tone)]} numberOfLines={1}>
+              {label}
+            </Text>
+          ) : null}
+        </View>
+      )}
+    </MetaRowSlot>
   );
 }
 
@@ -78,12 +111,12 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     gap: 3,
     minWidth: 0,
-    flexShrink: 1,
+    flexShrink: 0,
   },
   text: {
     fontSize: theme.fontSize.sm,
     lineHeight: 16,
-    flexShrink: 1,
+    flexShrink: 0,
   },
   muted: { color: toneColor(theme, "muted") },
   success: { color: toneColor(theme, "success") },

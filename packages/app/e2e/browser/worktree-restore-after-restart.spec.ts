@@ -148,7 +148,7 @@ test.describe("Worktree restore after daemon restart", () => {
     await expect(branchCell).toBeVisible({ timeout: 60_000 });
     await expect(branchCell).toHaveText(worktreeSlug, { timeout: 60_000 });
     await expect(workspaceCell).toHaveText(worktree.workspaceName, { timeout: 60_000 });
-    await restoreWorkspaceFromHistory(page, serverId, agent.id);
+    await restoreWorkspaceFromHistory(page, serverId, agent.id, worktree.workspaceId);
     await expectCommittedFileAfterReload(page, "restart-change.txt");
   });
 });

@@ -11,6 +11,9 @@ import {
   undoLatestWorkspaceArchive,
   type UndoableWorkspaceArchiveClient,
 } from "@/workspace/archive-undo";
+import { collectAllTabs, useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import { purgeArchivedWorkspaceState } from "@/workspace/archived-workspace-state";
+import { WorkspaceDirectoryReplica } from "@/runtime/directory-sync/workspace-replica";
 
 const SERVER_ID = "workspace-archive-undo-window";
 
@@ -146,6 +149,49 @@ afterEach(() => {
 });
 
 describe("archiveWorkspaceWithUndo", () => {
+  it("retains a reading anchor through confirmed removal until its undo toast closes", async () => {
+    await useWorkspaceLayoutStore.persist.rehydrate();
+    const key = `${SERVER_ID}:a`;
+    const layout = useWorkspaceLayoutStore.getState();
+    const tabId = layout.openTab({
+      workspaceKey: key,
+      target: { kind: "agent", agentId: "agent" },
+      intent: "reveal",
+    })!;
+    layout.setTabState(key, tabId, { readingPosition: { rowId: "read-row" } });
+    const host = createClient();
+    const toast = createToastHost();
+    try {
+      const archive = archiveWorkspaceWithUndo({
+        client: host.client,
+        workspace: { serverId: SERVER_ID, workspaceId: "a" },
+        toast: toast.api,
+        onArchiveCommitted: () =>
+          purgeArchivedWorkspaceState({ serverId: SERVER_ID, workspaceId: "a" }),
+      });
+      host.finishArchive("a");
+      await archive;
+      const replica = new WorkspaceDirectoryReplica(SERVER_ID);
+      replica.applyDelta({ kind: "remove", id: "a" });
+      replica.commitSnapshot(
+        { workspaces: new Map(), projects: new Map(), syncModes: { workspaces: "snapshot" } },
+        [],
+      );
+      expect(
+        collectAllTabs(useWorkspaceLayoutStore.getState().layoutByWorkspace[key].root).find(
+          (tab) => tab.tabId === tabId,
+        )?.state,
+      ).toEqual({ readingPosition: { rowId: "read-row" } });
+      toast.timeOut();
+      expect(useWorkspaceLayoutStore.getState().layoutByWorkspace[key]).toBeUndefined();
+      layout.setTabState(key, tabId, { readingPosition: { rowId: "late-row" } });
+      expect(useWorkspaceLayoutStore.getState().layoutByWorkspace[key]).toBeUndefined();
+    } finally {
+      toast.timeOut();
+      useWorkspaceLayoutStore.getState().purgeWorkspace(key);
+    }
+  });
+
   it("commits the archive only once its toast is gone", async () => {
     const host = createClient();
     const toast = createToastHost();

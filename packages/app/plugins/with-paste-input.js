@@ -1,14 +1,26 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { isDeepStrictEqual } = require("node:util");
 const {
   IOSConfig,
   withAppDelegate,
+  withBaseMod,
   withDangerousMod,
-  withInfoPlist,
   withPodfile,
 } = require("expo/config-plugins");
 
 const BRIDGING_HEADER_IMPORT = "#import <react-native-paste-input/PasteInputModule.h>";
+const PASTE_INPUT_SCENE_MANIFEST = {
+  UIApplicationSupportsMultipleScenes: false,
+  UISceneConfigurations: {
+    UIWindowSceneSessionRoleApplication: [
+      {
+        UISceneConfigurationName: "Default Configuration",
+        UISceneDelegateClassName: "PaseoSceneDelegate",
+      },
+    ],
+  },
+};
 const SCENE_DELEGATE = `
 @objc(PaseoSceneDelegate)
 class PaseoSceneDelegate: ExpoAppSceneDelegate {
@@ -48,17 +60,7 @@ function withPasteInput(config) {
     modConfig.modResults.contents = configurePasteInputAppDelegate(modConfig.modResults.contents);
     return modConfig;
   });
-  const withScene = withInfoPlist(withDelegate, (modConfig) => {
-    const scenes =
-      modConfig.modResults.UIApplicationSceneManifest?.UISceneConfigurations
-        ?.UIWindowSceneSessionRoleApplication;
-    if (!scenes || scenes.length !== 1) {
-      throw new Error("Paste input requires Expo's single scene configuration");
-    }
-    scenes[0].UISceneDelegateClassName = "PaseoSceneDelegate";
-    return modConfig;
-  });
-  const withPods = withPodfile(withScene, (modConfig) => {
+  const withPods = withPodfile(withDelegate, (modConfig) => {
     // Paste input checks this legacy flag even though RN 0.86 only supports Fabric.
     modConfig.modResults.contents = configurePasteInputPodfile(modConfig.modResults.contents);
     return modConfig;
@@ -81,7 +83,37 @@ function withPasteInputBridgingHeader(config) {
   ]);
 }
 
+// Expo runs later-registered mods first. Keep the native delegate plugin before
+// expo-build-properties so scene conversion precedes paste-input/keyboard setup.
+// Register this plist-only plugin after it so persisted-manifest cleanup precedes
+// Expo's scene validation, without changing the independent AppDelegate order.
+function withPasteInputSceneManifest(config) {
+  return withBaseMod(config, {
+    platform: "ios",
+    mod: "infoPlist",
+    async action(modConfig) {
+      // Expo rejects our persisted delegate as app-owned. Regenerate only our manifest.
+      // Introspection reads plist dictionaries with null prototypes.
+      const previousManifest = structuredClone(modConfig.modResults.UIApplicationSceneManifest);
+      if (isDeepStrictEqual(previousManifest, PASTE_INPUT_SCENE_MANIFEST)) {
+        delete modConfig.modResults.UIApplicationSceneManifest;
+      }
+      const configured = await modConfig.modRequest.nextMod(modConfig);
+      // Expo shares its default manifest between configurations; do not mutate it.
+      const manifest = structuredClone(configured.modResults.UIApplicationSceneManifest);
+      const scenes = manifest?.UISceneConfigurations?.UIWindowSceneSessionRoleApplication;
+      if (!scenes || scenes.length !== 1) {
+        throw new Error("Paste input requires Expo's single scene configuration");
+      }
+      scenes[0].UISceneDelegateClassName = "PaseoSceneDelegate";
+      configured.modResults.UIApplicationSceneManifest = manifest;
+      return configured;
+    },
+  });
+}
+
 module.exports = withPasteInput;
+module.exports.withPasteInputSceneManifest = withPasteInputSceneManifest;
 module.exports.configurePasteInputAppDelegate = configurePasteInputAppDelegate;
 module.exports.configurePasteInputBridgingHeader = configurePasteInputBridgingHeader;
 

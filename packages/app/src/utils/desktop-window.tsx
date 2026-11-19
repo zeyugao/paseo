@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { View, type ViewProps } from "react-native";
+import type { ViewProps } from "react-native";
 import {
   DESKTOP_TRAFFIC_LIGHT_HEIGHT,
   DESKTOP_TRAFFIC_LIGHT_WIDTH,
@@ -12,7 +12,13 @@ import {
   getDesktopWindowControlsWidth,
 } from "@/desktop/window-chrome-presentation";
 import { isNative } from "@/constants/platform";
-import { useTopBand, type TopBand } from "@/window-layout";
+import {
+  useTopBand,
+  useWindowLayout,
+  WindowLayoutGeometryView,
+  type TopBand,
+} from "@/window-layout";
+import { WindowLayoutVariantView } from "@/window-layout/variant-view";
 
 export type WindowChromeCorners = "none" | "top-left" | "top-right" | "both";
 type WindowChromeSafeAreaPlacement = "inline" | "below";
@@ -29,7 +35,19 @@ interface WindowChromeObstruction {
 
 export type WindowChromeCorner = "top-left" | "top-right";
 
-type WindowChromeSafeAreaStyle = { height: number } | { paddingLeft: number; paddingRight: number };
+interface WindowChromeInlinePadding {
+  paddingLeft: number;
+  paddingRight: number;
+}
+
+type WindowChromeSafeAreaStyle = { height: number } | WindowChromeInlinePadding;
+
+interface WindowChromeSafeAreaInput {
+  obstruction: WindowChromeObstruction;
+  corners: WindowChromeCorners;
+  placement: WindowChromeSafeAreaPlacement;
+  inlineChromeInsets?: { left: number; right: number };
+}
 
 const EMPTY_OBSTRUCTION: WindowChromeObstruction = { topLeft: null, topRight: null };
 const WindowChromeContext = createContext<WindowChromeObstruction>(EMPTY_OBSTRUCTION);
@@ -132,22 +150,39 @@ export function resolveWindowChromeObstruction(input: {
   };
 }
 
-export function resolveWindowChromeSafeArea(input: {
-  obstruction: WindowChromeObstruction;
-  corners: WindowChromeCorners;
-  placement: WindowChromeSafeAreaPlacement;
-}): WindowChromeSafeAreaStyle {
-  const ownsTopLeft = input.corners === "top-left" || input.corners === "both";
-  const ownsTopRight = input.corners === "top-right" || input.corners === "both";
+export function resolveWindowChromeSafeArea(
+  input: WindowChromeSafeAreaInput & { placement: "inline" },
+): WindowChromeInlinePadding;
+export function resolveWindowChromeSafeArea(
+  input: WindowChromeSafeAreaInput,
+): WindowChromeSafeAreaStyle;
+export function resolveWindowChromeSafeArea(
+  input: WindowChromeSafeAreaInput,
+): WindowChromeSafeAreaStyle {
+  const ownsTopLeft = windowChromeCornersInclude(input.corners, "top-left");
+  const ownsTopRight = windowChromeCornersInclude(input.corners, "top-right");
   const topLeft = ownsTopLeft ? input.obstruction.topLeft : null;
   const topRight = ownsTopRight ? input.obstruction.topRight : null;
   if (input.placement === "below") {
     return { height: Math.max(topLeft?.height ?? 0, topRight?.height ?? 0) };
   }
-  return { paddingLeft: topLeft?.width ?? 0, paddingRight: topRight?.width ?? 0 };
+  return {
+    paddingLeft: ownsTopLeft
+      ? Math.max(topLeft?.width ?? 0, input.inlineChromeInsets?.left ?? 0)
+      : 0,
+    paddingRight: ownsTopRight
+      ? Math.max(topRight?.width ?? 0, input.inlineChromeInsets?.right ?? 0)
+      : 0,
+  };
 }
 
-export function WindowChromeProvider({ children }: { children: ReactNode }) {
+export function WindowChromeProvider({
+  children,
+  corners = "both",
+}: {
+  children: ReactNode;
+  corners?: WindowChromeCorners;
+}) {
   const [isElectronReady, setIsElectronReady] = useState(getIsElectronRuntime);
   const [windowState, setWindowState] = useState({ isFullscreen: false, isMaximized: false });
 
@@ -244,7 +279,7 @@ export function WindowChromeProvider({ children }: { children: ReactNode }) {
   return (
     <DesktopWindowChromeContext.Provider value={desktopWindowChrome}>
       <WindowChromeContext.Provider value={obstruction}>
-        <WindowChromeCornersContext.Provider value="both">
+        <WindowChromeCornersContext.Provider value={corners}>
           {children}
         </WindowChromeCornersContext.Provider>
       </WindowChromeContext.Provider>
@@ -314,6 +349,22 @@ export function useHasOwnedWindowChromeObstruction(corner: WindowChromeCorner): 
   return resolveHasOwnedWindowChromeObstruction({ obstruction, corners, corner });
 }
 
+export function useWindowChromeInlinePadding(): WindowChromeInlinePadding {
+  const obstruction = useContext(WindowChromeContext);
+  const corners = useContext(WindowChromeCornersContext);
+  const inlineChromeInsets = useWindowLayout()?.inlineChromeInsets;
+  return useMemo(
+    () =>
+      resolveWindowChromeSafeArea({
+        obstruction,
+        corners,
+        placement: "inline",
+        inlineChromeInsets,
+      }),
+    [obstruction, corners, inlineChromeInsets],
+  );
+}
+
 type WindowChromeSafeAreaProps = ViewProps & {
   placement: WindowChromeSafeAreaPlacement;
   horizontalPadding?: number;
@@ -327,8 +378,14 @@ export function WindowChromeSafeArea({
 }: WindowChromeSafeAreaProps) {
   const obstruction = useContext(WindowChromeContext);
   const corners = useContext(WindowChromeCornersContext);
+  const inlineChromeInsets = useWindowLayout()?.inlineChromeInsets;
   const safeAreaStyle = useMemo(() => {
-    const resolved = resolveWindowChromeSafeArea({ obstruction, corners, placement });
+    const resolved = resolveWindowChromeSafeArea({
+      obstruction,
+      corners,
+      placement,
+      inlineChromeInsets,
+    });
     if (placement === "below") return resolved;
     const paddingLeft = "paddingLeft" in resolved ? resolved.paddingLeft : 0;
     const paddingRight = "paddingRight" in resolved ? resolved.paddingRight : 0;
@@ -336,7 +393,24 @@ export function WindowChromeSafeArea({
       paddingLeft: paddingLeft + horizontalPadding,
       paddingRight: paddingRight + horizontalPadding,
     };
-  }, [corners, horizontalPadding, obstruction, placement]);
+  }, [corners, horizontalPadding, obstruction, placement, inlineChromeInsets]);
   const combinedStyle = useMemo(() => [style, safeAreaStyle], [safeAreaStyle, style]);
-  return <View {...props} style={combinedStyle} />;
+  const headerChrome = useMemo(
+    () => ({
+      left: windowChromeCornersInclude(corners, "top-left"),
+      right: windowChromeCornersInclude(corners, "top-right"),
+      ...(placement === "inline" ? { horizontalPadding } : {}),
+    }),
+    [corners, horizontalPadding, placement],
+  );
+  if (!isNative) return <WindowLayoutGeometryView {...props} style={combinedStyle} />;
+  return (
+    <WindowLayoutVariantView
+      {...props}
+      style={combinedStyle}
+      collapsed={false}
+      collapseInLandscape={false}
+      headerChrome={headerChrome}
+    />
+  );
 }

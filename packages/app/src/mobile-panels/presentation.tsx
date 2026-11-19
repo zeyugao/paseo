@@ -7,8 +7,17 @@ import { WindowChromeRootRegion } from "@/utils/desktop-window";
 import { usePanelStore, type MobilePanelView } from "@/stores/panel-store";
 import { getMobilePanelFrame } from "./model";
 import { useIsMobilePanelActive, useMobilePanelsRuntime } from "./provider";
+import ExplorerPanelHost from "./explorer-panel-host";
+import { SafeAreaInsetsContext, useSafeAreaInsets } from "react-native-safe-area-context";
+import { useWindowLayout } from "@/window-layout/context";
+import { resolveSafeAreaInsets, resolveWorkspaceActionPlacement } from "@/window-layout/model";
+import {
+  MIN_EXPLORER_SIDEBAR_WIDTH,
+  MIN_WORKSPACE_BODY_WIDTH,
+} from "@/components/explorer-sidebar-layout";
 
 type OverlayPanel = Exclude<MobilePanelView, "agent">;
+const PANEL_HOSTS = { "agent-list": Animated.View, "file-explorer": ExplorerPanelHost };
 
 interface MobilePanelOverlayProps {
   children: ReactNode;
@@ -18,6 +27,26 @@ interface MobilePanelOverlayProps {
   dockVisible?: boolean;
   frameStyle?: ComponentProps<typeof Animated.View>["style"];
   panelStyle?: ComponentProps<typeof Animated.View>["style"];
+  overlayWidth?: number;
+  requestedDockWidth?: number;
+}
+
+function useOverlayBarAllocation(enabled: boolean, windowWidth: number) {
+  const layout = useWindowLayout();
+  const parentInsets = useSafeAreaInsets();
+  const insets = resolveSafeAreaInsets(parentInsets, layout);
+  const reservesBar = enabled && resolveWorkspaceActionPlacement(layout) === "vertical-bar";
+  const left = reservesBar ? insets.left : 0;
+  const right = reservesBar ? insets.right : 0;
+  const frameStyle = useMemo(
+    () => (reservesBar ? { left, right } : undefined),
+    [reservesBar, left, right],
+  );
+  const contentInsets = useMemo(
+    () => (reservesBar ? { ...parentInsets, left: 0, right: 0 } : parentInsets),
+    [reservesBar, parentInsets],
+  );
+  return { frameStyle, contentInsets, width: windowWidth - left - right };
 }
 
 export function MobilePanelOverlay({
@@ -28,6 +57,8 @@ export function MobilePanelOverlay({
   presentation = "overlay",
   dockVisible = false,
   frameStyle,
+  overlayWidth,
+  requestedDockWidth,
 }: MobilePanelOverlayProps) {
   const { leftPanelWidth, position, windowWidth } = useMobilePanelsRuntime();
   const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
@@ -36,7 +67,11 @@ export function MobilePanelOverlay({
   const isOpen = docked ? dockVisible : overlayOpen;
   const hostId = useId();
   const isLeft = panel === "agent-list";
-  const width = isLeft ? leftPanelWidth : windowWidth;
+  const barAllocation = useOverlayBarAllocation(!docked && isLeft, windowWidth);
+  const width = Math.min(
+    overlayWidth ?? (isLeft ? leftPanelWidth : windowWidth),
+    barAllocation.width,
+  );
 
   const sidebarAnimatedStyle = useAnimatedStyle(() => {
     if (docked) return { transform: [{ translateX: 0 }] };
@@ -86,20 +121,27 @@ export function MobilePanelOverlay({
   } else {
     overlayPointerEvents = isOpen ? "auto" : "none";
   }
+  const PanelHost = PANEL_HOSTS[panel];
 
   return (
     <GestureDetector gesture={closeGesture} touchAction="pan-y">
       {/* Fabric needs an always-mounted native host to attach the close handler while the
           retained panel content is hidden. nativeID keeps that host registered. */}
-      <Animated.View
+      <PanelHost
         accessibilityElementsHidden={!isOpen}
         collapsable={false}
         importantForAccessibility={isOpen ? "auto" : "no-hide-descendants"}
         nativeID={`${panel}-gesture-host-${hostId}`}
         pointerEvents={overlayPointerEvents}
+        {...(requestedDockWidth !== undefined && {
+          requestedDockWidth,
+          minimumDockWidth: MIN_EXPLORER_SIDEBAR_WIDTH,
+          minimumWorkspaceWidth: MIN_WORKSPACE_BODY_WIDTH,
+        })}
         style={[
           docked ? styles.dock : styles.overlay,
           frameStyle,
+          barAllocation.frameStyle,
           docked && !dockVisible && { display: "none" },
         ]}
       >
@@ -117,10 +159,12 @@ export function MobilePanelOverlay({
           </Pressable>
 
           <Animated.View pointerEvents={isOpen ? "auto" : "none"} style={combinedPanelStyle}>
-            <WindowChromeRootRegion corners="both">{children}</WindowChromeRootRegion>
+            <SafeAreaInsetsContext.Provider value={barAllocation.contentInsets}>
+              <WindowChromeRootRegion corners="both">{children}</WindowChromeRootRegion>
+            </SafeAreaInsetsContext.Provider>
           </Animated.View>
         </Animated.View>
-      </Animated.View>
+      </PanelHost>
     </GestureDetector>
   );
 }

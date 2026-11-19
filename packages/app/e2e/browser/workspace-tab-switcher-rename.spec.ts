@@ -3,6 +3,11 @@ import { randomUUID } from "node:crypto";
 import { test, expect } from "../support/fixtures";
 import { openAgentRoute, seedMockAgentWorkspace } from "../support/helpers/mock-agent";
 import { renameModalInput, renameModalSubmit } from "../support/helpers/rename";
+import {
+  closeMobileAgentSidebar,
+  expectMobileAgentSidebarHidden,
+  openMobileAgentSidebar,
+} from "../support/helpers/sidebar";
 import type { SeedDaemonClient } from "../support/helpers/seed-client";
 
 const MOBILE_VIEWPORT = { width: 390, height: 844 };
@@ -146,5 +151,69 @@ test("switcher footer creates tabs and returns to the existing chat", async ({
     await captureScreen(page, testInfo, "returned-chat-header");
   } finally {
     await session.cleanup();
+  }
+});
+
+test("compact entry points retain attention until the underlying work is read", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(120_000);
+  const current = await seedMockAgentWorkspace({
+    repoPrefix: "compact-tab-attention-",
+    title: "Current workspace agent",
+  });
+  const other = await seedMockAgentWorkspace({
+    repoPrefix: "compact-sidebar-attention-",
+    title: "Other workspace agent",
+  });
+  try {
+    await openAgentRoute(page, current);
+    await expect(page.getByTestId("workspace-tab-switcher-trigger")).toBeVisible();
+    await createTabFromSwitcher(page, "New agent");
+    const trigger = page.getByTestId("workspace-tab-switcher-trigger");
+    const tabsDot = page.getByTestId("workspace-tab-switcher-attention");
+    const sidebarDot = page.getByTestId("sidebar-toggle-attention").filter({ visible: true });
+    await expect(tabsDot).toHaveCount(0);
+    await expect(sidebarDot).toHaveCount(0);
+    const triggerBefore = await trigger.boundingBox();
+
+    // The draft stays selected so completed agents are not read by the visible chat.
+    await current.client.sendAgentMessage(current.agentId, "Finish this turn.");
+    await current.client.waitForFinish(current.agentId, 20_000);
+    await expect(tabsDot).toBeVisible();
+    await expect(sidebarDot).toHaveCount(0);
+    await expect(trigger).toHaveText("2");
+    expect(await trigger.boundingBox()).toEqual(triggerBefore);
+
+    // The sidebar must subscribe even when its retained content is inactive.
+    await other.client.sendAgentMessage(other.agentId, "Finish this turn.");
+    await other.client.waitForFinish(other.agentId, 20_000);
+    await expect(sidebarDot).toHaveCount(1);
+    await captureScreen(page, testInfo, "compact-tabs-and-sidebar-attention");
+
+    await openTabSwitcher(page);
+    await expect(tabsDot).toBeVisible();
+    await expect(page.getByText("Current workspace agent", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Bottom sheet backdrop" }).click({
+      position: { x: 10, y: 10 },
+    });
+    await expect(page.getByRole("button", { name: "Bottom sheet backdrop" })).toHaveCount(0);
+    await expect(tabsDot).toBeVisible();
+
+    await current.client.clearWorkspaceAttention(current.workspaceId);
+    await expect(tabsDot).toHaveCount(0);
+    await expect(sidebarDot).toHaveCount(1);
+    await openMobileAgentSidebar(page);
+    await expect(sidebarDot).toHaveCount(0);
+    await closeMobileAgentSidebar(page);
+    await expectMobileAgentSidebarHidden(page);
+    await expect(sidebarDot).toHaveCount(1);
+    await other.client.clearWorkspaceAttention(other.workspaceId);
+    await expect(sidebarDot).toHaveCount(0);
+    expect(await trigger.boundingBox()).toEqual(triggerBefore);
+    await captureScreen(page, testInfo, "compact-attention-cleared");
+  } finally {
+    await other.cleanup();
+    await current.cleanup();
   }
 });

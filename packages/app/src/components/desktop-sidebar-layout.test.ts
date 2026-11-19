@@ -14,17 +14,20 @@ import {
   resolveSidebarActivity,
   resolveDesktopSidebarWidth,
   resolveLeftSidebarPresentation,
+  resolveSidebarMenuTogglePresentation,
 } from "@/components/desktop-sidebar-layout";
+import { windowChromeCornersInclude } from "@/utils/desktop-window";
 
 describe("desktop sidebar layout", () => {
   const geometry: WindowLayout = {
     bounds: { x: 0, y: 0, width: 951, height: 669 },
+    hingeStatus: "fully-open",
     verticalBarEdge: "trailing",
     verticalBar: { x: 875, y: 160, width: 44, height: 450 },
     divisions: [{ x: 465, y: 0, width: 21, height: 669 }],
   };
 
-  it("places workspace action symbols in the reported trailing bar", () => {
+  it("places workspace action symbols in either reported vertical bar", () => {
     expect(resolveWorkspaceActionPlacement(geometry)).toBe("vertical-bar");
     expect(resolveWorkspaceActionPlacement(null)).toBe("header");
     expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBarEdge: "none" })).toBe(
@@ -32,13 +35,14 @@ describe("desktop sidebar layout", () => {
     );
     expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBar: null })).toBe("header");
     expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBarEdge: "leading" })).toBe(
-      "header",
+      "vertical-bar",
     );
   });
 
   it("shows the tab count only for the compact header selection", () => {
     expect(resolveWorkspaceBarActions("compact")).toEqual(["tab-count", "overflow", "explorer"]);
     expect(resolveWorkspaceBarActions("full")).toEqual(["overflow", "explorer"]);
+    expect(resolveWorkspaceBarActions("inline")).toEqual(["git", "overflow", "explorer"]);
   });
 
   it("allocates both panels around a live division without clamping to saved sidebar widths", () => {
@@ -76,22 +80,20 @@ describe("desktop sidebar layout", () => {
     expect(resolveSidebarActivity(true, true, true)).toBe(true);
   });
 
-  it("temporarily reveals navigation for a division without changing the saved closed intent", () => {
+  it("keeps navigation togglable without moving the content allocation across a division", () => {
+    const divisionLayout = { sidebarWidth: 465, gap: 21, contentWidth: 381 };
     const visibility = {
       chromeEnabled: true,
       isCompactLayout: false,
       isMounted: true,
-      isOpen: false,
       canShare: false,
+      divisionLayout,
     };
+    expect(resolveDesktopSidebarVisibility({ ...visibility, isOpen: true })).toBe(true);
+    expect(resolveDesktopSidebarVisibility({ ...visibility, isOpen: false })).toBe(false);
     expect(
-      resolveDesktopSidebarVisibility({
-        ...visibility,
-        divisionLayout: { sidebarWidth: 465, gap: 21, contentWidth: 381 },
-      }),
-    ).toBe(true);
-    expect(resolveDesktopSidebarVisibility({ ...visibility, divisionLayout: null })).toBe(false);
-    expect(visibility.isOpen).toBe(false);
+      resolveDesktopSidebarVisibility({ ...visibility, divisionLayout: null, isOpen: true }),
+    ).toBe(false);
   });
 
   it("keeps a retained sidebar hidden while app chrome is suppressed", () => {
@@ -159,8 +161,8 @@ describe("desktop sidebar layout", () => {
         sidebarControlsEnabled: true,
       }),
     ).toEqual({
-      sidebarCorners: "none",
-      contentCorners: "both",
+      sidebarCorners: "top-left",
+      contentCorners: "top-right",
       sidebarToggleOwner: "content",
     });
     expect(
@@ -174,6 +176,41 @@ describe("desktop sidebar layout", () => {
       contentCorners: "both",
       sidebarToggleOwner: "window",
     });
+  });
+
+  it.each([
+    { docked: false, windowControls: false, expected: "button" },
+    { docked: true, windowControls: false, expected: "button" },
+    { docked: false, windowControls: true, expected: "placeholder" },
+    { docked: true, windowControls: true, expected: "hidden" },
+  ] as const)(
+    "keeps one visible toggle with docked=$docked and windowControls=$windowControls",
+    ({ docked, windowControls, expected }) => {
+      const chrome = resolveDesktopAppChromeLayout({
+        desktopSidebarRendered: docked,
+        hasTopLeftWindowControls: windowControls,
+        sidebarControlsEnabled: true,
+      });
+      const presentation = resolveSidebarMenuTogglePresentation({
+        isCompact: false,
+        ownsTopLeft: windowChromeCornersInclude(chrome.contentCorners, "top-left"),
+        hasTopLeftWindowControls: windowControls,
+      });
+      expect(presentation).toBe(expected);
+      expect(
+        Number(chrome.sidebarToggleOwner === "window") + Number(presentation === "button"),
+      ).toBe(1);
+    },
+  );
+
+  it("keeps compact navigation visible independently of window controls and corner ownership", () => {
+    expect(
+      resolveSidebarMenuTogglePresentation({
+        isCompact: true,
+        ownsTopLeft: false,
+        hasTopLeftWindowControls: true,
+      }),
+    ).toBe("button");
   });
 
   it("hides the window-owned sidebar toggle when app chrome is suppressed", () => {
@@ -222,29 +259,42 @@ describe("desktop sidebar layout", () => {
   });
 });
 
-it("reserves room for Explorer and the workspace before showing app navigation", () => {
+it("yields navigation rather than clamping Explorer when only its minimum width fits", () => {
   const contentMinimumWidth = resolveDesktopAppContentMinimum({
     isSettingsRoute: false,
     explorerVisible: true,
+    explorerSidebarWidth: 309,
   });
-  expect(contentMinimumWidth).toBe(600);
   expect(
     canDesktopAppSidebarShare({
       contentMinimumWidth,
-      requestedSidebarWidth: 320,
-      viewportWidth: 744,
+      requestedSidebarWidth: 203,
+      viewportWidth: 867,
     }),
   ).toBe(false);
   expect(
     canDesktopAppSidebarShare({
       contentMinimumWidth,
-      requestedSidebarWidth: 320,
-      viewportWidth: 951,
+      requestedSidebarWidth: 203,
+      viewportWidth: 872,
     }),
   ).toBe(true);
 });
 
 it("insets an overlay sidebar's content by the left safe area and leaves the dock to app chrome", () => {
-  expect(resolveDesktopSidebarInsetLeft({ overlay: true, safeAreaLeft: 20 })).toBe(20);
-  expect(resolveDesktopSidebarInsetLeft({ overlay: false, safeAreaLeft: 20 })).toBe(0);
+  expect(
+    resolveDesktopSidebarInsetLeft({ overlay: true, safeAreaLeft: 20, hasVerticalBar: false }),
+  ).toBe(20);
+  expect(
+    resolveDesktopSidebarInsetLeft({ overlay: false, safeAreaLeft: 20, hasVerticalBar: false }),
+  ).toBe(0);
+});
+
+it("does not reserve native-bar clearance again inside an allocated overlay", () => {
+  expect(
+    resolveDesktopSidebarInsetLeft({ overlay: true, safeAreaLeft: 84, hasVerticalBar: true }),
+  ).toBe(0);
+  expect(
+    resolveDesktopSidebarInsetLeft({ overlay: false, safeAreaLeft: 84, hasVerticalBar: true }),
+  ).toBe(0);
 });

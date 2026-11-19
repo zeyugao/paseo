@@ -1,10 +1,11 @@
 import type { ComposerOptionControls } from "@/agent-controls/option-controls";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef } from "react";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import { Keyboard, StyleSheet as RNStyleSheet, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet } from "react-native-unistyles";
 import { useContainerWidthBelow } from "@/hooks/use-container-width";
+import { ComposerLayoutWidthContext } from "@/composer/dock/content-insets";
 import invariant from "tiny-invariant";
 import { Composer } from "@/composer";
 import { type ComposerEditingSession, useComposerFullscreen } from "@/composer/editing-session";
@@ -374,9 +375,10 @@ export function WorkspaceDraftComposer({
   const allowsEmptyAutoSubmit = pendingAutoSubmit?.allowEmptyText === true;
   const isCompactFormFactor = useIsCompactFormFactor();
   const isComposerFullscreen = useComposerFullscreen(editingSession);
+  const paneWidth = useContext(ComposerLayoutWidthContext);
   const { onLayout: onInputAreaLayout, isBelow: isCompactComposerLayout } = useContainerWidthBelow(
     COMPACT_CONTENT_WIDTH,
-    { initialIsBelow: isCompactFormFactor },
+    { initialIsBelow: isCompactFormFactor, allocatedWidth: paneWidth },
   );
   const workspaceAttachmentScopeKey = useWorkspaceAttachmentScopeKey({
     serverId,
@@ -574,7 +576,10 @@ export function WorkspaceDraftComposer({
     [composerState.agentControls, handleDropdownCloseFocus, isSubmitting],
   );
   return (
-    <View style={animatedStaticStyles.inputAreaWrapper} onLayout={onInputAreaLayout}>
+    <View
+      style={animatedStaticStyles.inputAreaWrapper}
+      onLayout={paneWidth === null ? onInputAreaLayout : undefined}
+    >
       {formErrorMessage ? (
         <View style={styles.formErrorRow}>
           <View style={styles.formError}>

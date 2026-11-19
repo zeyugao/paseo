@@ -4,17 +4,23 @@ import {
   WindowLayoutActionsHost,
   WindowLayoutSurface,
   WindowLayoutDivisionGap,
-  useWindowLayout,
+  useWindowLayoutViewport,
   resolveDesktopDivisionLayout,
+  resolveWorkspaceActionPlacement,
+  type WindowLayout,
 } from "@/window-layout";
+import { WindowActionPlane } from "@/window-layout/action-plane";
+import { shouldUseInlineWorkspaceHeader } from "@/screens/workspace/workspace-tab-layout";
+import { WindowLayoutContentAllocationContext } from "@/window-layout/context";
+import { SidebarResizeGeometryProvider } from "@/window-layout/sidebar-resize-geometry";
 import { AddHostProvider, AddHostFlowHost } from "@/hosts/add-host";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useIsExplorerSidebarOpen } from "@/workspace-tabs/explorer-sidebar";
 import { ComposerEditingSessionsProvider } from "@/composer/editing-session";
 import { SheetHostScope } from "@/components/ui/isolated-bottom-sheet-modal";
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
+import { SheetWindowHost } from "@/components/ui/isolated-bottom-sheet-modal/window-host";
 import { PortalProvider } from "@gorhom/portal";
 import { LucideProvider } from "lucide-react-native";
 import * as Linking from "expo-linking";
@@ -30,7 +36,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { AppState, useWindowDimensions, View } from "react-native";
+import { AppState, Platform, View } from "react-native";
 import { GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
@@ -50,7 +56,10 @@ import { OnboardingHost, useIsSetupDecisionPending } from "@/onboarding";
 import { AppDiagnosticHost } from "@/components/app-diagnostic-host";
 import { AppearanceStyleBoundary } from "@/components/appearance-style-boundary";
 import { LeftSidebar } from "@/components/left-sidebar";
-import { WindowSidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
+import {
+  WindowBarNavigation,
+  WindowSidebarMenuToggle,
+} from "@/components/headers/sidebar-menu-toggle";
 import { DesktopWindowControls } from "@/components/desktop/window-controls";
 import { SidebarModelProvider } from "@/components/sidebar/sidebar-model";
 import { WorkspacePinShortcutHandler } from "@/components/workspace-pin-shortcut-handler";
@@ -64,13 +73,16 @@ import { FloatingPanelPortalHost } from "@/components/ui/floating-panel-portal";
 import { HostChooserModal, useHostChooser } from "@/hosts/host-chooser";
 import { HostConfirmationSheet } from "@/hosts/host-confirmation-sheet";
 import { HEADER_INNER_HEIGHT, useIsCompactFormFactor } from "@/constants/layout";
+import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import {
+  MIN_DESKTOP_CENTER_WIDTH,
   canDesktopAppSidebarShare,
   resolveDesktopAppChromeLayout,
   resolveDesktopAppContentMinimum,
   resolveDesktopSidebarVisibility,
   resolveSidebarActivity,
   resolveLeftSidebarPresentation,
+  usesNativeFlexibleDock,
 } from "@/components/desktop-sidebar-layout";
 import { isNative, isWeb } from "@/constants/platform";
 import { HorizontalScrollProvider } from "@/contexts/horizontal-scroll-context";
@@ -112,7 +124,11 @@ import { useCompactWebViewportZoomLock } from "@/hooks/use-compact-web-viewport-
 import { useOpenProject } from "@/hooks/use-open-project";
 import { useAppSettings } from "@/hooks/use-settings";
 import { useOpenAgentListGesture } from "@/mobile-panels/gestures";
-import { MobilePanelsProvider, useIsMobilePanelActive } from "@/mobile-panels/provider";
+import {
+  MobilePanelsProvider,
+  useIsMobilePanelActive,
+  useLeftPanelWidth,
+} from "@/mobile-panels/provider";
 import {
   KeyboardActionDispatcherProvider,
   useKeyboardActionDispatcher,
@@ -389,21 +405,93 @@ interface AppContainerProps {
 
 const WINDOW_SIDEBAR_TOGGLE_HORIZONTAL_PADDING = 12;
 
+function WindowLayoutContentFrame({
+  compact,
+  workspaceKey,
+  explorerVisible,
+  workspaceVisible,
+  focusModeEnabled,
+  inlineHeaderActive,
+  unreservedWidth,
+  divided,
+  desktopSidebarVisible,
+  children,
+}: {
+  compact: boolean;
+  workspaceKey: string | null;
+  explorerVisible: boolean;
+  workspaceVisible: boolean;
+  focusModeEnabled: boolean;
+  inlineHeaderActive: boolean;
+  unreservedWidth: number;
+  divided: boolean;
+  desktopSidebarVisible: boolean;
+  children: ReactNode;
+}) {
+  const sidebarWidth = useLeftPanelWidth();
+  const leftDockWidth = desktopSidebarVisible && !divided ? sidebarWidth : 0;
+  // On iOS the root's clearance spacers and the pane row already allocate the
+  // undivided width. Pinning the workspace to the React projection can preserve
+  // the old system-bar clearance after the native spacers have changed.
+  const nativeWorkspaceRow = Platform.OS === "ios" && workspaceVisible && !divided;
+  const width = compact || desktopSidebarVisible || nativeWorkspaceRow ? null : unreservedWidth;
+  const targetWidth = unreservedWidth - leftDockWidth;
+  const hasPinnedSidebar =
+    !compact &&
+    (desktopSidebarVisible || (workspaceVisible && explorerVisible && !focusModeEnabled));
+  const allocation = useMemo(
+    () => ({
+      workspaceKey,
+      explorerVisible,
+      hasPinnedSidebar,
+      inlineHeaderActive,
+      width,
+      targetWidth,
+      leftDockWidth,
+    }),
+    [
+      workspaceKey,
+      explorerVisible,
+      hasPinnedSidebar,
+      inlineHeaderActive,
+      width,
+      targetWidth,
+      leftDockWidth,
+    ],
+  );
+  return (
+    <WindowLayoutContentAllocationContext.Provider value={allocation}>
+      <View style={flexStyle}>{children}</View>
+    </WindowLayoutContentAllocationContext.Provider>
+  );
+}
+
+function resolveWindowContentWidth(input: {
+  compact: boolean;
+  geometry: WindowLayout | null;
+  windowWidth: number;
+  viewportWidth: number;
+  dividedWidth: number | undefined;
+}) {
+  if (!input.compact) return input.dividedWidth ?? input.viewportWidth;
+  return resolveWorkspaceActionPlacement(input.geometry) === "vertical-bar"
+    ? input.viewportWidth
+    : input.windowWidth;
+}
+
 function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppContainerProps) {
   const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const daemons = useHosts();
   const { settings, updateSettings } = useAppSettings();
-  const toggleMobileAgentList = usePanelStore((state) => state.toggleMobileAgentList);
-  const toggleDesktopAgentList = usePanelStore((state) => state.toggleDesktopAgentList);
+  const toggleAgentListForLayout = usePanelStore((state) => state.toggleAgentListForLayout);
   const exitFocusMode = usePanelStore((state) => state.exitFocusMode);
   const isFocusModeEnabled = usePanelStore((state) => state.desktop.focusModeEnabled);
   const isDesktopAgentListOpen = usePanelStore((state) => state.desktop.agentListOpen);
   const sidebarWidth = usePanelStore((state) => state.sidebarWidth);
-  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
-  const insets = useSafeAreaInsets();
+  const { geometry, width: windowWidth, height: windowHeight, insets } = useWindowLayoutViewport();
   const viewportWidth = windowWidth - insets.left - insets.right;
   const divisionLayout = resolveDesktopDivisionLayout({
-    geometry: useWindowLayout(),
+    geometry,
     windowWidth,
     windowHeight,
     leftInset: insets.left,
@@ -421,7 +509,10 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const isWorkspaceFocusModeEnabled = isWorkspaceRoute && isFocusModeEnabled;
   const chromeEnabled = chromeEnabledOverride ?? daemons.length > 0;
   const hasMountedDesktopSidebar = useLatchedBoolean(chromeEnabled);
-  const toggleAgentList = isCompactLayout ? toggleMobileAgentList : toggleDesktopAgentList;
+  const toggleAgentList = useCallback(
+    () => toggleAgentListForLayout({ isCompact: isCompactLayout }),
+    [isCompactLayout, toggleAgentListForLayout],
+  );
   const toggleDesktopSidebars = useCallback(() => {
     // The focused workspace owns its layout key, its checkout, and therefore the
     // only correct answer to "is the explorer open". Let it decide when there is
@@ -453,28 +544,36 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   useGlobalNewWorkspaceAction();
 
   const activeWorkspace = useActiveWorkspaceSelection();
+  const activeWorkspaceKey = activeWorkspace
+    ? `${activeWorkspace.serverId}:${activeWorkspace.workspaceId}`
+    : null;
   const explorerVisible = useIsExplorerSidebarOpen({
     isCompact: isCompactLayout,
-    workspaceKey: activeWorkspace
-      ? `${activeWorkspace.serverId}:${activeWorkspace.workspaceId}`
-      : null,
+    workspaceKey: activeWorkspaceKey,
   });
+  const explorerSidebarWidth = useWorkspaceLayoutStore((state) =>
+    activeWorkspaceKey ? state.explorerSidebarWidthByWorkspace[activeWorkspaceKey] : undefined,
+  );
   const appContentMinimumWidth = resolveDesktopAppContentMinimum({
     explorerVisible: isWorkspaceRoute && explorerVisible,
     isSettingsRoute: pathname.includes("/settings"),
+    explorerSidebarWidth,
   });
   const desktopSidebarMounted = hasMountedDesktopSidebar && !isWorkspaceFocusModeEnabled;
+  const canDockAgentList =
+    divisionLayout !== null ||
+    canDesktopAppSidebarShare({
+      contentMinimumWidth: appContentMinimumWidth,
+      requestedSidebarWidth: sidebarWidth,
+      viewportWidth,
+    });
   const desktopSidebarVisible = resolveDesktopSidebarVisibility({
     chromeEnabled,
     isCompactLayout,
     isMounted: desktopSidebarMounted,
     isOpen: isDesktopAgentListOpen,
     divisionLayout,
-    canShare: canDesktopAppSidebarShare({
-      contentMinimumWidth: appContentMinimumWidth,
-      requestedSidebarWidth: sidebarWidth,
-      viewportWidth,
-    }),
+    canShare: canDockAgentList,
   });
   const { presentation: sidebarPresentation, visible: sidebarVisible } =
     useSettingsSidebarPresentation({
@@ -489,8 +588,12 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const applyPanelLayout = usePanelStore((state) => state.applyPanelLayout);
   // Publishes the layout to the store, which owns the panel targets each layout allows.
   useLayoutEffect(() => {
-    applyPanelLayout({ isCompact: isCompactLayout, leftSidebar: sidebarPresentation });
-  }, [applyPanelLayout, isCompactLayout, sidebarPresentation]);
+    applyPanelLayout({
+      isCompact: isCompactLayout,
+      leftSidebar: sidebarPresentation,
+      canDockAgentList,
+    });
+  }, [applyPanelLayout, isCompactLayout, sidebarPresentation, canDockAgentList]);
   const hasTopLeftWindowControls = useHasWindowChromeObstruction("top-left");
   const appChromeLayout = resolveDesktopAppChromeLayout({
     desktopSidebarRendered: desktopSidebarVisible,
@@ -508,6 +611,31 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   if (isWeb) {
     themedSidebarChrome = <AppearanceStyleBoundary>{sidebarChrome}</AppearanceStyleBoundary>;
   }
+  const workspaceContent = (
+    <WindowLayoutContentFrame
+      compact={isCompactLayout}
+      workspaceKey={activeWorkspaceKey}
+      explorerVisible={explorerVisible}
+      workspaceVisible={isWorkspaceRoute}
+      focusModeEnabled={isWorkspaceFocusModeEnabled}
+      inlineHeaderActive={shouldUseInlineWorkspaceHeader(
+        geometry,
+        isCompactLayout,
+        isWorkspaceFocusModeEnabled,
+      )}
+      divided={divisionLayout !== null}
+      desktopSidebarVisible={desktopSidebarVisible}
+      unreservedWidth={resolveWindowContentWidth({
+        compact: isCompactLayout,
+        geometry,
+        windowWidth,
+        viewportWidth,
+        dividedWidth: divisionLayout?.contentWidth,
+      })}
+    >
+      {children}
+    </WindowLayoutContentFrame>
+  );
   const workspaceChrome = (
     <WindowLayoutSurface compact={isCompactLayout} style={rowStyle}>
       <WorkspaceLayoutModePublisher />
@@ -521,11 +649,18 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
         sidebarVisible={desktopSidebarVisible}
         compact={isCompactLayout}
       />
-      <WorkspaceExplorerOpenGesture enabled={chromeEnabled && isCompactLayout}>
+      <WorkspaceExplorerOpenGesture
+        enabled={chromeEnabled && isCompactLayout}
+        minWidth={
+          usesNativeFlexibleDock(desktopSidebarVisible, divisionLayout !== null)
+            ? MIN_DESKTOP_CENTER_WIDTH
+            : undefined
+        }
+      >
         <WindowChromeRegion
           corners={isCompactLayout && chromeEnabled ? "both" : appChromeLayout.contentCorners}
         >
-          <View style={flexStyle}>{children}</View>
+          {workspaceContent}
         </WindowChromeRegion>
       </WorkspaceExplorerOpenGesture>
     </WindowLayoutSurface>
@@ -536,6 +671,7 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   const surface = (
     <View style={layoutStyles.surfaceFill}>
       {workspaceChrome}
+      <WindowBarNavigation enabled={chromeEnabled} />
       <AddHostFlowHost />
       <AppearanceStyleBoundary>
         {!isCompactLayout && appChromeLayout.sidebarToggleOwner === "window" ? (
@@ -590,7 +726,9 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
 
   return (
     <AppContainerLifetime sidebarGesturesEnabled={sidebarPresentation === "overlay"}>
-      <SheetHostScope enabled={isCompactLayout}>{surface}</SheetHostScope>
+      <SidebarResizeGeometryProvider viewportWidth={viewportWidth}>
+        <SheetHostScope enabled={isCompactLayout}>{surface}</SheetHostScope>
+      </SidebarResizeGeometryProvider>
     </AppContainerLifetime>
   );
 }
@@ -910,6 +1048,9 @@ const ROOT_STACK_NESTED_NAVIGATOR_SCREENS = ["h/[serverId]"] as const;
 // Settings owns reactive typography leaves; its scroll and form state survive appearance edits.
 const ROOT_STACK_SCREEN_OWNED_APPEARANCE = ["settings/[section]"] as const;
 
+// These destinations share the shell's sidebar pan, not native-stack swipe-to-pop.
+const SIDEBAR_SCREEN_OPTIONS = { gestureEnabled: false };
+
 function RootStack() {
   const storeReady = useStoreReady();
   return (
@@ -923,10 +1064,10 @@ function RootStack() {
         <Stack.Screen name="welcome" />
         <Stack.Screen name="settings/index" />
         <Stack.Screen name="settings/[section]" />
-        <Stack.Screen name="new" />
-        <Stack.Screen name="open-project" />
-        <Stack.Screen name="sessions" />
-        <Stack.Screen name="schedules" />
+        <Stack.Screen name="new" options={SIDEBAR_SCREEN_OPTIONS} />
+        <Stack.Screen name="open-project" options={SIDEBAR_SCREEN_OPTIONS} />
+        <Stack.Screen name="sessions" options={SIDEBAR_SCREEN_OPTIONS} />
+        <Stack.Screen name="schedules" options={SIDEBAR_SCREEN_OPTIONS} />
       </Stack.Protected>
       <Stack.Screen name="h/[serverId]" />
       <Stack.Screen name="settings/hosts/[serverId]/index" />
@@ -995,8 +1136,12 @@ function RootOverlayProviders({ children }: { children: ReactNode }) {
     <ToastProvider>
       <PortalProvider>
         <BottomSheetModalProvider>
-          {children}
-          <WindowLayoutActionsHost />
+          <SheetWindowHost>
+            <WindowActionPlane>
+              {children}
+              <WindowLayoutActionsHost />
+            </WindowActionPlane>
+          </SheetWindowHost>
         </BottomSheetModalProvider>
       </PortalProvider>
     </ToastProvider>

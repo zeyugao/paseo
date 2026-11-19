@@ -1,7 +1,159 @@
 import { COMPACT_CONTENT_WIDTH } from "@/constants/layout";
+import type { WindowLayout, WindowLayoutRect } from "@/window-layout/model";
+
+export function resolveWorkspaceTabRowTrailingInset(
+  row: WindowLayoutRect,
+  layout: WindowLayout | null,
+): number {
+  const occlusions = layout?.occlusions;
+  if (!occlusions) return 0;
+  const right = row.x + row.width;
+  const bottom = row.y + row.height;
+  let inset = 0;
+  for (const occlusion of occlusions) {
+    const overlapsHorizontally = occlusion.x < right && occlusion.x + occlusion.width > row.x;
+    const overlapsVertically = occlusion.y < bottom && occlusion.y + occlusion.height > row.y;
+    if (overlapsHorizontally && overlapsVertically) {
+      inset = Math.max(inset, Math.ceil(right - Math.max(row.x, occlusion.x)));
+    }
+  }
+  return inset;
+}
+
+export interface WorkspaceTabRowClearance {
+  bounds: WindowLayoutRect;
+  inset: number;
+}
+
+/** A row's measurement only applies while it owns the same window geometry. */
+export function resolveWorkspaceTabRowClearance(
+  measured: WorkspaceTabRowClearance | null,
+  layout: WindowLayout | null,
+  ownsTrailingEdge: boolean,
+): number {
+  if (
+    !ownsTrailingEdge ||
+    !measured ||
+    !layout ||
+    measured.bounds.width !== layout.bounds.width ||
+    measured.bounds.height !== layout.bounds.height
+  ) {
+    return 0;
+  }
+  return measured.inset;
+}
+
+export function isPortraitWorkspaceWindow(layout: WindowLayout | null): boolean {
+  return layout !== null && layout.bounds.height > layout.bounds.width;
+}
+
+export function shouldUseInlineWorkspaceHeader(
+  layout: WindowLayout | null,
+  compact = false,
+  focusMode = false,
+): boolean {
+  // An unfolded full-display workspace uses one row in either pose. The vertical
+  // bar determines action placement, but its trait can lag bounds during rotation.
+  const unfoldedFullDisplay = layout?.fillsDisplay === true && layout.hingeStatus === "fully-open";
+  return (
+    !compact &&
+    !focusMode &&
+    (isPortraitWorkspaceWindow(layout) ||
+      unfoldedFullDisplay ||
+      layout?.verticalBarEdge === "leading" ||
+      layout?.verticalBarEdge === "trailing")
+  );
+}
 
 export function shouldUseCompactWorkspaceHeader(width: number): boolean {
   return width < COMPACT_CONTENT_WIDTH;
+}
+
+export const WORKSPACE_INLINE_TABS_MIN_WIDTH = 320;
+export type WorkspaceInlineTabPresentation = "tabs" | "switcher";
+
+export function resolveInlineWorkspaceTabPresentation(
+  width: number,
+  naturalWidth: number | null,
+): WorkspaceInlineTabPresentation {
+  if (width >= WORKSPACE_INLINE_TABS_MIN_WIDTH) return "tabs";
+  // A current unknown track may scroll at the normal floor; below it, reserve
+  // the picker until its intrinsic content is ready instead of retaining history.
+  return naturalWidth !== null && naturalWidth <= width ? "tabs" : "switcher";
+}
+
+export interface InlineWorkspaceTabAllocation {
+  /** Title width the native row reserves for the workspace identity. */
+  titleWidth: number;
+  /** Remaining width the tab rail viewport may claim. */
+  railWidth: number;
+  /** Title viewport beside the picker and the same rendered action controls. */
+  pickerTitleWidth: number;
+}
+
+export function resolveInlineWorkspaceTabBudget({
+  width,
+  horizontalInset,
+  navigationWidth,
+  titleWidth,
+  navigationGap,
+  actionsWidth = 0,
+  pickerWidth,
+  actionGap,
+  gap,
+}: {
+  width: number;
+  horizontalInset: number;
+  navigationWidth: number;
+  titleWidth: number;
+  navigationGap: number;
+  actionsWidth?: number;
+  pickerWidth: number;
+  actionGap: number;
+  gap: number;
+}): InlineWorkspaceTabAllocation {
+  const contentWidth = Math.max(
+    0,
+    width - horizontalInset - Math.max(0, actionsWidth) - (actionsWidth > 0 ? gap : 0),
+  );
+  const navigation = Math.min(Math.max(0, navigationWidth), contentWidth);
+  const afterNavigation = Math.max(
+    0,
+    contentWidth - navigation - (navigation > 0 ? navigationGap : 0),
+  );
+  // Keep the existing 240pt preferred-title measurement capped by the one-third
+  // reservation. The visible row enforces this number as a title width instead of
+  // letting flex layout shrink the title to zero when the projected rail is wider
+  // than the row that Fabric is about to lay out.
+  const reservedTitle = Math.min(Math.max(0, titleWidth), contentWidth / 3, afterNavigation);
+  return {
+    titleWidth: reservedTitle,
+    railWidth: Math.max(0, afterNavigation - reservedTitle - gap),
+    pickerTitleWidth: Math.max(
+      0,
+      afterNavigation - pickerWidth - (actionsWidth > 0 ? actionGap : gap),
+    ),
+  };
+}
+
+/**
+ * Returns rail width the track does not use to its title reservation. A narrow natural
+ * track must not leave the title truncated below its preferred width.
+ */
+export function resolveInlineWorkspaceTitleWidth({
+  titleWidth,
+  preferredTitleWidth,
+  railWidth,
+  naturalRailWidth,
+}: {
+  titleWidth: number;
+  preferredTitleWidth: number;
+  railWidth: number;
+  naturalRailWidth: number | null;
+}): number {
+  const renderedRailWidth = Math.min(naturalRailWidth ?? railWidth, railWidth);
+  const unusedRailWidth = Math.max(0, railWidth - renderedRailWidth);
+  return Math.min(preferredTitleWidth, titleWidth + unusedRailWidth);
 }
 
 export type WorkspaceTabCloseButtonPolicy = "all" | "none";
@@ -29,6 +181,8 @@ export interface WorkspaceTabLayoutInput {
    * narrow X beside the label is easy to hit by accident and the tab's long-press menu closes it.
    */
   compact: boolean;
+  /** Embedded rails preserve tab widths and scroll independently of close-button sizing. */
+  preserveNaturalWidths?: boolean;
 }
 
 export interface WorkspaceTabLayoutItem {
@@ -40,6 +194,19 @@ export interface WorkspaceTabLayoutResult {
   items: WorkspaceTabLayoutItem[];
   closeButtonPolicy: WorkspaceTabCloseButtonPolicy;
   requiresHorizontalScrollFallback: boolean;
+}
+
+export function workspaceTabNaturalWidth(
+  layout: WorkspaceTabLayoutResult,
+  metrics: WorkspaceTabLayoutMetrics,
+): number {
+  return (
+    layout.items.reduce((width, item) => width + item.width, 0) +
+    metrics.rowHorizontalInset * 2 +
+    metrics.rowPaddingHorizontal * 2 +
+    Math.max(0, layout.items.length - 1) * metrics.tabGap +
+    metrics.actionsReservedWidth
+  );
 }
 
 export function retainWorkspaceTabMeasuredWidth(
@@ -92,17 +259,18 @@ export function computeWorkspaceTabLayout(
   );
   const naturalTotalWidth = naturalWidths.reduce((total, width) => total + width, 0);
   const minimumTotalWidth = input.metrics.minTabWidth * tabCount;
+  const scrollNaturally = input.compact || input.preserveNaturalWidths === true;
   // A row that scrolls has no reason to truncate: the tabs keep their natural widths and the
-  // viewport pans over them. Pointer layouts first shrink toward the clickable minimum and scroll
-  // only once even that does not fit; compact layouts skip the shrink.
-  const requiresHorizontalScrollFallback = input.compact
+  // viewport pans over them. Ordinary pointer rails shrink first; compact and explicitly scrolling
+  // rails keep their natural widths.
+  const requiresHorizontalScrollFallback = scrollNaturally
     ? naturalTotalWidth > availableTabsWidth
     : availableTabsWidth < minimumTotalWidth;
 
   let resolvedWidths = naturalWidths;
   if (
     !requiresHorizontalScrollFallback &&
-    !input.compact &&
+    !scrollNaturally &&
     naturalTotalWidth > availableTabsWidth
   ) {
     const widthToRemove = naturalTotalWidth - availableTabsWidth;

@@ -2,6 +2,7 @@ import {
   type ReactElement,
   type ReactNode,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -9,6 +10,8 @@ import {
   useState,
 } from "react";
 import {
+  AppState,
+  Platform,
   View,
   type LayoutChangeEvent,
   type NativeScrollEvent,
@@ -29,8 +32,15 @@ import { Button } from "@/components/ui/button";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { useTranslation } from "react-i18next";
 import type { StreamItem } from "@/types/stream";
+import type { CapturedReadingPosition } from "./reading-position";
 import type { Theme } from "@/styles/theme";
 import { useStableEvent } from "@/hooks/use-stable-event";
+import { useAppWindowSize } from "@/hooks/use-app-window-size";
+import { StreamViewportLayoutContext } from "./viewport-width";
+import { useWindowLayoutHasTopEdgeControls } from "@/window-layout";
+import { WindowLayoutPaneWidthContext } from "@/window-layout/context";
+import { ComposerDockContentInsetsContext } from "@/composer/dock/content-insets";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { shouldAnimateNativeScrollToBottom } from "./native-scroll-animation";
 import { useRevisedHistoryRows } from "./history-row-revision";
 import { useBottomAnchorController } from "./bottom-anchor-controller";
@@ -99,6 +109,10 @@ function RowLayoutSync(props: {
 }) {
   const { rowId, registry } = props;
   const syncLayout = useSyncLayout();
+  const viewport = useContext(StreamViewportLayoutContext);
+  useLayoutEffect(() => {
+    if (viewport?.active) syncLayout();
+  }, [viewport, syncLayout]);
   useLayoutEffect(() => {
     registry.set(rowId, syncLayout);
     return () => {
@@ -118,6 +132,7 @@ function distanceFromEnd(input: {
   return Math.max(0, input.contentHeight - input.viewportHeight - input.offsetY);
 }
 const viewportStyle: ViewStyle = { flex: 1 };
+const nativeEndAlignment: ViewStyle = { flexGrow: 1 };
 const initialFillStyle: ViewStyle = {
   position: "absolute",
   top: 0,
@@ -147,6 +162,8 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     isInitialHistoryLoading,
     revealInitialHistory,
     onNearBottomChange,
+    initialReadingPosition,
+    onSaveReadingPosition,
     onNearHistoryStart,
     isLoadingOlderHistory,
     hasOlderHistory,
@@ -159,7 +176,39 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
   const isActive = useRetainedPanelActive();
   const { t } = useTranslation();
   const { renderHistoryMountedRow, renderLiveHeadRow, renderLiveAuxiliary } = renderers;
+  const hasTopEdgeControls = useWindowLayoutHasTopEdgeControls();
   const listRef = useRef<LegendListRef>(null);
+  const windowSize = useAppWindowSize();
+  const { left, right } = useSafeAreaInsets();
+  const paneWidth = useContext(WindowLayoutPaneWidthContext);
+  const dockInsets = useContext(ComposerDockContentInsetsContext);
+  const [allocatedWidth, setAllocatedWidth] = useState(0);
+  // A workspace already knows its pane allocation when the window snapshot arrives.
+  // Its later onLayout still owns scroll metrics, but must not invalidate each row again.
+  const projectedWidth = Platform.OS === "ios" ? paneWidth : null;
+  const listWidth =
+    projectedWidth === null
+      ? allocatedWidth
+      : Math.max(
+          0,
+          projectedWidth -
+            dockInsets.paddingLeft -
+            dockInsets.paddingRight -
+            (dockInsets.nativeHorizontalPadding ?? 0),
+        );
+  const { width: windowWidth, height: windowHeight } = windowSize;
+  const windowClearance = left + right;
+  const viewportLayout = useMemo(
+    () => ({
+      active: isActive,
+      windowWidth,
+      windowHeight,
+      windowClearance,
+      paneWidth,
+      listWidth,
+    }),
+    [isActive, windowWidth, windowHeight, windowClearance, paneWidth, listWidth],
+  );
   // LegendList places the rows once, behind a hidden reveal, when the list mounts.
   const [isListPlaced, setIsListPlaced] = useState(false);
   const isListPlacedRef = useRef(isListPlaced);
@@ -174,6 +223,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     contentMeasuredForKey: null as string | null,
   });
   const scrollOffsetYRef = useRef(0);
+  const headerHeightRef = useRef(0);
   const isUserScrollActiveRef = useRef(false);
   const scrollKeyboardDismiss = useScrollKeyboardDismiss();
   const userScrollEndFrameIdRef = useRef<number | null>(null);
@@ -203,6 +253,13 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     newRowEstimates.noteRows(nextRows);
     return nextRows;
   }, [newRowEstimates, historyRows, liveRows]);
+  const [initialScrollTarget] = useState(() => {
+    if (!initialReadingPosition) return undefined;
+    const index = rows.findIndex((row) => row.id === initialReadingPosition.rowId);
+    return index < 0
+      ? undefined
+      : { index, viewOffset: initialReadingPosition.viewOffset, viewPosition: 0 };
+  });
   const getEstimatedItemSize = useStableEvent((item: StreamItem) => newRowEstimates.estimate(item));
   const getHistoryStartPaginationInput = useStableEvent((): HistoryStartPaginationInput => {
     const metrics = streamViewportMetricsRef.current;
@@ -294,7 +351,8 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
 
   const bottomAnchorController = useBottomAnchorController({
     agentId,
-    routeRequest: routeBottomAnchorRequest,
+    initialMode: initialScrollTarget ? "detached" : "sticky-bottom",
+    routeRequest: initialScrollTarget ? null : routeBottomAnchorRequest,
     isAuthoritativeHistoryReady,
     renderStrategy: "legend-stream",
     getTransportBehavior: getBottomAnchorTransportBehavior,
@@ -396,9 +454,9 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
   //   keeps the rows hidden until they are measured and in place, so neither the pin nor the
   //   controller acts; the content does not count as measured yet (`handleContentSizeChange`).
   // - Following the end: the end pin. Rows added, rows resized and footer changes never scroll from
-  //   JS; the pin holds the end in the frame the change mounts. The controller scrolls only for a
-  //   viewport resize (the composer growing or shrinking), which the pin cannot see, and for an
-  //   explicit jump, and both go to the native end (`scrollToBottom`). The keyboard does not resize
+  //   JS; the pin keeps the end in the frame the change mounts. On iOS the same native owner
+  //   also handles a viewport resize. Android retains the controller's resize correction.
+  //   Explicit jumps go to the native end (`scrollToBottom`). The keyboard does not resize
   //   the viewport: it translates the list with the composer. LegendList's end keeping stays off: it
   //   scrolls to the end its JS sizes predict, which runs ahead of the native mount, so it lands
   //   short of the real end and the controller reads that as the user scrolling away.
@@ -430,9 +488,52 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
   // No keyboard inset: one committed after the keyboard settles moves every row when the end pin is
   // not holding the offset (docs/agent-stream-disclosure.md).
   const listContentContainerStyle = useMemo(
-    () => [baseListContentContainerStyle, { paddingTop: topOverlayInset }],
+    () => [
+      baseListContentContainerStyle,
+      { paddingTop: topOverlayInset },
+      Platform.OS === "ios" && nativeEndAlignment,
+    ],
     [baseListContentContainerStyle, topOverlayInset],
   );
+
+  const saveReadingPosition = useStableEvent(() => {
+    if (!onSaveReadingPosition || !isListPlacedRef.current) return;
+    if (isFollowingEnd || isAtEnd()) {
+      onSaveReadingPosition(null);
+      return;
+    }
+    const state = listRef.current?.getState();
+    if (!state) return;
+    const row: StreamItem | undefined = state.data[state.start];
+    if (!row?.timelineCursor) return;
+    const position: CapturedReadingPosition = {
+      agentId,
+      epoch: row.timelineCursor.epoch,
+      seq: row.timelineCursor.seq,
+      rowId: row.id,
+      viewOffset:
+        state.positionAtIndex(state.start) +
+        headerHeightRef.current +
+        topOverlayInset -
+        state.scroll,
+    };
+    onSaveReadingPosition(position);
+  });
+  useLayoutEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state !== "active") saveReadingPosition();
+    });
+    return () => {
+      saveReadingPosition();
+      subscription.remove();
+    };
+  }, [saveReadingPosition]);
+  useLayoutEffect(() => {
+    if (!isActive) saveReadingPosition();
+  }, [isActive, saveReadingPosition]);
+  const handleListMetricsChange = useStableEvent(({ headerSize }: { headerSize: number }) => {
+    headerHeightRef.current = headerSize;
+  });
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -451,6 +552,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
   useEffect(() => {
     const handle: StreamViewportHandle = {
       scrollToBottom: (reason = "jump-to-bottom") => {
+        onSaveReadingPosition?.(null);
         bottomAnchorController.requestLocalAnchor({
           agentId,
           reason,
@@ -467,7 +569,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
         viewportRef.current = null;
       }
     };
-  }, [agentId, bottomAnchorController, holdRow, viewportRef]);
+  }, [agentId, bottomAnchorController, holdRow, viewportRef, onSaveReadingPosition]);
 
   // The scroll-to-bottom button shows whenever following would not resume on its own. A detached
   // list resumes only from the end, so the button shows anywhere short of it. While following, the
@@ -554,6 +656,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
       bottomAnchorController.handleScrollNearBottomChange({
         nextIsNearBottom: nearBottom,
         scrollDelta: contentOffset.y - previousOffsetY,
+        nativeKeepsEnd: Platform.OS === "ios" && pinsEnd,
       });
     }
   });
@@ -591,6 +694,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
       bottomAnchorController.endUserScroll({
         isAtEnd: isReleasedAtEndRef.current || isAtEnd(),
       });
+      saveReadingPosition();
     });
   });
 
@@ -610,6 +714,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
       bottomAnchorController.endUserScroll({
         isAtEnd: isReleasedAtEndRef.current || isScrollEventAtEnd(event),
       });
+      saveReadingPosition();
     },
   );
 
@@ -618,6 +723,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     const previousViewportHeight = streamViewportMetricsRef.current.viewportHeight;
     const viewportWidth = Math.max(0, event.nativeEvent.layout.width);
     const viewportHeight = Math.max(0, event.nativeEvent.layout.height);
+    if (viewportWidth > 0) setAllocatedWidth(viewportWidth);
     streamViewportMetricsRef.current = {
       ...streamViewportMetricsRef.current,
       containerKey: "native-virtualized",
@@ -630,6 +736,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
       viewportWidth,
       previousViewportHeight,
       viewportHeight,
+      nativeKeepsEnd: Platform.OS === "ios" && pinsEnd,
     });
     evaluateHistoryStart();
   });
@@ -733,48 +840,57 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
   }, [historyStartPaginationState, hasOlderHistory, retryHistoryStart, t]);
 
   return (
-    <View style={viewportStyle}>
-      <LegendList<StreamItem>
-        ref={listRef}
-        data={rows}
-        renderItem={renderItem}
-        extraData={renderHistoryMountedRow}
-        keyExtractor={keyExtractor}
-        testID="agent-chat-scroll"
-        nativeID="agent-chat-scroll-native-virtualized"
-        ListHeaderComponent={historyStartContent}
-        ListFooterComponent={liveAuxiliaryContent ?? undefined}
-        contentContainerStyle={listContentContainerStyle}
-        automaticallyAdjustContentInsets={false}
-        automaticallyAdjustsScrollIndicatorInsets={false}
-        contentInsetAdjustmentBehavior="never"
-        style={[listStyle, { opacity: historyStartPaginationState.visible ? 1 : 0 }]}
-        onLayout={handleListLayout}
-        onScroll={handleScroll}
-        onScrollBeginDrag={handleScrollBeginDrag}
-        onScrollEndDrag={handleScrollEndDrag}
-        onMomentumScrollBegin={handleMomentumScrollBegin}
-        onMomentumScrollEnd={handleMomentumScrollEnd}
-        scrollEventThrottle={16}
-        onContentSizeChange={handleContentSizeChange}
-        onItemSizeChanged={handleItemSizeChanged}
-        onReady={handleListPlaced}
-        maintainVisibleContentPosition={maintainVisibleContentPosition}
-        renderScrollComponent={renderScrollComponent}
-        recycleItems={false}
-        alignItemsAtEnd
-        initialScrollAtEnd
-        drawDistance={NATIVE_STREAM_DRAW_DISTANCE}
-        getEstimatedItemSize={getEstimatedItemSize}
-        scrollEnabled={scrollEnabled}
-        showsVerticalScrollIndicator
-      />
-      {!historyStartPaginationState.visible ? (
-        <View pointerEvents="none" testID="agent-initial-fill" style={initialFillStyle}>
-          <ThemedLoadingSpinner size="large" uniProps={foregroundMutedColorMapping} />
-        </View>
-      ) : null}
-    </View>
+    <StreamViewportLayoutContext.Provider value={viewportLayout}>
+      <View style={viewportStyle}>
+        <LegendList<StreamItem>
+          ref={listRef}
+          data={rows}
+          renderItem={renderItem}
+          extraData={renderHistoryMountedRow}
+          keyExtractor={keyExtractor}
+          testID="agent-chat-scroll"
+          nativeID="agent-chat-scroll-native-virtualized"
+          ListHeaderComponent={historyStartContent}
+          // A flexing header keeps its contents at the top and puts the remaining space before
+          // the rows. Yoga recomputes both in the viewport's mount; LegendList can observe the
+          // header height for offsets without writing a spacer in a later commit.
+          ListHeaderComponentStyle={Platform.OS === "ios" ? nativeEndAlignment : undefined}
+          ListFooterComponent={liveAuxiliaryContent ?? undefined}
+          contentContainerStyle={listContentContainerStyle}
+          automaticallyAdjustContentInsets={false}
+          automaticallyAdjustsScrollIndicatorInsets={false}
+          contentInsetAdjustmentBehavior="never"
+          style={[listStyle, { opacity: historyStartPaginationState.visible ? 1 : 0 }]}
+          onLayout={handleListLayout}
+          onScroll={handleScroll}
+          onScrollBeginDrag={handleScrollBeginDrag}
+          onScrollEndDrag={handleScrollEndDrag}
+          onMomentumScrollBegin={handleMomentumScrollBegin}
+          onMomentumScrollEnd={handleMomentumScrollEnd}
+          scrollEventThrottle={16}
+          onContentSizeChange={handleContentSizeChange}
+          onItemSizeChanged={handleItemSizeChanged}
+          onReady={handleListPlaced}
+          onMetricsChange={handleListMetricsChange}
+          maintainVisibleContentPosition={maintainVisibleContentPosition}
+          renderScrollComponent={renderScrollComponent}
+          recycleItems={false}
+          alignItemsAtEnd={Platform.OS !== "ios"}
+          initialScrollAtEnd={!initialScrollTarget}
+          initialScrollIndex={initialScrollTarget}
+          drawDistance={NATIVE_STREAM_DRAW_DISTANCE}
+          getEstimatedItemSize={getEstimatedItemSize}
+          scrollEnabled={scrollEnabled}
+          scrollsToTop={!hasTopEdgeControls}
+          showsVerticalScrollIndicator
+        />
+        {!historyStartPaginationState.visible ? (
+          <View pointerEvents="none" testID="agent-initial-fill" style={initialFillStyle}>
+            <ThemedLoadingSpinner size="large" uniProps={foregroundMutedColorMapping} />
+          </View>
+        ) : null}
+      </View>
+    </StreamViewportLayoutContext.Provider>
   );
 }
 

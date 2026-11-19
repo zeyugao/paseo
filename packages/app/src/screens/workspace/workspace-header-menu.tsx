@@ -33,6 +33,8 @@ import {
   type UseWorkspaceScriptsMenuPagesInput,
 } from "@/screens/workspace/scripts";
 import { usePluginWorkspaceMenu } from "@/plugins";
+import { WorkspaceGitMenuItems } from "@/git/workspace-actions";
+import { useWorkspaceHeaderGitInOverflow } from "./use-workspace-header-width";
 
 const ThemedEllipsis = withUnistyles(Ellipsis);
 const ThemedCopy = withUnistyles(Copy);
@@ -211,6 +213,7 @@ export interface WorkspaceHeaderMenuMobileProps extends WorkspaceHeaderWorkspace
   onExitFocusMode?: () => void;
   normalizedServerId: string;
   normalizedWorkspaceId: string;
+  workspaceDirectory?: string | null;
   scripts: UseWorkspaceScriptsMenuPagesInput;
   showCreateBrowserTab: boolean;
   createTerminalDisabled: boolean;
@@ -229,6 +232,7 @@ export interface WorkspaceHeaderMenuMobileProps extends WorkspaceHeaderWorkspace
 export function WorkspaceHeaderMenuMobile({
   normalizedServerId,
   normalizedWorkspaceId,
+  workspaceDirectory,
   scripts,
   showCreateBrowserTab,
   createTerminalDisabled,
@@ -239,6 +243,7 @@ export function WorkspaceHeaderMenuMobile({
   ...workspaceActions
 }: WorkspaceHeaderMenuMobileProps) {
   const paneId = pane?.id;
+  const gitInOverflow = useWorkspaceHeaderGitInOverflow();
   const handleCreateBrowser = useCallback(
     () => onCreateBrowser({ paneId }),
     [onCreateBrowser, paneId],
@@ -292,6 +297,9 @@ export function WorkspaceHeaderMenuMobile({
         pages={pages}
         sheetTitle={t("workspace.header.actions.workspaceActions")}
       >
+        {gitInOverflow && workspaceDirectory ? (
+          <WorkspaceGitMenuItems serverId={normalizedServerId} cwd={workspaceDirectory} />
+        ) : null}
         {onExitFocusMode ? (
           <DropdownMenuItem onSelect={onExitFocusMode}>
             {t("workspace.tabs.actions.exitFocusMode")}

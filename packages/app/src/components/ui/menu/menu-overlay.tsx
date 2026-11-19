@@ -2,7 +2,9 @@ import { navigateMenuKeyboard } from "./keyboard-navigation";
 import { useOverlayRegistration, type KeyboardInputEvent } from "@/keyboard";
 import { Modal } from "@/components/ui/modal";
 import {
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -14,10 +16,11 @@ import {
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import {
-  Dimensions,
   Platform,
   Pressable,
   View,
+  useWindowDimensions,
+  type LayoutChangeEvent,
   type StyleProp,
   type ViewStyle,
 } from "react-native";
@@ -38,11 +41,12 @@ import {
   type Placement,
   type Rect,
   type Size,
-  type SurfacePosition,
 } from "../anchor";
 
 const SCROLL_CONTENT_STYLE = { flexGrow: 1 } as const;
 const CONTENT_ENTERING_DURATION_MS = 150;
+
+const MenuViewportContext = createContext<Size | null>(null);
 
 const contentEntering = new Keyframe({
   0: { opacity: 0, transform: [{ scale: 0.97 }] },
@@ -110,17 +114,23 @@ export function useAnchoredPosition({
   scrollable: boolean;
   maxHeight?: number;
 }) {
-  const [triggerRect, setTriggerRect] = useState<Rect | null>(null);
+  const localViewport = useContext(MenuViewportContext);
+  const window = useWindowDimensions();
+  const viewportWidth = localViewport?.width ?? window.width;
+  const viewportHeight = localViewport?.height ?? window.height;
+  const [anchor, setAnchor] = useState<{ rect: Rect; viewport: Size } | null>(null);
   const [contentSize, setContentSize] = useState<Size | null>(null);
-  const [position, setPosition] = useState<SurfacePosition | null>(null);
-  const [actualPlacement, setActualPlacement] = useState<Placement>(side);
+  const nextViewport = useMemo(
+    () => ({ width: viewportWidth, height: viewportHeight }),
+    [viewportWidth, viewportHeight],
+  );
+  const viewport = anchor?.viewport ?? nextViewport;
 
   const visibleContentSize = useMemo(() => {
     if (!contentSize) return null;
     if (!scrollable) return contentSize;
 
-    const { height: screenHeight } = Dimensions.get("window");
-    const viewportMaxHeight = Math.max(screenHeight - 16, 0);
+    const viewportMaxHeight = Math.max(viewport.height - 16, 0);
     const resolvedMaxHeight =
       typeof maxHeight === "number" ? Math.min(maxHeight, viewportMaxHeight) : viewportMaxHeight;
 
@@ -128,62 +138,65 @@ export function useAnchoredPosition({
       width: contentSize.width,
       height: Math.min(contentSize.height, resolvedMaxHeight),
     };
-  }, [contentSize, scrollable, maxHeight]);
+  }, [contentSize, scrollable, maxHeight, viewport.height]);
 
   useEffect(() => {
     if (!open) {
-      setTriggerRect(null);
+      setAnchor(null);
       setContentSize(null);
-      setPosition(null);
       return undefined;
     }
 
     if (anchorRect) {
-      setTriggerRect(anchorRect);
+      setAnchor({ rect: anchorRect, viewport: nextViewport });
       return undefined;
     }
 
     if (!anchorRef.current) {
-      setTriggerRect(null);
+      setAnchor(null);
       return undefined;
     }
 
     let cancelled = false;
 
-    // The app draws edge-to-edge, so measureInWindow and the full-screen Modal share one
-    // coordinate space that starts at the screen top; no status bar offset applies.
+    // A native Modal can relayout while both the anchor ref and the menu content
+    // size stay unchanged. Read the trigger again and place it with this viewport.
     void measureElement(anchorRef.current).then((rect) => {
       if (cancelled) return undefined;
-      setTriggerRect(rect);
+      setAnchor({ rect, viewport: nextViewport });
       return undefined;
     });
 
     return () => {
       cancelled = true;
     };
-  }, [anchorRect, anchorRef, open]);
+  }, [anchorRect, anchorRef, nextViewport, open]);
 
-  useEffect(() => {
-    if (!triggerRect || !visibleContentSize) return;
+  const placement = useMemo(() => {
+    if (!anchor || !visibleContentSize) return null;
 
-    const { width: screenWidth, height: screenHeight } = Dimensions.get("window");
     // measureInWindow and Modal both use full-screen coordinates, so the display area starts at 0.
-    const result = computePosition({
-      triggerRect,
+    return computePosition({
+      triggerRect: anchor.rect,
       contentSize: visibleContentSize,
-      displayArea: { x: 0, y: 0, width: screenWidth, height: screenHeight },
+      displayArea: { x: 0, y: 0, ...anchor.viewport },
       placement: side,
       alignment: align,
       offset,
     });
-
-    setPosition(holdSurfaceEdge(result, visibleContentSize.height));
-    setActualPlacement(result.actualPlacement);
-  }, [triggerRect, visibleContentSize, side, align, offset]);
+  }, [anchor, visibleContentSize, side, align, offset]);
+  const position =
+    placement && visibleContentSize ? holdSurfaceEdge(placement, visibleContentSize.height) : null;
+  const actualPlacement = placement?.actualPlacement ?? side;
 
   const onContentLayout = useCallback(
-    (event: { nativeEvent: { layout: { width: number; height: number } } }) => {
-      const { width, height } = event.nativeEvent.layout;
+    ({
+      nativeEvent: {
+        layout: { width, height },
+      },
+    }: {
+      nativeEvent: { layout: Size };
+    }) => {
       setContentSize((current) => {
         if (current && current.width === width && current.height === height) return current;
         return { width, height };
@@ -192,7 +205,7 @@ export function useAnchoredPosition({
     [],
   );
 
-  return { position, actualPlacement, contentSize, visibleContentSize, onContentLayout };
+  return { position, actualPlacement, visibleContentSize, onContentLayout, viewport };
 }
 
 export interface AnchoredSurfaceProps {
@@ -253,16 +266,17 @@ export function AnchoredSurface({
 }: AnchoredSurfaceProps): ReactElement | null {
   const { t } = useTranslation();
   const surfaceNativeID = useId();
-  const { position, actualPlacement, visibleContentSize, onContentLayout } = useAnchoredPosition({
-    open,
-    anchorRect,
-    anchorRef,
-    side,
-    align,
-    offset,
-    scrollable,
-    maxHeight,
-  });
+  const { position, actualPlacement, visibleContentSize, onContentLayout, viewport } =
+    useAnchoredPosition({
+      open,
+      anchorRect,
+      anchorRef,
+      side,
+      align,
+      offset,
+      scrollable,
+      maxHeight,
+    });
 
   // The surface is placed once both measurements land. Until then it sits off-screen so it can
   // be measured, and it must not animate: an entering animation that ran there would be over
@@ -285,7 +299,7 @@ export function AnchoredSurface({
 
   const frame = useMemo(() => surfaceFrameStyles(position), [position]);
   const frameStyle = useMemo<StyleProp<ViewStyle>>(() => {
-    const { width: screenWidth } = Dimensions.get("window");
+    const screenWidth = viewport.width;
     const resolvedWidthStyle: ViewStyle = fullWidth
       ? { width: screenWidth - horizontalPadding * 2 }
       : fitSurfaceWidth({ width, minWidth, maxWidth }, screenWidth);
@@ -303,6 +317,7 @@ export function AnchoredSurface({
     width,
     minWidth,
     maxWidth,
+    viewport.width,
     frame.surface,
     actualPlacement,
     align,
@@ -402,6 +417,17 @@ export function MenuOverlay({
   children: ReactElement | null;
 }): ReactElement | null {
   const floatingLayer = useOverlayLayer("floating");
+  const [viewport, setViewport] = useState<Size | null>(null);
+  const onLayout = useCallback(({ nativeEvent: { layout } }: LayoutChangeEvent) => {
+    const { width, height } = layout;
+    if (width <= 0 || height <= 0) return;
+    setViewport((previous) =>
+      previous?.width === width && previous.height === height ? previous : { width, height },
+    );
+  }, []);
+  useEffect(() => {
+    if (!visible) setViewport(null);
+  }, [visible]);
 
   const handleOverlayKeyDown = useCallback(
     (event: KeyboardInputEvent) => {
@@ -433,6 +459,7 @@ export function MenuOverlay({
           onContextMenu: (event: { preventDefault?: () => void }) => event.preventDefault?.(),
         }}
         ref={setOverlayScope}
+        onLayout={isWeb ? undefined : onLayout}
         collapsable={false}
         style={[
           styles.overlay,
@@ -440,7 +467,7 @@ export function MenuOverlay({
           isWeb ? { zIndex: floatingLayer } : null,
         ]}
       >
-        {children}
+        <MenuViewportContext value={viewport}>{children}</MenuViewportContext>
       </View>
     </OverlayLayerProvider>
   );

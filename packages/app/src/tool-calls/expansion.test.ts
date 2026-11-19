@@ -10,6 +10,23 @@ function observe(expansion: ReturnType<typeof createToolCallExpansion>) {
 }
 
 describe("tool call expansion", () => {
+  it("restores open groups and explicit closed overrides without sharing mutable state", () => {
+    const original = createToolCallExpansion();
+    original.setGroupExpanded("group", true);
+    original.setCallExpanded({ callId: "closed", expanded: false, standalone: false });
+    original.setCallExpanded({ callId: "opened", expanded: true, standalone: false });
+    const snapshot = original.capture();
+    const reopened = createToolCallExpansion(snapshot);
+    original.setGroupExpanded("group", false);
+    original.setCallExpanded({ callId: "opened", expanded: false, standalone: false });
+    expect(reopened.getExpandedGroups().has("group")).toBe(true);
+    expect(reopened.isCallExpanded("opened", false)).toBe(true);
+    expect(reopened.isCallExpanded("closed", true)).toBe(false);
+    reopened.setGroupExpanded("group", false);
+    expect(reopened.getExpandedGroups().has("group")).toBe(false);
+    expect(snapshot.groups).toEqual(["group"]);
+  });
+
   it("opens a lone call and its future group without notifying the timeline", () => {
     const expansion = createToolCallExpansion();
     const notified = observe(expansion);

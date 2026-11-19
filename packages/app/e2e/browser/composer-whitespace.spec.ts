@@ -97,19 +97,6 @@ test("blank composer lines remain present and keep their measured height", async
     const blankLines = "\n\n\n\n\n";
     const collapsedHeight = await composerHeight(page);
 
-    await test.step("remeasure the current draft when the window narrows", async () => {
-      await page.setViewportSize({ width: 1280, height: 1200 });
-      const text = "A sentence that wraps when the editor becomes narrower. ".repeat(8);
-      await composer.fill(text);
-      await expect(composer).toHaveValue(text);
-      await expect.poll(() => composerHeight(page)).toBeGreaterThan(collapsedHeight);
-      const wideHeight = await composerHeight(page);
-      await page.setViewportSize({ width: 480, height: 1200 });
-      await expect.poll(() => composerHeight(page)).toBeGreaterThan(wideHeight);
-      await expect(composer).toHaveValue(text);
-      await page.setViewportSize({ width: 1280, height: 720 });
-    });
-
     await test.step("grow the composer with blank lines followed by text", async () => {
       await composer.fill(`${blankLines}x`);
       await expect(composer).toHaveValue(`${blankLines}x`);
@@ -132,6 +119,21 @@ test("blank composer lines remain present and keep their measured height", async
       const filledTrailingLineHeight = await typeComposerTextAndMeasureNextPaint(page, "x");
       await expect(composer).toHaveValue("alpha\nbeta\nx");
       expect(filledTrailingLineHeight).toBe(trailingLineHeight);
+    });
+
+    // Crossing the compact breakpoint remounts the editor. Keep that transition
+    // separate from the first-paint probe, which observes one mounted textarea.
+    await test.step("remeasure the current draft when the window narrows", async () => {
+      await page.setViewportSize({ width: 1280, height: 1200 });
+      const text = "A sentence that wraps when the editor becomes narrower. ".repeat(8);
+      const beforeWrap = await composerHeight(page);
+      await composer.fill(text);
+      await expect(composer).toHaveValue(text);
+      await expect.poll(() => composerHeight(page)).toBeGreaterThan(beforeWrap);
+      const wideHeight = await composerHeight(page);
+      await page.setViewportSize({ width: 480, height: 1200 });
+      await expect.poll(() => composerHeight(page)).toBeGreaterThan(wideHeight);
+      await expect(composer).toHaveValue(text);
     });
   } finally {
     await agent.cleanup();
@@ -395,6 +397,11 @@ test("the reserved band beside the inline editor focuses it", async ({ page }) =
     await test.step("with the fullscreen button shown, the band under it focuses the editor", async () => {
       for (const point of await reservedBandPoints(page, bandX, button.y + button.height + 10)) {
         await blurComposer(page);
+        const hitsEditor = await composerLocator(page).evaluate(
+          (editor, { x, y }) => document.elementFromPoint(x, y) === editor,
+          point,
+        );
+        expect(hitsEditor, "The band below Fullscreen should hit the editor").toBe(true);
         await page.mouse.click(point.x, point.y);
         await expect(composerLocator(page)).toBeFocused();
         await expect(composerLocator(page)).toHaveValue(longDraft);

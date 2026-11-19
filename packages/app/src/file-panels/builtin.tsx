@@ -4,6 +4,7 @@ import { ScrollView, Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { ZoomableImage } from "@/components/zoomable-viewport/image";
 import { useSessionStore } from "@/stores/session-store";
+import { useWindowLayoutHasTopEdgeControls } from "@/window-layout";
 import { FileHtmlPreview } from "./html-preview";
 import { FilePanelLoading } from "./loading";
 import { FileMarkdownPreview } from "./markdown-preview";
@@ -27,13 +28,18 @@ function HtmlPanel(props: PluginFilePanelProps) {
 
 /** Shows Loading until the rendered Markdown has laid out once; later edits keep the content. */
 function MarkdownPreview({ text, params, workspaceId, host }: TextFilePreviewProps) {
+  const hasTopEdgeControls = useWindowLayoutHasTopEdgeControls();
   const client = useSessionStore((state) => state.sessions[host.id]?.client ?? null);
   const workspaceRoot = useWorkspace(workspaceId, (workspace) => workspace.directory);
   const [rendered, setRendered] = useState(false);
   const handleLayout = useCallback(() => setRendered(true), []);
   return (
     <View style={styles.container}>
-      <ScrollView style={styles.container} showsVerticalScrollIndicator>
+      <ScrollView
+        style={styles.container}
+        scrollsToTop={!hasTopEdgeControls}
+        showsVerticalScrollIndicator
+      >
         <View onLayout={handleLayout}>
           <FileMarkdownPreview
             source={text}

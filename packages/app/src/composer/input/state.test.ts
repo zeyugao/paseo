@@ -5,6 +5,7 @@ import {
   type MessageInputEnterContext,
   resolveActiveSendBehavior,
   resolveComposerSurfacePresentation,
+  resolveComposerCollapsed,
   resolveComposerSurfaceText,
   resolveGlyphRailOffset,
   resolveMessageInputEnterAction,
@@ -59,6 +60,39 @@ describe("composer surface presentation", () => {
       input: { opacity: 0, pointerEvents: "none" },
       overlay: { opacity: 1, pointerEvents: "auto" },
     });
+  });
+});
+
+describe("landscape composer focus boundary", () => {
+  const inactive = {
+    native: true,
+    isLandscape: true,
+    fullscreen: false,
+    editorFocused: false,
+    settingsEditorFocused: null,
+  };
+
+  it("collapses on blur and expands on editor focus", () => {
+    expect(resolveComposerCollapsed(inactive)).toBe(true);
+    expect(resolveComposerCollapsed({ ...inactive, editorFocused: true })).toBe(false);
+  });
+
+  it("keeps the opening layout while settings borrow focus", () => {
+    expect(resolveComposerCollapsed({ ...inactive, settingsEditorFocused: true })).toBe(false);
+    expect(
+      resolveComposerCollapsed({
+        ...inactive,
+        editorFocused: true,
+        settingsEditorFocused: false,
+      }),
+    ).toBe(true);
+    expect(resolveComposerCollapsed({ ...inactive, settingsEditorFocused: null })).toBe(true);
+  });
+
+  it("does not collapse non-landscape windows, browser or fullscreen", () => {
+    expect(resolveComposerCollapsed({ ...inactive, isLandscape: false })).toBe(false);
+    expect(resolveComposerCollapsed({ ...inactive, native: false })).toBe(false);
+    expect(resolveComposerCollapsed({ ...inactive, fullscreen: true })).toBe(false);
   });
 });
 

@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as Unistyles from "../../test-stubs/react-native-unistyles";
 import { RootErrorFallback } from "./root-error-boundary";
 
 const { runtime, theme } = vi.hoisted(() => ({
@@ -30,13 +31,19 @@ const { runtime, theme } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("react-native-unistyles", () => ({
-  StyleSheet: {
-    create: (factory: unknown) => (typeof factory === "function" ? factory(theme) : factory),
-  },
-  useUnistyles: () => ({ theme, rt: runtime }),
-  withUnistyles: (component: unknown) => component,
-}));
+vi.mock("react-native-unistyles", async (importOriginal) => {
+  const actual = await importOriginal<typeof Unistyles>();
+  return {
+    ...actual,
+    StyleSheet: {
+      ...actual.StyleSheet,
+      create: (factory: unknown) => (typeof factory === "function" ? factory(theme) : factory),
+    },
+    UnistylesRuntime: runtime,
+    useUnistyles: () => ({ theme, rt: runtime }),
+    withUnistyles: (component: unknown) => component,
+  };
+});
 
 vi.mock("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 47, right: 3, bottom: 34, left: 5 }),

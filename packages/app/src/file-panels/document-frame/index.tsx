@@ -3,6 +3,7 @@ import { Platform, Text, View } from "react-native";
 import { WebView } from "react-native-webview";
 import { StyleSheet } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
+import { useWindowLayoutHasTopEdgeControls } from "@/window-layout";
 
 const frameStyle = { flex: 1, backgroundColor: "white" };
 const originWhitelist = ["*"];
@@ -26,6 +27,7 @@ const ANDROID_INLINE_EXTENSIONS = new Set([
 ]);
 
 export function DocumentFrame({ url, testID }: { url: string; testID?: string }) {
+  const hasTopEdgeControls = useWindowLayoutHasTopEdgeControls();
   const source = useMemo(() => ({ uri: url }), [url]);
   const loaded = useRef<string | null>(null);
   const allowDocument = useCallback(
@@ -46,6 +48,7 @@ export function DocumentFrame({ url, testID }: { url: string; testID?: string })
     <WebView
       testID={testID}
       style={frameStyle}
+      scrollsToTop={!hasTopEdgeControls}
       source={source}
       originWhitelist={originWhitelist}
       onShouldStartLoadWithRequest={allowDocument}

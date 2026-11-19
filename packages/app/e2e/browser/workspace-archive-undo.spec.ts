@@ -12,6 +12,7 @@ import { expectWorkspaceAbsentFromSidebar } from "../support/helpers/sidebar";
 import { createMockIdleAgent, openWorkspaceWithAgents } from "../support/helpers/archive-tab";
 import { connectSeedClient } from "../support/helpers/seed-client";
 import { createTempGitRepo } from "../support/helpers/workspace";
+import { seedDockedSidebarWidth } from "../support/helpers/sidebar-footer-overflow";
 import { getWorkspaceTabTestIds } from "../support/helpers/workspace-tabs";
 import {
   archivedToast,
@@ -25,7 +26,6 @@ import {
   pressUndoShortcut,
   readSidebarListLayout,
   recordLastRowBottomPerFrame,
-  resizeSidebarToMinimum,
   rowArchiveButton,
   rowKebab,
   scrollSidebarListToEnd,
@@ -197,18 +197,34 @@ test.describe("Workspace archive undo", () => {
   test("the archived toast keeps Undo inside the card at the narrowest sidebar", async ({
     page,
   }) => {
+    const minimumSidebarWidth = 200;
+    await seedDockedSidebarWidth(page, minimumSidebarWidth);
     const worktree = await seedWorktree(page, "archive-toast-narrow");
-    await resizeSidebarToMinimum(page);
+    const footer = page.getByTestId("sidebar-footer");
+    // The footer fills the dock up to its 1px divider.
+    await expect
+      .poll(async () => (await footer.boundingBox())?.width)
+      .toBe(minimumSidebarWidth - 1);
 
     await archiveFromRowButton(page, worktree.workspaceId);
 
-    const [toastBox, undoBox] = await Promise.all([
-      page.getByTestId("workspace-archived-toast").boundingBox(),
-      undoButton(page).boundingBox(),
+    const toast = archivedToast(page);
+    const undo = toast.getByRole("button", { name: /^Undo/ });
+    const [sidebarBox, toastBox, undoBox] = await Promise.all([
+      footer.boundingBox(),
+      toast.boundingBox(),
+      undo.boundingBox(),
     ]);
-    if (!toastBox || !undoBox) throw new Error("Toast is not laid out");
+    if (!sidebarBox || !toastBox || !undoBox) throw new Error("Sidebar toast is not laid out");
+    expect(toastBox.x).toBeGreaterThanOrEqual(sidebarBox.x);
+    expect(toastBox.x + toastBox.width).toBeLessThanOrEqual(sidebarBox.x + sidebarBox.width);
+    expect(undoBox.x).toBeGreaterThanOrEqual(toastBox.x);
+    expect(undoBox.y).toBeGreaterThanOrEqual(toastBox.y);
     expect(undoBox.x + undoBox.width).toBeLessThanOrEqual(toastBox.x + toastBox.width);
     expect(undoBox.y + undoBox.height).toBeLessThanOrEqual(toastBox.y + toastBox.height);
+
+    await undo.click();
+    await expect(workspaceRow(page, worktree.workspaceId)).toBeVisible();
   });
 
   test("archiving by shortcut with the sidebar collapsed shows the toast over the app", async ({

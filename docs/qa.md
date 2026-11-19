@@ -37,6 +37,10 @@ The two things that go wrong most often:
 - **Layout shift.** Content that jumps as data arrives, a row that resizes when a badge appears, a panel that reflows on first render. Watch the change on a slow connection and on first load, not just after everything is warm.
 - **Alignment.** Things align to their glyphs, not to their touch targets. See the alignment rules in [design.md](design.md).
 
+For rotation, resize, sidebar allocation, and content reflow, follow
+[layout transition acceptance](layout-transitions.md): the failure inventory, capture matrix,
+and whole-frame adjacent-frame verification.
+
 ## Does it regress anything else
 
 Paseo is composable by design, which means your change sits next to features you didn't touch. Open the surfaces around it. A change to the agent list affects archive, subagents, and tabs; a change to git actions affects worktrees and the checkout flow.

@@ -32,15 +32,17 @@ export function useContainerWidth(): {
  */
 export function useContainerWidthBelow(
   threshold: number,
-  options?: { initialIsBelow?: boolean },
+  options?: { initialIsBelow?: boolean; allocatedWidth?: number | null },
 ): {
   onLayout: (e: LayoutChangeEvent) => void;
   isBelow: boolean;
 } {
   const [isBelow, setIsBelow] = useState(options?.initialIsBelow ?? true);
+  const allocatedWidth = options?.allocatedWidth;
   return {
     onLayout: useCallback(
       (e: LayoutChangeEvent) => {
+        if (allocatedWidth != null) return;
         const width = readMeasuredWidth(e);
         if (width === null) {
           return;
@@ -50,8 +52,8 @@ export function useContainerWidthBelow(
           currentIsBelow === nextIsBelow ? currentIsBelow : nextIsBelow,
         );
       },
-      [threshold],
+      [allocatedWidth, threshold],
     ),
-    isBelow,
+    isBelow: allocatedWidth != null ? allocatedWidth < threshold : isBelow,
   };
 }

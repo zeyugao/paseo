@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as Unistyles from "../../../test-stubs/react-native-unistyles";
 import { Switch } from "./switch";
 
 const { theme } = vi.hoisted(() => ({
@@ -75,19 +76,26 @@ vi.mock("react-native", () => ({
     ),
 }));
 
-vi.mock("react-native-unistyles", () => ({
-  StyleSheet: {
-    create: (factory: unknown) => (typeof factory === "function" ? factory(theme) : factory),
-  },
-  withUnistyles:
-    (
-      Component: React.ComponentType<Record<string, unknown>>,
-      mapping?: (theme: unknown) => object,
-    ) =>
-    (props: Record<string, unknown>) =>
-      React.createElement(Component, { ...props, ...mapping?.(theme) }),
-  useUnistyles: () => ({ theme, rt: { breakpoint: "md" } }),
-}));
+vi.mock("react-native-unistyles", async (importOriginal) => {
+  const actual = await importOriginal<typeof Unistyles>();
+  const runtime = { breakpoint: "md" };
+  return {
+    ...actual,
+    StyleSheet: {
+      ...actual.StyleSheet,
+      create: (factory: unknown) => (typeof factory === "function" ? factory(theme) : factory),
+    },
+    UnistylesRuntime: runtime,
+    withUnistyles:
+      (
+        Component: React.ComponentType<Record<string, unknown>>,
+        mapping?: (theme: unknown) => object,
+      ) =>
+      (props: Record<string, unknown>) =>
+        React.createElement(Component, { ...props, ...mapping?.(theme) }),
+    useUnistyles: () => ({ theme, rt: runtime }),
+  };
+});
 
 describe("Switch", () => {
   let root: Root | null = null;

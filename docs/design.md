@@ -67,14 +67,23 @@ The button is `<Button>` (`packages/app/src/components/ui/button.tsx`). It has f
 Header and toolbar controls use `interactionHighlight` for hovered, pressed, open, and selected
 backgrounds. It is a translucent semantic fill so the same control works over the main surface and
 the sidebar. Apply it as `backgroundColor`; setting `opacity` on the control also fades its content.
+Landscape workspace Git menus use the shared borderless icon chrome. Changes-pane menus keep their framed trigger; full split buttons keep their primary action and caret.
 
 `destructive` is filled with `destructive`. It only appears inside a confirm. The button on the page is `outline`; the destructive button is the confirm button inside the dialog.
 
 Controls come in two sizes, defined once in `control-geometry.ts`. The default is the right size almost everywhere — pages, dialogs, forms, settings rows, the setup flow — so don't pass a size. It is 32px tall where a pointer drives it and 44px where controls are touch-sized, so every touch control meets the iOS HIG's 44pt hit region. `sm` is 28px pointer and 32px touch, with `fontSize.sm` labels, and is for tight chrome only: toolbars, nested settings rows, dense inline row actions. A `size="sm"` on an ordinary page or dialog is wrong, and so is choosing a size from `useIsCompactFormFactor()`.
 
-Dense toolbar rows, such as the composer's, are the exception to the 44pt control. Touch-sized the row is 44pt tall and each control is a 36pt circle (`TOOLBAR_DISC_SIZE`): send and stop fill it, and every other control's pressed highlight fills it, so every highlight is the same fully rounded shape. Labelled pickers are 36pt pills. A control lays out at its full highlight (`toolbarSlot`, `toolbarContentSlot`) with no gap between controls (`TOOLBAR_CONTROL_GAP`), so neighbouring highlights touch and never overlap. Touch-sized toolbar glyphs are 20pt at the app's 1.5px stroke. An icon-only control's glyph matches the header icons and rests at `foreground`; a glyph beside a label rests at `foregroundMuted` so the two read as one quiet unit (`toolbarGlyphsFor`). The context ring is 18pt with a 2px stroke (`TOOLBAR_RINGS`): a circle fills its box where an outline glyph does not, and a thin circle reads lighter than a glyph at the same stroke. A disc's solid glyph, such as the stop square, stays at the `md` size (`TOOLBAR_DISC_GLYPH_SIZES`). Pointer-sized toolbars keep 28px controls, a 4px gap, and a 16pt muted glyph that brightens on hover.
+Dense toolbar rows, such as the composer's, are the exception to the 44pt control. Touch-sized the row is 44pt tall, neutral icon controls have 36pt circular highlights (`TOOLBAR_DISC_SIZE`), and labelled pickers are 36pt pills. Filled composer actions use 28pt discs with 16pt icons inside 36pt click targets in every layout. A control lays out at its full highlight (`toolbarSlot`, `toolbarContentSlot`) with no gap between controls (`TOOLBAR_CONTROL_GAP`), so neighbouring highlights touch and never overlap. Touch-sized toolbar glyphs are 20pt at the app's 1.5px stroke. Neutral glyphs rest at `foregroundMuted`, with or without a label; hover can brighten them where a pointer is available (`toolbarGlyphsFor`). The context ring is 18pt with a 2px stroke (`TOOLBAR_RINGS`): a circle fills its box where an outline glyph does not, and a thin circle reads lighter than a glyph at the same stroke. Pointer-sized toolbars keep 28px controls, a 4px gap, and a 16pt glyph.
 
-In the composer, the first glyph's ink starts on the text column's edge, and the trailing control is always a disc, so the row does not shift as it changes between voice mode, send and stop. The disc nests into the corner, as far from the right edge as from the bottom, and touch-sized the composer's corner radius is concentric with it (`packages/app/src/composer/input/toolbar-rails.ts`). Touch-sized the disc keeps a 6pt clearance from its neighbour, because it is always painted and a pressed neighbour would merge with it. The attach button sits 2pt closer to the picker than its highlight would put it: the plus is all thin arms, so the full gap reads wide. That offset is set by eye.
+In the composer, the first glyph's ink starts on the text column's edge, and the trailing control is always a disc, so the row does not shift as it changes between voice mode, send and stop. The disc nests into the corner, as far from the right edge as from the bottom, and touch-sized the composer's corner radius is concentric with it (`packages/app/src/composer/input/toolbar-rails.ts`). Shrinking its painted disc must not shrink the trailing slot or move the toolbar rails. The attach button sits 2pt closer to the picker than its highlight would put it: the plus is all thin arms, so the full gap reads wide. That offset is set by eye.
+
+Treat the editor's height and padding, attachment spacing, and editor-to-toolbar gap independently. Tightening the toolbar gap must not compress the editing surface or the space around attachments; keep the toolbar's full hit targets. The input's bottom clearance is identical in one- and two-row layouts: expand upward, never reserve the removed row below it. The single-row landscape composer must not inherit the taller footer's minimum-height reservation; retain only the normal tracker-to-input gap. Animate same-window focus changes locally on the border-painted native host, keeping the editor mounted and respecting reduced motion. Intrinsic height and row mode must commit together: rotation must not wait for a later content measurement or retain an in-flight focus frame. Do not use a global next-layout animation: keyboard capacity changes and intrinsic editor measurements arrive independently. Report the target height to the transcript, not every animation frame.
+
+Native landscape uses a single composer row while its editor is inactive: attach on the left, text in the middle, then one combined provider-logo/model/reasoning picker, the context window meter, dictation, and the trailing voice/send/stop disc. Keep the inactive placeholder on one line, truncating it when space runs out. The combined picker opens the complete existing model sheet; reasoning, permission, and provider features are not separate toolbar controls. Keep the context meter and its usage details available in both row layouts. Bound the picker to leave text-entry space, truncating or dropping its labels through the existing density rules without wrapping or shrinking its touch target. Editor focus restores the ordinary two-row composer, and blur collapses it. A settings popup holds the layout it opened from while borrowing focus, and closing one opened from the collapsed row must not focus the editor. Keep the editor mounted in the same tree through these changes, preserving its text and selection. Use app-window bounds, not a narrow pane's aspect ratio; portrait and browser layouts do not collapse.
+
+The tracker row above the composer reserves transcript space only for visible pill content. Its jump-to-latest action is a 32pt circle in a fixed trailing slot, outside the horizontal scroller. Do not include that action in the reserved height: changing scroll-follow state must not create an empty row or change the scroll extent.
+
+The whole composer surface focuses its editor when tapped, including its padding. Nested controls keep their own actions; a container must not take focus from a picker or interrupt text selection.
 
 One gate, `resolveControlSizing`, picks touch or pointer sizing: touch when the layout is compact or touch is the primary input. An iPad with the sidebar docked is wide and touch-sized; a desktop is pointer-sized; a phone is both compact and touch. The primary input comes from `(pointer: coarse)` (`hasTouchPrimaryPointer` in `hooks/pointer-capabilities.ts`), not from whether a touch screen exists: WebKit keeps touch primary on an iPad with a trackpad attached, and Chromium reports a fine primary pointer for a laptop with a touch screen that its trackpad drives. The fact is read once at startup: attaching a pointer to a tablet does not shrink its controls, and a 2-in-1 launched with a pointer keeps pointer sizes after it switches to tablet mode until the app reloads. Stylesheets take sizes from `bySizing({ touch, pointer })`, which resolves to a breakpoint value, so a caller never sees which sizing it got. Rows, icon buttons and icon slots take theirs from `styles/density.ts`, which uses the same gate. An `{ xs, md }` literal for a hit target or glyph is wrong: on an iPad it yields the pointer size.
 
@@ -150,6 +159,12 @@ Pick the rails from the content, then hold them. A settings card establishes a l
 
 The pressable is bigger than the glyph, and that is fine. Hit areas grow outward from the aligned content — they never move it. A button that looks two pixels off because its padding is asymmetric is misaligned even though its box is correct. The composer toolbar is the worked example: its outermost ink, the attach `+` on the left and the trailing glyph or send/stop disc on the right, sits on the text column's edges, and touch-sized the end highlights overhang into the composer padding by each end control's ink inset (`composerToolbarOverhang`).
 
+Header navigation uses `HeaderLeading` to keep the visible edge-to-glyph and glyph-to-title gaps
+equal. The frame reserves window clearance once; the control keeps its touch size and never shifts
+itself when the sidebar opens, closes, or changes presentation. Without navigation, the title
+starts on the same content rail. A window-control placeholder reserves a real slot; navigation
+moved into the system bar leaves no placeholder in the header.
+
 Optical alignment beats arithmetic when a glyph disagrees with its bounding box. Icons with visual weight on one side, chevrons, and single-character labels usually need a small nudge to look centered. Trust the eye, then leave a comment saying the offset is optical.
 
 One row off the rail makes the whole card look unconsidered.
@@ -171,6 +186,24 @@ The branching is one `useIsCompactFormFactor()` check at the top of the screen c
 
 The workspace screen (`packages/app/src/screens/workspace/workspace-screen.tsx`) follows a different but parallel rule: tabs collapse on compact, panes split on desktop. The sidebar (`packages/app/src/components/left-sidebar.tsx`) is overlaid on compact and pinned on desktop.
 
+Portrait workspace chrome uses one header row, with the inset top-bar placement described in
+[Explorer](explorer-sidebar.md#panel-host-contract). Tabs sit beside the workspace title when
+they fit; otherwise the picker occupies the trailing slot. Do not add a second tab row or
+shrink touch targets to make the row fit. A resolved native leading or trailing bar selects
+workspace actions by its reported guide, regardless of window orientation.
+
+Mirror system clearance for the conversation and Composer only on an expanded hinge without
+pinned navigation or Explorer. An overlay does not count as pinned. Read hinge state through
+`UIHingeInteraction`; a closed, unknown, or unavailable hinge gets no compensation. On the
+full-display iOS conversation, apply the mirrored inset to a shared content parent in the same
+Fabric transaction as the system clearance. Deduct it once in width budgets; do not replay it
+from `onLayout` or add it again in the list or tracker rail. The tab row keeps its full width.
+For other native hosts that balance a bar, use the measured content aspect after the header and
+bar take their space; portrait and square allocations get no compensation.
+
+Compact and wide navigation share the [header alignment contract](#8-alignment); moving navigation
+into the native window bar changes its presence, not the content gutter.
+
 On a narrow window using the wide layout, app navigation yields when the remaining width cannot accommodate the content topology. Settings prefers a 720px split (320px list + 400px detail); its list shrinks first to keep forms readable without reducing the detail below 400px. Explorer reserves at least 240px plus a 360px workspace. These are local space budgets, not compact breakpoints. The app sidebar shrinks from its preferred 320px toward a 200px minimum to leave a 400px center target; its preferred width fits at 720px. Temporary width clamps are render-only; widening restores the user's saved sidebar widths.
 
 Electron window controls are top-corner obstructions, not a compact-layout condition. Rendered surfaces declare which top corners they physically occupy; only those corners receive clearance. Full-window overlays redeclare both corners. A focused split pane owns both corners; if focus restoration temporarily exposes the full split tree, the split boundary reserves one top strip instead of assigning a control rectangle to an arbitrarily narrow leaf.
@@ -178,6 +211,10 @@ Electron window controls are top-corner obstructions, not a compact-layout condi
 Windows and Linux controls are fixed window chrome, outside scrolling header content. A tab rail that reaches them ends at their obstruction and shows the shared overflow fade. On macOS, the Explorer toggle occupies a fixed top-right window slot so opening and closing Explorer does not move the pointer target.
 
 Each window edge has one safe-area owner. `WindowLayoutProvider` publishes the bottom inset that every surface reads through `useSafeAreaInsets()`: on iOS 27.1 and later it is UIKit's bottom-bar clearance, which refines the rectangular home-indicator inset to the screen's corners, and elsewhere the system inset. Surfaces apply that value once and never stack their own spacing under it; `WindowLayoutSurface` owns the horizontal insets the same way.
+
+A vertical system bar can remove the reusable top band while the physical window corners remain.
+Measure header corner clearance independently. It is not a system-control obstruction and must not
+hide navigation or reserve another row.
 
 A new list+detail feature copies the settings shell. A new workspace-shaped feature copies the workspace shell. Inventing a third shape happens in design review, not in a PR.
 
@@ -256,6 +293,8 @@ Status pills use the status token for text on the shared `surface3` and `border`
 Status dots — the small filled circles next to a host or agent name — are `borderRadius.full` filled with the status token. Which token a given agent state maps to is owned by `getStatusDotColor` (`packages/app/src/utils/status-dot-color.ts`); a row, a group header, and a project icon all call it rather than restating the mapping. They sit in the trailing slot of a sidebar row or as a leading marker on a status pill.
 
 Identity badges — the project icon, the sidebar host badge, and the PR-panel participant avatar — do not use the theme palette. They draw from the fixed ten-color identity table in `packages/app/src/styles/identity-colors.ts`, whose hexes are held to one contrast band so a color identifies rather than ranks. Project icons and PR avatars use it as a fill with a white letter — that is `identityColor`, one theme-independent hex per identity. Host badges use it as a _foreground_ on both the glyph and the label, which is a different contrast problem that the fill table cannot solve: no single hex clears 4.5:1 against both a near-white and a dark sidebar. Foregrounds therefore come from `identityForeground(name, colorScheme)`, one set per scheme, hue unchanged. That set is generated on the **status family's** lightness and chroma fraction, because a meta row puts a host badge beside a CI check and a diff stat, and two families at different lightness make the brighter one shout. Change the status band and this one changes with it. A host with no color assigned falls back to `foregroundMuted`. The table is theme-independent by design; do not fork it per theme, and do not add hexes to it without recomputing the band.
+
+Workspace metadata shares one width budget. Keep work identifiers (PR numbers and branch names) longer than repeated context (host and project names) or words already encoded by a status glyph. Collapse whole text fields, preserve their markers and accessible names, and restore text as the column grows. Labels become a tags glyph; their full names remain available through accessibility and desktop tooltips. Only a row whose markers alone cannot fit may wrap. The collapse order lives in `packages/app/src/components/sidebar/workspace-meta-row/presentation.ts`.
 
 New status pills use `<StatusBadge>`. Identity, shortcut, and interactive link badges remain separate because color does not encode status there.
 

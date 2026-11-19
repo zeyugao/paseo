@@ -1,6 +1,74 @@
 import { describe, expect, it } from "vitest";
 import { deriveWorkspaceTabModel } from "@/screens/workspace/workspace-tab-model";
 import type { WorkspaceTab } from "@/workspace-tabs/model";
+import { selectWorkspaceTabAttention } from "./workspace-tab-attention";
+import { deriveSidebarStateBucket, type SidebarStateBucket } from "@/utils/sidebar-agent-state";
+
+describe("listed workspace tab attention", () => {
+  const tabs = deriveWorkspaceTabModel({
+    tabs: [
+      { tabId: "agent-a", target: { kind: "agent", agentId: "a" }, createdAt: 1 },
+      { tabId: "agent-b", target: { kind: "agent", agentId: "b" }, createdAt: 2 },
+    ],
+    focusedTabId: "agent-a",
+  }).tabs.map((tab) => tab.descriptor);
+
+  it("includes the active tab and never lets running mask attention", () => {
+    const buckets: Record<string, SidebarStateBucket> = { a: "attention", b: "running" };
+    expect(
+      selectWorkspaceTabAttention(tabs, (target) =>
+        target.kind === "agent" ? (buckets[target.agentId] ?? null) : null,
+      ),
+    ).toBe("attention");
+  });
+
+  it("prioritizes pending permissions even when the agent is running", () => {
+    expect(
+      selectWorkspaceTabAttention(tabs, () =>
+        deriveSidebarStateBucket({
+          status: "running",
+          pendingPermissionCount: 1,
+          requiresAttention: false,
+          attentionReason: null,
+        }),
+      ),
+    ).toBe("needs_input");
+  });
+
+  it("clears when the last offending tab is removed or its status clears", () => {
+    const buckets = new Map<string, SidebarStateBucket>([
+      ["a", "failed"],
+      ["b", "running"],
+    ]);
+    const read = (target: (typeof tabs)[number]["target"]) =>
+      target.kind === "agent" ? (buckets.get(target.agentId) ?? null) : null;
+    expect(selectWorkspaceTabAttention(tabs, read)).toBe("failed");
+    expect(selectWorkspaceTabAttention(tabs.slice(1), read)).toBeNull();
+    buckets.set("a", "done");
+    expect(selectWorkspaceTabAttention(tabs, read)).toBeNull();
+    expect(selectWorkspaceTabAttention([], read)).toBeNull();
+  });
+
+  it("reads terminal and provider subagent tabs without including unlisted statuses", () => {
+    const listed = deriveWorkspaceTabModel({
+      tabs: [
+        { tabId: "terminal", target: { kind: "terminal", terminalId: "term" }, createdAt: 1 },
+        {
+          tabId: "child",
+          target: { kind: "provider_subagent", parentAgentId: "p", subagentId: "s" },
+          createdAt: 2,
+        },
+      ],
+    }).tabs.map((tab) => tab.descriptor);
+    expect(
+      selectWorkspaceTabAttention(listed, (target) => {
+        if (target.kind === "terminal") return "attention";
+        if (target.kind === "provider_subagent") return "failed";
+        return "needs_input";
+      }),
+    ).toBe("failed");
+  });
+});
 
 describe("deriveWorkspaceTabModel", () => {
   it("keeps normalized tabs in stored order and preserves targets", () => {

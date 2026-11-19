@@ -24,7 +24,6 @@ import {
   ScrollView,
   StyleSheet as RNStyleSheet,
   Text,
-  useWindowDimensions,
   View,
   type LayoutChangeEvent,
 } from "react-native";
@@ -45,8 +44,18 @@ import { SidebarCloseButton } from "@/components/headers/sidebar-close-button";
 import {
   resolveDesktopSidebarInsetLeft,
   resolveDesktopSidebarWidth,
+  usesNativeFlexibleDock,
 } from "@/components/desktop-sidebar-layout";
-import { useTopBand, useWindowLayout, resolveDesktopDivisionLayout } from "@/window-layout";
+import {
+  useTopBand,
+  useWindowLayout,
+  resolveDesktopDivisionLayout,
+  WindowLayoutTopInset,
+  WindowLayoutGeometryView,
+  resolveWorkspaceActionPlacement,
+} from "@/window-layout";
+import { useAppWindowSize } from "@/hooks/use-app-window-size";
+import { usePublishSidebarResizeWidth } from "@/window-layout/sidebar-resize-geometry";
 import {
   SIDEBAR_RESIZE_ACTIVATION_OFFSET,
   SIDEBAR_RESIZE_FAIL_OFFSET,
@@ -66,6 +75,7 @@ import {
 } from "@/components/sidebar-footer-layout";
 import {
   controlSizingForLayout,
+  bySizing,
   mapLayout,
   TOOLBAR_CONTROL_SIZES,
 } from "@/components/ui/control-geometry";
@@ -74,7 +84,11 @@ import { DensityIcon } from "@/components/ui/density-icon";
 import { SidebarSectionHeader } from "@/components/sidebar/sidebar-section-header";
 import { Shortcut } from "@/components/ui/shortcut";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { HEADER_INNER_HEIGHT, useIsCompactFormFactor } from "@/constants/layout";
+import {
+  HEADER_INNER_HEIGHT,
+  HEADER_TOP_PADDING_MOBILE,
+  useIsCompactFormFactor,
+} from "@/constants/layout";
 import { isNative as platformIsNative } from "@/constants/platform";
 import { useOpenAddProject } from "@/hooks/use-open-add-project";
 import { useImportSession } from "@/hooks/use-import-session";
@@ -95,8 +109,12 @@ import { useHosts } from "@/runtime/host-runtime";
 import { PluginSidebarItem } from "@/plugins/sidebar-items";
 import { builtinSidebarNavLabelKey } from "@/sidebar-nav/model";
 import { useSidebarNavItems } from "@/sidebar-nav/use-sidebar-nav-items";
-import { usePanelStore } from "@/stores/panel-store";
-import { useOwnsWindowChromeCorner, WindowChromeSafeArea } from "@/utils/desktop-window";
+import { MIN_SIDEBAR_WIDTH, usePanelStore } from "@/stores/panel-store";
+import {
+  useHasOwnedWindowChromeObstruction,
+  useWindowChromeInlinePadding,
+  WindowChromeSafeArea,
+} from "@/utils/desktop-window";
 import { useCloseAgentListGesture } from "@/mobile-panels/gestures";
 import { useLeftPanelWidth } from "@/mobile-panels/provider";
 import { MobilePanelOverlay } from "@/mobile-panels/presentation";
@@ -112,8 +130,6 @@ type SidebarTheme = ReturnType<typeof useUnistyles>["theme"];
 
 /** The footer icon line's inset; the overflow layout counts it as space the buttons can't use. */
 const FOOTER_ROW_PADDING = SPACING[2];
-
-const DEV_BUILD_LABEL = process.env.EXPO_PUBLIC_PASEO_DEV_BUILD_LABEL?.trim() || null;
 
 interface SidebarSharedProps {
   theme: SidebarTheme;
@@ -151,13 +167,11 @@ interface SidebarLabels {
 
 interface MobileSidebarProps extends SidebarSharedProps {
   active: boolean;
-  insetsTop: number;
   insetsBottom: number;
   closeSidebar: () => void;
 }
 
 interface DesktopSidebarProps extends SidebarSharedProps {
-  insetsTop: number;
   active: boolean;
   overlay: boolean;
 }
@@ -219,7 +233,11 @@ export const LeftSidebar = memo(function LeftSidebar({
     openSettingsFromSidebar({ workspace: activeWorkspace, isCompact: isCompactLayout });
   }, [activeWorkspace, isCompactLayout]);
 
-  const handleAddHost = useAddHost();
+  const openAddHost = useAddHost();
+  const handleAddHost = useCallback(() => {
+    showMobileAgent();
+    openAddHost();
+  }, [showMobileAgent, openAddHost]);
 
   const handleOpenHostSettings = useCallback(
     (serverId: string) => {
@@ -280,18 +298,11 @@ export const LeftSidebar = memo(function LeftSidebar({
             {...sharedProps}
             {...handlers}
             active={active}
-            insetsTop={insets.top}
             insetsBottom={insets.bottom}
             closeSidebar={showMobileAgent}
           />
         ) : (
-          <DesktopSidebar
-            {...sharedProps}
-            {...handlers}
-            insetsTop={insets.top}
-            active={active}
-            overlay={desktopOverlay}
-          />
+          <DesktopSidebar {...sharedProps} {...handlers} active={active} overlay={desktopOverlay} />
         )}
       </RetainedPanelActivity>
       {importSessionSheet}
@@ -588,11 +599,12 @@ function MobileSidebar({
   labels,
   handleAddHost,
   handleOpenHostSettings,
-  insetsTop,
   insetsBottom,
   closeSidebar,
 }: MobileSidebarProps) {
   const insets = useSafeAreaInsets();
+  const inTopBand = useTopBand() !== null;
+  const closesInBar = resolveWorkspaceActionPlacement(useWindowLayout()) === "vertical-bar";
   const hasActiveHostFilter = useSidebarViewStore((state) => state.hostFilters.length > 0);
   const { gesture: closeGesture, gestureRef: closeGestureRef } = useCloseAgentListGesture();
 
@@ -615,18 +627,20 @@ function MobileSidebar({
 
   const mobileSidebarInsetStyle = useMemo(
     () => ({
-      paddingTop: insetsTop,
       paddingBottom: insetsBottom,
       backgroundColor: theme.colors.surfaceSidebar,
     }),
-    [insetsTop, insetsBottom, theme.colors.surfaceSidebar],
+    [insetsBottom, theme.colors.surfaceSidebar],
   );
 
   const navRows = (
     <SidebarNavRows
-      style={styles.mobileNavRowsGroup}
+      style={[
+        styles.mobileNavRowsGroup,
+        (platformIsNative || inTopBand) && styles.sidebarHeaderGroupFlush,
+      ]}
       onBeforeNavigate={closeSidebar}
-      firstRowTrailing={closeButton}
+      firstRowTrailing={closesInBar ? undefined : closeButton}
     />
   );
 
@@ -637,6 +651,10 @@ function MobileSidebar({
       panelStyle={mobileSidebarInsetStyle}
     >
       <View style={styles.sidebarContent} pointerEvents="auto">
+        <WindowLayoutTopInset
+          additionalPadding={platformIsNative ? SPACING[4] : 0}
+          landscapePadding={HEADER_TOP_PADDING_MOBILE}
+        />
         <WindowChromeSafeArea placement="below" />
         <SidebarNavScroll closeGestureRef={closeGestureRef}>{navRows}</SidebarNavScroll>
 
@@ -725,7 +743,6 @@ function SidebarNavScroll({ closeGestureRef, windowContent, children }: SidebarN
 }
 
 function DesktopSidebar({
-  theme,
   workspaceGroups,
   projectIconTargets,
   pinnedGroups,
@@ -747,42 +764,73 @@ function DesktopSidebar({
   labels,
   handleAddHost,
   handleOpenHostSettings,
-  insetsTop,
   active,
   overlay,
 }: DesktopSidebarProps) {
-  const ownsTopLeft = useOwnsWindowChromeCorner("top-left");
+  const ownsTopLeft = useHasOwnedWindowChromeObstruction("top-left");
+  const chromePadding = useWindowChromeInlinePadding();
+  const windowLayout = useWindowLayout();
+  const hasVerticalBar = resolveWorkspaceActionPlacement(windowLayout) === "vertical-bar";
   const hasActiveHostFilter = useSidebarViewStore((state) => state.hostFilters.length > 0);
   const setSidebarWidth = usePanelStore((state) => state.setSidebarWidth);
-  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const { width: windowWidth, height: windowHeight } = useAppWindowSize();
   const insets = useSafeAreaInsets();
   const viewportWidth = windowWidth - insets.left - insets.right;
   const divisionLayout = resolveDesktopDivisionLayout({
-    geometry: useWindowLayout(),
+    geometry: windowLayout,
     windowWidth,
     windowHeight,
     leftInset: insets.left,
     rightInset: insets.right,
   });
   const visibleSidebarWidth = useLeftPanelWidth();
+  const requestedWidth = usePanelStore((state) => state.sidebarWidth);
+  const dockFillsAvailableSpace = usesNativeFlexibleDock(!overlay, divisionLayout !== null);
+  const widthBeforeDrag = dockFillsAvailableSpace ? requestedWidth : visibleSidebarWidth;
+  const resizeEnabled = active && !overlay && divisionLayout === null;
+  const publishSidebarResizeWidth = usePublishSidebarResizeWidth();
+  const resizePublication = useMemo(
+    () => ({
+      active: false,
+      enabled: resizeEnabled,
+      width: visibleSidebarWidth,
+      publish: publishSidebarResizeWidth,
+    }),
+    [publishSidebarResizeWidth, resizeEnabled, visibleSidebarWidth],
+  );
+  const publishResizeWidth = useCallback(
+    (width: number | null) => {
+      if (resizePublication.active) resizePublication.publish(width);
+    },
+    [resizePublication],
+  );
 
   const closeSidebar = usePanelStore((state) => state.showMobileAgent);
   const { gesture: closeGesture, gestureRef: closeGestureRef } = useCloseAgentListGesture(overlay);
 
   const startWidth = useSharedValue(visibleSidebarWidth);
-  const resizeWidth = useSharedValue(visibleSidebarWidth);
+  const resizeWidth = useSharedValue(widthBeforeDrag);
+  const resizing = useSharedValue(false);
   const [resizePressed, setResizePressed] = useState(false);
   const showResizeGrip = useCallback(() => setResizePressed(true), []);
   const hideResizeGrip = useCallback(() => setResizePressed(false), []);
 
   useEffect(() => {
-    resizeWidth.value = visibleSidebarWidth;
-  }, [resizeWidth, visibleSidebarWidth]);
+    resizePublication.active = resizePublication.enabled;
+    resizing.value = false;
+    resizeWidth.value = widthBeforeDrag;
+    setResizePressed(false);
+    return () => {
+      // Reject queued updates from the old allocation after clearing its sample.
+      resizePublication.active = false;
+      resizePublication.publish(null);
+    };
+  }, [resizePublication, resizeWidth, resizing, widthBeforeDrag]);
 
   const resizeGesture = useMemo(
     () =>
       Gesture.Pan()
-        .enabled(divisionLayout === null)
+        .enabled(resizeEnabled)
         .hitSlop({ left: 8, right: 8, top: 0, bottom: 0 })
         .onBegin(() => {
           scheduleOnRN(showResizeGrip);
@@ -793,88 +841,110 @@ function DesktopSidebar({
         .activeOffsetX([-SIDEBAR_RESIZE_ACTIVATION_OFFSET, SIDEBAR_RESIZE_ACTIVATION_OFFSET])
         .failOffsetY([-SIDEBAR_RESIZE_FAIL_OFFSET, SIDEBAR_RESIZE_FAIL_OFFSET])
         .onStart((event) => {
+          resizing.value = true;
           startWidth.value = visibleSidebarWidth - event.translationX;
           resizeWidth.value = visibleSidebarWidth;
+          runOnJS(publishResizeWidth)(resizeWidth.value);
         })
         .onUpdate((event) => {
+          if (!resizing.value) return;
           // Dragging right (positive translationX) increases width
           const newWidth = startWidth.value + event.translationX;
           resizeWidth.value = resolveDesktopSidebarWidth({
             requestedWidth: newWidth,
             viewportWidth,
           });
+          runOnJS(publishResizeWidth)(resizeWidth.value);
         })
         .onEnd((_event, success) => {
-          if (success) runOnJS(setSidebarWidth)(resizeWidth.value);
+          if (success && resizing.value) runOnJS(setSidebarWidth)(resizeWidth.value);
         })
-        .onFinalize(() => {
+        .onFinalize((_event, success) => {
+          if (!success && resizing.value) resizeWidth.value = widthBeforeDrag;
+          resizing.value = false;
+          runOnJS(publishResizeWidth)(null);
           scheduleOnRN(hideResizeGrip);
         }),
     [
-      divisionLayout,
+      resizeEnabled,
       hideResizeGrip,
+      publishResizeWidth,
       resizeWidth,
+      resizing,
       setSidebarWidth,
       showResizeGrip,
       startWidth,
       viewportWidth,
       visibleSidebarWidth,
+      widthBeforeDrag,
     ],
   );
 
-  const resizeAnimatedStyle = useAnimatedStyle(() => ({
-    width: divisionLayout?.sidebarWidth ?? resizeWidth.value,
+  // When docked, Yoga clamps the requested width against the center's minimum
+  // in the same layout that mounts the current native safe-area spacers.
+  const dockWidthStyle = useAnimatedStyle(() => ({
+    width: dockFillsAvailableSpace ? resizeWidth.value : undefined,
   }));
-  // The panel host gets no width of its own: the dock sizes to this view and the overlay fills the
-  // window. A Reanimated width on the host reached Android after React had switched presentation,
-  // and a lost update left the workspace at the dock width after the dock collapsed.
+  // The dock host can grow after a viewport clamp. Resolve the inner panel's
+  // width against that allocation so its fill, divider, and grip share the edge.
+  const resizeAnimatedStyle = useAnimatedStyle(() => ({
+    width: dockFillsAvailableSpace
+      ? ("100%" as const)
+      : (divisionLayout?.sidebarWidth ?? resizeWidth.value),
+  }));
+  // Other docks size to this child; moving the animated width onto the host on Android
+  // can leave a stale width there when Android switches presentation.
   const desktopSidebarStyle = useMemo(
     () => [staticStyles.desktopSidebar, resizeAnimatedStyle],
     [resizeAnimatedStyle],
   );
-  const desktopSidebarBorderStyle = useMemo(
+  const desktopSidebarSurfaceStyle = useMemo(
     () => [
-      styles.desktopSidebarBorder(divisionLayout !== null),
+      styles.desktopSidebarSurface,
+      divisionLayout === null && styles.desktopSidebarDividerInset,
       {
         flex: 1,
-        paddingTop: insetsTop,
         paddingBottom: insets.bottom,
-        paddingLeft: resolveDesktopSidebarInsetLeft({ overlay, safeAreaLeft: insets.left }),
+        paddingLeft: resolveDesktopSidebarInsetLeft({
+          overlay,
+          safeAreaLeft: insets.left,
+          hasVerticalBar,
+        }),
       },
     ],
-    [insetsTop, insets.bottom, insets.left, overlay, divisionLayout],
+    [insets.bottom, insets.left, overlay, divisionLayout, hasVerticalBar],
   );
-  const inTopBand = useTopBand() !== null;
-  // Windows and Linux draw their window controls top-right, so the sidebar has no chrome
-  // row there. The strip above the scrolling rows is then its window drag surface.
-  const showsChromeRow = ownsTopLeft || Boolean(DEV_BUILD_LABEL);
-  // With every top item hidden the sidebar starts at the Workspaces section, as before the
-  // nav scroller existed: no strip above it and no divider below it.
-  const hasNavRows = useVisibleSidebarNavItems().length > 0;
-  const showsDragStrip = hasNavRows && !showsChromeRow && !inTopBand;
+  const { devBuildLabel, showsChromeRow, hasNavRows, showsDragStrip } =
+    useSidebarNavChrome(ownsTopLeft);
+  const { theme } = useUnistyles();
   return (
     <MobilePanelOverlay
       panel="agent-list"
       presentation={overlay ? "overlay" : "dock"}
       dockVisible={active}
+      frameStyle={dockFillsAvailableSpace ? [staticStyles.flexibleDock, dockWidthStyle] : undefined}
       closeGesture={closeGesture}
     >
       <Animated.View style={desktopSidebarStyle}>
-        <View style={desktopSidebarBorderStyle}>
-          <View style={styles.sidebarDragArea}>
+        <View style={desktopSidebarSurfaceStyle}>
+          <WindowLayoutTopInset
+            additionalPadding={platformIsNative && !ownsTopLeft ? SPACING[4] : 0}
+            landscapePadding={HEADER_TOP_PADDING_MOBILE}
+          />
+          <WindowLayoutGeometryView style={[styles.sidebarDragArea, chromePadding]}>
             {showsChromeRow ? (
               <View style={styles.desktopChromeRow}>
                 <TitlebarDragRegion />
-                {DEV_BUILD_LABEL ? (
+                {devBuildLabel ? (
                   <View
                     pointerEvents="none"
                     style={styles.devBuildBadge}
                     testID="dev-build-label"
-                    accessibilityLabel={`Development build: ${DEV_BUILD_LABEL}`}
+                    accessibilityLabel={`Development build: ${devBuildLabel}`}
                   >
                     <GitBranch size={12} color={theme.colors.accentForeground} />
                     <Text numberOfLines={1} ellipsizeMode="tail" style={styles.devBuildBadgeText}>
-                      {DEV_BUILD_LABEL}
+                      {devBuildLabel}
                     </Text>
                   </View>
                 ) : null}
@@ -885,7 +955,7 @@ function DesktopSidebar({
                 <TitlebarDragRegion />
               </View>
             ) : null}
-          </View>
+          </WindowLayoutGeometryView>
           {/* The drag overlay stays above this viewport: Electron does not clip
               app-region rects to scroll viewports, so a scrolled-out row would
               still claim its no-drag rect. */}
@@ -936,6 +1006,10 @@ function DesktopSidebar({
             onBeforeNavigate={closeSidebar}
           />
 
+          {divisionLayout === null ? (
+            <View pointerEvents="none" style={styles.desktopSidebarDivider} />
+          ) : null}
+
           {!overlay && divisionLayout === null ? (
             <SidebarResizeHandle
               edge="right"
@@ -948,6 +1022,17 @@ function DesktopSidebar({
       </Animated.View>
     </MobilePanelOverlay>
   );
+}
+
+function useSidebarNavChrome(ownsTopLeft: boolean) {
+  const inTopBand = useTopBand() !== null;
+  const devBuildLabel = process.env.EXPO_PUBLIC_PASEO_DEV_BUILD_LABEL?.trim() || null;
+  const showsChromeRow = ownsTopLeft || Boolean(devBuildLabel);
+  // Without nav rows, the sidebar starts at Workspaces with no drag strip.
+  const hasNavRows = useVisibleSidebarNavItems().length > 0;
+  // On Windows and Linux the controls are top-right; this strip is the drag surface.
+  const showsDragStrip = hasNavRows && !showsChromeRow && !inTopBand;
+  return { devBuildLabel, showsChromeRow, hasNavRows, showsDragStrip };
 }
 
 function WorkspacesSectionHeader() {
@@ -975,6 +1060,7 @@ const workspacesSectionHeaderElement = <WorkspacesSectionHeader />;
 // avoid the "Unable to find node on an unmounted component" crash when Unistyles
 // tries to patch the native node that Reanimated also manages.
 const staticStyles = RNStyleSheet.create({
+  flexibleDock: { flexShrink: 1, minWidth: MIN_SIDEBAR_WIDTH },
   desktopSidebar: {
     position: "relative" as const,
     flex: 1,
@@ -986,47 +1072,6 @@ const styles = StyleSheet.create((theme) => ({
   sidebarHeaderGroup: {
     gap: 2,
     paddingBottom: theme.spacing[1.5],
-  },
-  desktopDragStrip: {
-    position: "relative",
-    height: theme.spacing[2],
-  },
-  // The nav block caps at half the sidebar; a long item list scrolls inside the
-  // cap instead of crowding the workspace list off a short screen.
-  navScroll: {
-    flexGrow: 0,
-    flexShrink: 1,
-    maxHeight: "50%",
-  },
-  mobileNavRowsGroup: {
-    paddingTop: theme.spacing[2],
-    gap: 2,
-    paddingBottom: theme.spacing[1.5],
-  },
-  sidebarContent: {
-    flex: 1,
-    minHeight: 0,
-  },
-  mobileCloseButton: (rightInset: number) => ({
-    marginRight: theme.spacing[2] + rightInset,
-  }),
-  desktopSidebarBorder: (hasDivision: boolean) => ({
-    borderRightWidth: hasDivision ? 0 : 1,
-    borderRightColor: theme.colors.border,
-    backgroundColor: theme.colors.surfaceSidebar,
-  }),
-  sidebarDragArea: {
-    position: "relative",
-  },
-  desktopChromeRow: {
-    position: "relative",
-    height: HEADER_INNER_HEIGHT,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "flex-end",
-    paddingHorizontal: theme.spacing[3],
-    borderBottomWidth: theme.borderWidth[1],
-    borderBottomColor: "transparent",
   },
   devBuildBadge: {
     maxWidth: "60%",
@@ -1044,6 +1089,63 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.accentForeground,
     fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.medium,
+  },
+  sidebarHeaderGroupFlush: {
+    paddingTop: 0,
+    gap: 2,
+    paddingBottom: theme.spacing[1.5],
+  },
+  desktopDragStrip: {
+    position: "relative",
+    height: theme.spacing[2],
+  },
+  // The nav block caps at half the sidebar; a long item list scrolls inside the
+  // cap instead of crowding the workspace list off a short screen.
+  navScroll: {
+    flexGrow: 0,
+    flexShrink: 1,
+    maxHeight: "50%",
+  },
+  mobileNavRowsGroup: {
+    paddingTop: bySizing({ touch: theme.spacing[4], pointer: theme.spacing[2] }),
+    gap: 2,
+    paddingBottom: theme.spacing[1.5],
+  },
+  sidebarContent: {
+    flex: 1,
+    minHeight: 0,
+  },
+  mobileCloseButton: (rightInset: number) => ({
+    marginRight: theme.spacing[2] + rightInset,
+  }),
+  desktopSidebarSurface: {
+    backgroundColor: theme.colors.surfaceSidebar,
+  },
+  desktopSidebarDividerInset: {
+    paddingRight: 1,
+  },
+  // Keep the fill on the panel layer during rotation. Fabric paints a single
+  // border edge on separate layers at the destination bounds.
+  desktopSidebarDivider: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    right: 0,
+    width: 1,
+    backgroundColor: theme.colors.border,
+  },
+  sidebarDragArea: {
+    position: "relative",
+  },
+  desktopChromeRow: {
+    position: "relative",
+    height: HEADER_INNER_HEIGHT,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    paddingHorizontal: theme.spacing[3],
+    borderBottomWidth: theme.borderWidth[1],
+    borderBottomColor: "transparent",
   },
   footerContainer: {
     borderTopWidth: 1,

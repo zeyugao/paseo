@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  resolveWorkspaceActionPlacement,
+  resolveSidebarNavigationPlacement,
   resolveSafeAreaInsets,
-  resolveTopBand,
   type WindowLayout,
-  type WindowLayoutRect,
 } from "./model";
 
 const systemInsets = { top: 59, right: 0, bottom: 34, left: 0 };
@@ -11,12 +11,57 @@ const systemInsets = { top: 59, right: 0, bottom: 34, left: 0 };
 function layout(input: Partial<WindowLayout> = {}): WindowLayout {
   return {
     bounds: { x: 0, y: 0, width: 402, height: 874 },
+    hingeStatus: "unavailable",
     verticalBarEdge: "none",
     verticalBar: null,
     divisions: [],
     ...input,
   };
 }
+
+describe("resolveWorkspaceActionPlacement", () => {
+  it.each(["leading", "trailing"] as const)("uses a resolved %s native guide", (edge) => {
+    const geometry = layout({
+      verticalBarEdge: edge,
+      verticalBar: { x: 17, y: 91, width: 44, height: 600 },
+    });
+    expect(resolveWorkspaceActionPlacement(geometry)).toBe("vertical-bar");
+    expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBar: null })).toBe("header");
+    expect(resolveWorkspaceActionPlacement({ ...geometry, verticalBarEdge: "none" })).toBe(
+      "header",
+    );
+  });
+
+  it("keeps workspace actions in the header before native geometry arrives", () => {
+    expect(resolveWorkspaceActionPlacement(null)).toBe("header");
+  });
+});
+
+describe("resolveSidebarNavigationPlacement", () => {
+  it.each([
+    { edge: "trailing" as const, fillsDisplay: true, compact: false, expected: "header" },
+    { edge: "trailing" as const, fillsDisplay: false, compact: false, expected: "vertical-bar" },
+    { edge: "trailing" as const, fillsDisplay: true, compact: true, expected: "vertical-bar" },
+    { edge: "trailing" as const, fillsDisplay: false, compact: true, expected: "vertical-bar" },
+    { edge: "leading" as const, fillsDisplay: true, compact: false, expected: "vertical-bar" },
+    { edge: "leading" as const, fillsDisplay: false, compact: true, expected: "vertical-bar" },
+  ])(
+    "places navigation for $edge full=$fillsDisplay compact=$compact",
+    ({ edge, fillsDisplay, compact, expected }) => {
+      const geometry = layout({
+        fillsDisplay,
+        verticalBarEdge: edge,
+        verticalBar: { x: 17, y: 91, width: 44, height: 600 },
+      });
+      expect(resolveSidebarNavigationPlacement(geometry, compact)).toBe(expected);
+    },
+  );
+
+  it("keeps navigation in the header without a resolved native bar", () => {
+    expect(resolveSidebarNavigationPlacement(null, false)).toBe("header");
+    expect(resolveSidebarNavigationPlacement(layout(), true)).toBe("header");
+  });
+});
 
 describe("resolveSafeAreaInsets", () => {
   it("replaces only the bottom with the measured bar clearance", () => {
@@ -40,116 +85,118 @@ describe("resolveSafeAreaInsets", () => {
     expect(resolveSafeAreaInsets(systemInsets, null)).toBe(systemInsets);
   });
 
-  it("starts the top where the top bar rests when it sits above the system top", () => {
+  it.each([
+    { edge: "leading" as const, inset: 0, expected: 70 },
+    { edge: "leading" as const, inset: 100, expected: 100 },
+    { edge: "trailing" as const, inset: 0, expected: 70 },
+    { edge: "trailing" as const, inset: 100, expected: 100 },
+  ])(
+    "clears a $edge bar without shrinking a larger inset ($inset)",
+    ({ edge, inset, expected }) => {
+      const leading = edge === "leading";
+      const insets = {
+        top: 0,
+        right: leading ? 0 : inset,
+        bottom: 34,
+        left: leading ? inset : 0,
+      };
+      const geometry = layout({
+        bounds: { x: 0, y: 0, width: 469, height: 669 },
+        insets,
+        verticalBarEdge: edge,
+        verticalBar: { x: leading ? 26 : 399, y: 16, width: 44, height: 619 },
+      });
+      expect(resolveSafeAreaInsets(insets, geometry)).toEqual({
+        ...insets,
+        left: leading ? expected : 0,
+        right: leading ? 0 : expected,
+      });
+    },
+  );
+
+  it("uses the measured top band instead of the rectangular safe area", () => {
     const insets = resolveSafeAreaInsets(
       systemInsets,
-      layout({ topBar: { x: 0, y: 12, width: 402, height: 44 } }),
+      layout({
+        bounds: { x: 0, y: 0, width: 874, height: 402 },
+        topBand: { top: 12, trailingObstruction: null },
+      }),
     );
     expect(insets).toEqual({ ...systemInsets, top: 12 });
   });
 
-  it("keeps the system top when the top bar rests at or below it", () => {
+  it("keeps the system top when there is no usable top band", () => {
     const insets = resolveSafeAreaInsets(
       systemInsets,
-      layout({ topBar: { x: 0, y: 59, width: 402, height: 44 } }),
+      layout({
+        bounds: { x: 0, y: 0, width: 874, height: 402 },
+        topBand: null,
+      }),
     );
     expect(insets).toBe(systemInsets);
   });
-});
 
-// Measured: iPhone Duo inner screen, portrait (669×951), iOS 27.1 simulator unfolded in
-// DeviceHub.
-const duo = {
-  systemTop: 82,
-  topBar: { x: 16, y: 26, width: 509, height: 44 },
-  statusRegion: { x: 525, y: 0, width: 144, height: 82 },
-};
-
-function duoLayout(occlusions: WindowLayoutRect[]): WindowLayout {
-  return layout({
-    bounds: { x: 0, y: 0, width: 669, height: 951 },
-    topBar: duo.topBar,
-    occlusions,
-  });
-}
-
-describe("resolveTopBand", () => {
-  it("publishes the top bar's start and the status region past its trailing end", () => {
-    expect(resolveTopBand(duo.systemTop, duoLayout([duo.statusRegion]))).toEqual({
-      top: 26,
-      trailingObstruction: { width: 144, height: 56 },
-    });
-  });
-
-  it("reaches as low as the deepest occlusion beside the bar", () => {
-    const deeper = { x: 600, y: 0, width: 69, height: 96 };
-    expect(
-      resolveTopBand(duo.systemTop, duoLayout([duo.statusRegion, deeper]))?.trailingObstruction,
-    ).toEqual({ width: 144, height: 70 });
-  });
-
-  it("rounds a fractional obstruction up so controls never touch the status region", () => {
-    const fractional = layout({
+  it("holds portrait padding while an independent safe-area event reaches landscape first", () => {
+    const portrait = layout({
       bounds: { x: 0, y: 0, width: 669, height: 951 },
-      topBar: { x: 16, y: 26, width: 509.25, height: 44 },
-      occlusions: [{ x: 525.25, y: 0, width: 143.75, height: 82.5 }],
+      insets: { top: 82, right: 0, bottom: 34, left: 0 },
+      bottomClearance: 26,
+      topBand: { top: 26, trailingObstruction: { width: 144, height: 56 } },
     });
-    expect(resolveTopBand(duo.systemTop, fractional)?.trailingObstruction).toEqual({
-      width: 144,
-      height: 57,
-    });
-  });
-
-  it("has no trailing obstruction when the bar reaches the window's trailing edge", () => {
-    const fullWidth = layout({
-      bounds: { x: 0, y: 0, width: 669, height: 951 },
-      topBar: { x: 0, y: 26, width: 669, height: 44 },
-    });
-    expect(resolveTopBand(duo.systemTop, fullWidth)).toEqual({
+    const landscapeInsets = { top: 0, right: 84, bottom: 34, left: 0 };
+    expect(resolveSafeAreaInsets(landscapeInsets, portrait)).toEqual({
       top: 26,
-      trailingObstruction: null,
+      right: 0,
+      bottom: 26,
+      left: 0,
     });
   });
 
-  it("ignores occlusions without a top bar guide (before iOS 27.1 or unresolved)", () => {
-    const withoutGuide = layout({ topBar: null, occlusions: [duo.statusRegion] });
-    expect(resolveTopBand(duo.systemTop, withoutGuide)).toBeNull();
-    expect(resolveTopBand(duo.systemTop, layout({ occlusions: [duo.statusRegion] }))).toBeNull();
-  });
-
-  it("ignores occlusions when the top bar guide sits below the status region", () => {
-    const below = layout({
-      topBar: { x: 16, y: 82, width: 637, height: 44 },
-      occlusions: [duo.statusRegion],
-    });
-    expect(resolveTopBand(duo.systemTop, below)).toBeNull();
-  });
-
-  // Measured: iPhone 17 Pro, iOS 27.2 simulator, portrait.
-  it("is null on a regular iPhone, whose top bar starts at the status bar's bottom", () => {
-    const iphone = layout({
-      topBar: { x: 18, y: 62, width: 366, height: 44 },
-      occlusions: [{ x: 0, y: 0, width: 402, height: 54 }],
-    });
-    expect(resolveTopBand(62, iphone)).toBeNull();
-  });
-
-  // Measured: iPhone Duo outer screen, iOS 27.1 simulator. The status region is a trailing
-  // column, which the vertical bar layout already owns.
-  it("is null on the Duo outer screen, whose top bar starts below a zero system top", () => {
-    const outer = layout({
-      bounds: { x: 0, y: 0, width: 466, height: 678 },
+  it("uses landscape padding and removes the top band before the safe-area provider catches up", () => {
+    const landscape = layout({
+      bounds: { x: 0, y: 0, width: 951, height: 669 },
+      insets: { top: 0, right: 84, bottom: 34, left: 0 },
       verticalBarEdge: "trailing",
-      topBar: { x: 7 / 3, y: 26, width: 1139 / 3, height: 44 },
-      occlusions: [
-        { x: 1199 / 3, y: 88 / 3, width: 37, height: 37 },
-        { x: 382, y: 0, width: 84, height: 174 },
-      ],
+      verticalBar: { x: 881, y: 124, width: 44, height: 511 },
+      bottomClearance: 26,
+      topBand: null,
     });
-    expect(resolveTopBand(0, outer)).toBeNull();
+    const portraitInsets = { top: 82, right: 0, bottom: 34, left: 0 };
+    expect(resolveSafeAreaInsets(portraitInsets, landscape)).toEqual({
+      top: 0,
+      right: 84,
+      bottom: 26,
+      left: 0,
+    });
   });
 
-  it("is null before the native layout arrives", () => {
-    expect(resolveTopBand(duo.systemTop, null)).toBeNull();
+  it("removes old landscape right padding as soon as portrait geometry arrives", () => {
+    const oldInsets = { top: 0, right: 84, bottom: 26, left: 0 };
+    const portrait = layout({
+      bounds: { x: 0, y: 0, width: 669, height: 951 },
+      insets: { top: 82, right: 0, bottom: 34, left: 0 },
+      bottomClearance: 26,
+    });
+    expect(resolveSafeAreaInsets(oldInsets, portrait)).toEqual({
+      top: 82,
+      right: 0,
+      bottom: 26,
+      left: 0,
+    });
+  });
+
+  it("moves an asymmetric inset between physical edges even without a bounds change", () => {
+    const oldInsets = { top: 0, right: 84, bottom: 26, left: 0 };
+    const leadingBar = layout({
+      insets: { top: 0, right: 0, bottom: 34, left: 84 },
+      verticalBarEdge: "leading",
+      bottomClearance: 0,
+    });
+    expect(resolveSafeAreaInsets(oldInsets, leadingBar)).toEqual({
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 84,
+    });
   });
 });

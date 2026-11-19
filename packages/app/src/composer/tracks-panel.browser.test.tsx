@@ -2,6 +2,7 @@ import React, { act, useCallback, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Pressable, Text, View } from "react-native";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { page } from "vitest/browser";
 import { RetainedPanelActivity } from "@/components/retained-panel";
 import { MobilePanelsProvider } from "@/mobile-panels/provider";
 import {
@@ -72,6 +73,10 @@ function isPanelOpen(): boolean {
 }
 
 describe("composer track panel", () => {
+  beforeEach(async () => {
+    await page.viewport(1280, 900);
+  });
+
   it("dismisses itself when a row is chosen", () => {
     const onPress = vi.fn();
     mount(

@@ -1,4 +1,12 @@
-import { useState, useCallback, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
+import {
+  useState,
+  useCallback,
+  useContext,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
 import { View, type LayoutChangeEvent, type ViewStyle } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
@@ -11,6 +19,7 @@ import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { isNative } from "@/constants/platform";
 import { useDisclosureHold } from "@/agent-stream/disclosure";
 import { useUserMessageExpanded } from "./expansion-context";
+import { StreamViewportLayoutContext } from "@/agent-stream/viewport-width";
 
 const PREVIEW_HEIGHT = 240;
 // Show more and show less sit under the text they open and close.
@@ -27,16 +36,18 @@ export function MessagePreview({ itemId, children }: { itemId: string; children:
   const { t } = useTranslation();
   const { expanded, toggle: toggleExpanded } = useUserMessageExpanded(itemId);
   const bodyRef = useRef<View>(null);
+  const viewport = useContext(StreamViewportLayoutContext);
   const [overflowing, setOverflowing] = useState(false);
   // A hidden panel lays out at zero height, which says nothing about the message.
   const applyBodyHeight = useCallback((height: number) => {
     if (height > 0) setOverflowing(height > PREVIEW_HEIGHT);
   }, []);
-  // Measure in the commit that mounts the body: an update from a layout effect paints with it, so
-  // the first frame already shows the fade and the control. `onLayout` only lands after paint.
+  // Mount and allocated-width changes must include the fade/control in their
+  // first paint; onLayout reports the reflow a task later.
   useLayoutEffect(() => {
-    applyBodyHeight(bodyRef.current!.getBoundingClientRect().height);
-  }, [applyBodyHeight]);
+    if (viewport?.active !== false)
+      applyBodyHeight(bodyRef.current!.getBoundingClientRect().height);
+  }, [applyBodyHeight, viewport]);
   const measure = useCallback(
     (event: LayoutChangeEvent) => applyBodyHeight(event.nativeEvent.layout.height),
     [applyBodyHeight],

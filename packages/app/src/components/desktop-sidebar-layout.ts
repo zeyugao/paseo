@@ -1,4 +1,5 @@
-import { EXPLORER_WORKSPACE_MIN_WIDTH } from "@/components/explorer-sidebar-layout";
+import { Platform } from "react-native";
+import { resolveExplorerWorkspaceMinimumWidth } from "@/components/explorer-sidebar-layout";
 import { SETTINGS_DESKTOP_SPLIT_MIN_WIDTH } from "@/constants/layout";
 import {
   MAX_SIDEBAR_WIDTH,
@@ -7,7 +8,11 @@ import {
 } from "@/stores/panel-store";
 import type { DesktopDivisionLayout } from "@/window-layout";
 
-const MIN_DESKTOP_CENTER_WIDTH = 400;
+export const MIN_DESKTOP_CENTER_WIDTH = 400;
+
+export function usesNativeFlexibleDock(docked: boolean, divided: boolean): boolean {
+  return Platform.OS === "ios" && docked && !divided;
+}
 
 export function resolveDesktopSidebarVisibility(input: {
   chromeEnabled: boolean;
@@ -21,7 +26,8 @@ export function resolveDesktopSidebarVisibility(input: {
     input.chromeEnabled &&
     !input.isCompactLayout &&
     input.isMounted &&
-    (input.divisionLayout != null || (input.isOpen && input.canShare))
+    input.isOpen &&
+    (input.divisionLayout != null || input.canShare)
   );
 }
 
@@ -41,15 +47,13 @@ export function resolveLeftSidebarPresentation(input: {
   return input.desktopSidebarVisible ? "dock" : "overlay";
 }
 
-/**
- * The overlay sidebar starts at the window's left edge, over the workspace's safe-area padding, so
- * its content takes the left inset itself. The dock sits inside app chrome, which already pads it.
- */
+/** The overlay frame consumes native-bar clearance; ordinary overlays inset their content. */
 export function resolveDesktopSidebarInsetLeft(input: {
   overlay: boolean;
   safeAreaLeft: number;
+  hasVerticalBar: boolean;
 }): number {
-  return input.overlay ? input.safeAreaLeft : 0;
+  return input.overlay && !input.hasVerticalBar ? input.safeAreaLeft : 0;
 }
 
 export function resolveDesktopAppChromeLayout(input: {
@@ -57,7 +61,7 @@ export function resolveDesktopAppChromeLayout(input: {
   hasTopLeftWindowControls: boolean;
   sidebarControlsEnabled: boolean;
 }) {
-  const sidebarOwnsTopLeft = input.desktopSidebarRendered && input.hasTopLeftWindowControls;
+  const sidebarOwnsTopLeft = input.desktopSidebarRendered;
   let sidebarToggleOwner: "none" | "window" | "content" = "none";
   if (input.sidebarControlsEnabled) {
     sidebarToggleOwner = input.hasTopLeftWindowControls ? "window" : "content";
@@ -67,6 +71,16 @@ export function resolveDesktopAppChromeLayout(input: {
     contentCorners: sidebarOwnsTopLeft ? ("top-right" as const) : ("both" as const),
     sidebarToggleOwner,
   };
+}
+
+export function resolveSidebarMenuTogglePresentation(input: {
+  isCompact: boolean;
+  ownsTopLeft: boolean;
+  hasTopLeftWindowControls: boolean;
+}): "button" | "placeholder" | "hidden" {
+  // A dock can own the physical corner without taking navigation out of the content header.
+  if (input.isCompact || !input.hasTopLeftWindowControls) return "button";
+  return input.ownsTopLeft ? "placeholder" : "hidden";
 }
 
 function resolveDesktopPanelWidth(input: {
@@ -98,9 +112,12 @@ export function resolveDesktopSidebarWidth(input: {
 export function resolveDesktopAppContentMinimum(input: {
   isSettingsRoute: boolean;
   explorerVisible?: boolean;
+  explorerSidebarWidth?: number;
 }): number {
   if (input.isSettingsRoute) return SETTINGS_DESKTOP_SPLIT_MIN_WIDTH;
-  return input.explorerVisible ? EXPLORER_WORKSPACE_MIN_WIDTH : 0;
+  return input.explorerVisible
+    ? resolveExplorerWorkspaceMinimumWidth(input.explorerSidebarWidth)
+    : 0;
 }
 
 export function canDesktopAppSidebarShare(input: {

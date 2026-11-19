@@ -18,11 +18,16 @@ import type { ShortcutKey } from "@/utils/format-shortcut";
 import { actionsWithoutPrimary, type GitAction, type GitActions } from "@/git/policy";
 import { useGitActionRunner } from "@/git/use-actions";
 import { HEADER_CONTROL_HEIGHT } from "@/components/ui/control-geometry";
+import {
+  iconButtonChromeGlyphSize,
+  useIconButtonChromeStyle,
+} from "@/components/ui/icon-button-chrome";
 
 interface GitActionsSplitButtonProps {
   gitActions: GitActions;
   hideLabels?: boolean;
   menuOnly?: boolean;
+  menuTrigger?: "framed" | "icon";
 }
 
 interface GitActionMenuItemProps {
@@ -75,15 +80,40 @@ function GitActionMenuItem({
   );
 }
 
+export function GitActionMenuItems({ actions }: { actions: readonly GitAction[] }) {
+  const runGitAction = useGitActionRunner();
+  const archiveShortcutKeys = useShortcutKeys("archive-workspace");
+  return (
+    <>
+      {actions.map((action, index) => (
+        <GitActionMenuItem
+          key={action.id}
+          action={action}
+          onSelect={runGitAction}
+          archiveShortcutKeys={archiveShortcutKeys}
+          needsSeparator={action.startsGroup}
+          showSeparator={index > 0}
+          closeOnSelect={
+            action.status === "idle" &&
+            action.id === "pr" &&
+            action.label === action.pendingLabel &&
+            action.label === action.successLabel
+          }
+        />
+      ))}
+    </>
+  );
+}
+
 export function GitActionsSplitButton({
   gitActions,
   hideLabels,
   menuOnly = false,
+  menuTrigger = "framed",
 }: GitActionsSplitButtonProps) {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const runGitAction = useGitActionRunner();
-  const archiveShortcutKeys = useShortcutKeys("archive-workspace");
 
   const getActionDisplayLabel = useCallback((action: GitAction): string => {
     if (action.status === "pending") return action.pendingLabel;
@@ -120,6 +150,8 @@ export function GitActionsSplitButton({
     [theme.colors.surface2],
   );
 
+  const iconTriggerStyle = useIconButtonChromeStyle({ size: "large" });
+
   const menuOnlyTriggerStyle = useCallback(
     ({ hovered, pressed, open }: { hovered: boolean; pressed: boolean; open: boolean }) => [
       styles.menuOnlyTrigger,
@@ -143,30 +175,25 @@ export function GitActionsSplitButton({
       <DropdownMenu>
         <DropdownMenuTrigger
           testID="changes-actions-menu-trigger"
-          style={menuOnlyTriggerStyle}
+          style={menuTrigger === "icon" ? iconTriggerStyle : menuOnlyTriggerStyle}
           accessibilityRole="button"
-          accessibilityLabel={t("workspace.header.actions.workspaceActions")}
+          accessibilityLabel={t(
+            menuTrigger === "icon"
+              ? "workspace.git.actions.moreActions"
+              : "workspace.header.actions.workspaceActions",
+          )}
         >
-          <GitBranch size={16} color={theme.colors.foregroundMuted} />
-          <ChevronDown size={12} color={theme.colors.foregroundExtraMuted} />
+          <GitBranch
+            size={menuTrigger === "icon" ? iconButtonChromeGlyphSize("large") : 16}
+            strokeWidth={menuTrigger === "icon" ? 1.5 : undefined}
+            color={theme.colors.foregroundMuted}
+          />
+          {menuTrigger === "icon" ? null : (
+            <ChevronDown size={12} color={theme.colors.foregroundExtraMuted} />
+          )}
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" testID="changes-primary-cta-menu">
-          {menuOnlyActions.map((action, index) => (
-            <GitActionMenuItem
-              key={action.id}
-              action={action}
-              onSelect={runGitAction}
-              archiveShortcutKeys={archiveShortcutKeys}
-              needsSeparator={action.startsGroup}
-              showSeparator={index > 0}
-              closeOnSelect={
-                action.status === "idle" &&
-                action.id === "pr" &&
-                action.label === action.pendingLabel &&
-                action.label === action.successLabel
-              }
-            />
-          ))}
+          <GitActionMenuItems actions={menuOnlyActions} />
         </DropdownMenuContent>
       </DropdownMenu>
     );
@@ -216,22 +243,7 @@ export function GitActionsSplitButton({
                 <ChevronDown size={16} color={theme.colors.foregroundExtraMuted} />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" testID="changes-primary-cta-menu">
-                {gitActions.secondary.map((action, index) => (
-                  <GitActionMenuItem
-                    key={action.id}
-                    action={action}
-                    onSelect={runGitAction}
-                    archiveShortcutKeys={archiveShortcutKeys}
-                    needsSeparator={action.startsGroup}
-                    showSeparator={index > 0}
-                    closeOnSelect={
-                      action.status === "idle" &&
-                      action.id === "pr" &&
-                      action.label === action.pendingLabel &&
-                      action.label === action.successLabel
-                    }
-                  />
-                ))}
+                <GitActionMenuItems actions={gitActions.secondary} />
               </DropdownMenuContent>
             </DropdownMenu>
           ) : null}

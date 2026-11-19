@@ -49,18 +49,20 @@ const backdropColorMappings: Record<SurfaceBackdrop, (theme: Theme) => { color: 
 export function TrailingActionScrim({
   backdrop,
   width = SCRIM_WIDTH,
+  nativeID,
   testID,
 }: {
   backdrop: SurfaceBackdrop;
   /** Covers more than one trailing action; the fade keeps its length. */
   width?: number;
+  nativeID?: string;
   testID?: string;
 }) {
   // React-generated ids contain characters that are invalid inside SVG fragment references.
   const gradientId = `trailing-action-scrim-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const solidOffset = `${Math.round((SCRIM_FADE_WIDTH / width) * 100)}%`;
   return (
-    <View style={styles.scrim(width)} pointerEvents="none" testID={testID}>
+    <View style={styles.scrim(width)} pointerEvents="none" nativeID={nativeID} testID={testID}>
       <ThemedTrailingActionScrimSvg
         gradientId={gradientId}
         solidOffset={solidOffset}

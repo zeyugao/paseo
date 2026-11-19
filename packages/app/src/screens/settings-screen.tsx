@@ -67,7 +67,12 @@ import {
   type HostProfile,
 } from "@/types/host-connection";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
-import { WindowChromeRegion, WindowChromeSafeArea } from "@/utils/desktop-window";
+import {
+  WindowChromeRegion,
+  WindowChromeSafeArea,
+  useHasOwnedWindowChromeObstruction,
+  useWindowChromeInlinePadding,
+} from "@/utils/desktop-window";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import { BackHeader } from "@/components/headers/back-header";
 import { PageLayout } from "@/components/page-layout";
@@ -119,11 +124,13 @@ import { HostVoicePage } from "@/screens/settings/voice/voice-page";
 import ProjectsScreen from "@/screens/projects-screen";
 import ProjectSettingsScreen from "@/screens/project-settings-screen";
 import {
+  HEADER_TOP_PADDING_MOBILE,
   SETTINGS_DESKTOP_DETAIL_MIN_WIDTH,
   SETTINGS_DESKTOP_SIDEBAR_WIDTH,
   useIsCompactFormFactor,
 } from "@/constants/layout";
 import { density, densityIconBox, densityIconSize } from "@/styles/density";
+import { SPACING } from "@/styles/theme";
 import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
 import {
   type EnableBuiltInDaemonOption,
@@ -143,6 +150,7 @@ import {
 import { returnFromSettings, type SettingsView } from "@/navigation/settings-navigation";
 import { isNative, isWeb } from "@/constants/platform";
 import { useOpenOnboarding } from "@/onboarding";
+import { WindowLayoutTopInset, WindowLayoutGeometryView } from "@/window-layout";
 
 // ---------------------------------------------------------------------------
 // View model
@@ -975,16 +983,13 @@ function SettingsSidebar({
   const items = SIDEBAR_SECTION_ITEMS.filter((item) =>
     isSectionAvailable(item, isDesktopApp, hardwareKeyboardPresent),
   );
-  const insets = useSafeAreaInsets();
+  const ownsTopLeft = useHasOwnedWindowChromeObstruction("top-left");
+  const chromePadding = useWindowChromeInlinePadding();
   const isDesktop = layout === "desktop";
   const sidebarScroll = useSettingsSidebarScroll(isDesktop);
   const outerContainerStyle = useMemo(
     () => [isDesktop ? sidebarStyles.desktopContainer : sidebarStyles.mobileContainer],
     [isDesktop],
-  );
-  const innerContainerStyle = useMemo(
-    () => [{ flex: 1 }, isDesktop ? { paddingTop: insets.top } : null],
-    [insets.top, isDesktop],
   );
   const selectedSectionId = view.kind === "section" ? view.section : null;
   let selectedHostSection: HostSectionSlug | null = null;
@@ -1075,8 +1080,12 @@ function SettingsSidebar({
       testID="settings-sidebar"
     >
       {isDesktop ? (
-        <View style={innerContainerStyle}>
-          <View style={sidebarStyles.sidebarDragArea}>
+        <View style={sidebarStyles.innerContainer}>
+          <WindowLayoutTopInset
+            additionalPadding={isNative && !ownsTopLeft ? SPACING[4] : 0}
+            landscapePadding={HEADER_TOP_PADDING_MOBILE}
+          />
+          <WindowLayoutGeometryView style={[sidebarStyles.sidebarDragArea, chromePadding]}>
             <TitlebarDragRegion />
             <WindowChromeSafeArea placement="below" />
             <SidebarHeaderRow
@@ -1085,7 +1094,7 @@ function SettingsSidebar({
               onPress={onBackToWorkspace}
               testID="settings-back-to-workspace"
             />
-          </View>
+          </WindowLayoutGeometryView>
           <ScrollView
             style={sidebarStyles.scrollBody}
             showsVerticalScrollIndicator={false}
@@ -1098,6 +1107,7 @@ function SettingsSidebar({
       ) : (
         sidebarBody
       )}
+      {isDesktop ? <View style={sidebarStyles.desktopDivider} /> : null}
     </View>
   );
 }
@@ -1513,12 +1523,20 @@ const desktopStyles = StyleSheet.create({
 });
 
 const sidebarStyles = StyleSheet.create((theme) => ({
+  innerContainer: {
+    flex: 1,
+  },
   desktopContainer: {
     width: SETTINGS_DESKTOP_SIDEBAR_WIDTH,
     flexShrink: 1,
-    borderRightWidth: 1,
-    borderRightColor: theme.colors.border,
+    flexDirection: "row",
     backgroundColor: theme.colors.surfaceSidebar,
+  },
+  // A one-sided border makes Fabric repaint the background on a separate layer
+  // at the destination size, ahead of the panel's animated bounds.
+  desktopDivider: {
+    width: 1,
+    backgroundColor: theme.colors.border,
   },
   scrollBody: {
     flex: 1,

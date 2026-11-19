@@ -7,6 +7,12 @@ export interface WindowLayoutRect {
 
 export interface WindowLayout {
   bounds: WindowLayoutRect;
+  /** Native hinge state for this view hierarchy; unavailable on displays without one. */
+  hingeStatus: "unavailable" | "unknown" | "closed" | "partially-open" | "fully-open";
+  /** Whether this window covers its entire display, rather than a system split or floating region. */
+  fillsDisplay?: boolean;
+  /** Rectangular safe area measured with these bounds and system-control guides. */
+  insets?: { top: number; right: number; bottom: number; left: number };
   verticalBarEdge: "none" | "leading" | "trailing";
   verticalBar: WindowLayoutRect | null;
   /**
@@ -14,8 +20,12 @@ export interface WindowLayout {
    * the system has no bottom bar guide. Zero is a measured value.
    */
   bottomClearance?: number | null;
-  /** Where a top bar rests, or null until the system resolves its top bar guide. */
-  topBar?: WindowLayoutRect | null;
+  /** Usable top band resolved alongside the surface insets. */
+  topBand?: TopBand | null;
+  /** Residual rounded-corner and status-region clearance for the first row. */
+  inlineChromeInsets?: { left: number; right: number };
+  /** Mirrored clearance for undocked content on the full expanded display. */
+  contentCenteringInsets?: { left: number; right: number } | null;
   /** Active system occlusions (status region, camera, Live Activities), margins included. */
   occlusions?: WindowLayoutRect[];
   divisions: WindowLayoutRect[];
@@ -35,35 +45,33 @@ export interface TopBand {
   trailingObstruction: { width: number; height: number } | null;
 }
 
-/** Null unless the top bar guide starts above the system's rectangular safe area. */
-export function resolveTopBand(systemTop: number, layout: WindowLayout | null): TopBand | null {
-  const bar = layout?.topBar;
-  if (!layout || !bar || bar.y >= systemTop) return null;
-  const top = Math.max(0, bar.y);
-  const barEnd = bar.x + bar.width;
-  const width = Math.ceil(layout.bounds.width - barEnd);
-  if (width <= 0) return { top, trailingObstruction: null };
-  const beside = (layout.occlusions ?? []).filter(
-    (frame) => frame.x + frame.width > barEnd && frame.y < bar.y + bar.height,
-  );
-  const bottom = Math.max(bar.y + bar.height, ...beside.map((frame) => frame.y + frame.height));
-  return { top, trailingObstruction: { width, height: Math.ceil(bottom - top) } };
-}
-
 /**
- * The window's measured bars replace the rectangular safe area: the bottom bar's clearance,
- * and the top bar's start when it sits above the system top.
+ * Frame, insets and system controls share one native snapshot. The bar guides refine its
+ * rectangular safe area without mixing insets from a separately timed provider event.
  */
-export function resolveSafeAreaInsets<Insets extends { top: number; bottom: number }>(
-  systemInsets: Insets,
-  layout: WindowLayout | null,
-): Insets {
+export function resolveSafeAreaInsets<
+  Insets extends { top: number; right?: number; bottom: number; left?: number },
+>(systemInsets: Insets, layout: WindowLayout | null): Insets {
+  const insets = layout?.insets ?? systemInsets;
   const clearance = layout?.bottomClearance;
-  const bottom = typeof clearance === "number" ? clearance : systemInsets.bottom;
-  const top = resolveTopBand(systemInsets.top, layout)?.top ?? systemInsets.top;
-  return top === systemInsets.top && bottom === systemInsets.bottom
+  const bottom = typeof clearance === "number" ? clearance : insets.bottom;
+  const top = layout?.topBand?.top ?? insets.top;
+  // UIKit can report zero horizontal safe area beside a resolved leading bar.
+  const bar = layout?.verticalBar;
+  const left =
+    bar && layout.verticalBarEdge === "leading"
+      ? Math.max(insets.left ?? 0, bar.x + bar.width)
+      : insets.left;
+  const right =
+    bar && layout.verticalBarEdge === "trailing"
+      ? Math.max(insets.right ?? 0, layout.bounds.width - bar.x)
+      : insets.right;
+  return top === systemInsets.top &&
+    right === systemInsets.right &&
+    bottom === systemInsets.bottom &&
+    left === systemInsets.left
     ? systemInsets
-    : { ...systemInsets, top, bottom };
+    : { ...systemInsets, ...insets, top, right, bottom, left };
 }
 
 export interface DesktopDivisionLayout {
@@ -75,17 +83,28 @@ export interface DesktopDivisionLayout {
 export function resolveWorkspaceActionPlacement(
   layout: WindowLayout | null,
 ): "header" | "vertical-bar" {
-  return layout?.verticalBarEdge === "trailing" && layout.verticalBar !== null
+  return layout?.verticalBar &&
+    (layout.verticalBarEdge === "leading" || layout.verticalBarEdge === "trailing")
     ? "vertical-bar"
     : "header";
 }
 
+/** A full-width wide page keeps left navigation on its leading header edge. */
+export function resolveSidebarNavigationPlacement(
+  layout: WindowLayout | null,
+  compact: boolean,
+): "header" | "vertical-bar" {
+  if (resolveWorkspaceActionPlacement(layout) !== "vertical-bar") return "header";
+  return !compact && layout?.fillsDisplay === true && layout.verticalBarEdge === "trailing"
+    ? "header"
+    : "vertical-bar";
+}
+
 export function resolveWorkspaceBarActions(
-  headerVariant: "compact" | "full",
-): readonly ("tab-count" | "overflow" | "explorer")[] {
-  return headerVariant === "compact"
-    ? ["tab-count", "overflow", "explorer"]
-    : ["overflow", "explorer"];
+  headerVariant: "compact" | "full" | "inline",
+): readonly ("tab-count" | "git" | "overflow" | "explorer")[] {
+  if (headerVariant === "compact") return ["tab-count", "overflow", "explorer"];
+  return headerVariant === "inline" ? ["git", "overflow", "explorer"] : ["overflow", "explorer"];
 }
 
 /** One book-like partition owns allocation; horizontal folds retain the normal flow. */

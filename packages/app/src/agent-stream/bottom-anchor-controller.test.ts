@@ -104,6 +104,7 @@ function createDriverHarness(input?: {
   isNearBottom?: boolean;
   measurementState?: MeasurementState;
   authoritativeReady?: boolean;
+  initialMode?: BottomAnchorMode;
 }) {
   const scheduler = createFrameScheduler();
   const measurementState =
@@ -137,6 +138,7 @@ function createDriverHarness(input?: {
   };
   const modeChanges: BottomAnchorMode[] = [];
   const driver = __private__.createBottomAnchorControllerDriver({
+    initialMode: input?.initialMode,
     getAgentId: () => context.agentId,
     getIsAuthoritativeHistoryReady: () => context.authoritativeReady,
     getRenderStrategy: () => context.renderStrategy,
@@ -205,6 +207,27 @@ describe("deriveBottomAnchorBlockedReason", () => {
 });
 
 describe("bottom anchor controller driver", () => {
+  it("preserves a restored reading point until an explicit jump", () => {
+    const harness = createDriverHarness({ initialMode: "detached", isNearBottom: false });
+    harness.context.measurementState.offsetY = 180;
+    harness.driver.notifyAuthoritativeHistoryMaybeChanged();
+    harness.driver.handleContentSizeChange();
+    harness.driver.handleViewportMetricsChange({
+      previousViewportWidth: 800,
+      viewportWidth: 640,
+      previousViewportHeight: 480,
+      viewportHeight: 420,
+    });
+    harness.scheduler.flushAll();
+    expect(harness.context.measurementState.offsetY).toBe(180);
+    expect(harness.scrollAttempts).toEqual([]);
+    expect(harness.driver.getSnapshot().mode).toBe("detached");
+    harness.driver.requestLocalAnchor({ agentId: "agent-1", reason: "jump-to-bottom" });
+    harness.scheduler.flushAll();
+    expect(harness.context.measurementState.offsetY).toBe(720);
+    expect(harness.driver.getSnapshot().mode).toBe("sticky-bottom");
+  });
+
   it("keeps initial-entry pending until authoritative history and current geometry exist", () => {
     const harness = createDriverHarness({
       authoritativeReady: false,
@@ -553,6 +576,27 @@ describe("bottom anchor controller driver", () => {
     harness.scheduler.flushAll();
 
     expect(harness.scrollAttempts).toHaveLength(1);
+  });
+
+  it("does not move the offset again after a native end-pinned viewport resize", () => {
+    const harness = createDriverHarness();
+
+    harness.driver.handleViewportMetricsChange({
+      previousViewportWidth: 800,
+      viewportWidth: 640,
+      previousViewportHeight: 480,
+      viewportHeight: 720,
+      nativeKeepsEnd: true,
+    });
+    harness.driver.handleScrollNearBottomChange({
+      nextIsNearBottom: false,
+      scrollDelta: -100,
+      nativeKeepsEnd: true,
+    });
+    harness.scheduler.flushAll();
+
+    expect(harness.scrollAttempts).toHaveLength(0);
+    expect(harness.driver.getSnapshot().mode).toBe("sticky-bottom");
   });
 
   it("never scrolls for a content change while following", () => {

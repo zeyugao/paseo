@@ -87,4 +87,21 @@ describe("useContainerWidthBelow", () => {
     expect(result.current.isBelow).toBe(true);
     expect(renderCount).toBe(2);
   });
+
+  it("uses the allocated width immediately, without replaying the old layout", () => {
+    const initialProps: { allocatedWidth: number | null } = { allocatedWidth: null };
+    const { result, rerender } = renderHook(
+      ({ allocatedWidth }: { allocatedWidth: number | null }) =>
+        useContainerWidthBelow(500, { allocatedWidth }),
+      { initialProps },
+    );
+    act(() => result.current.onLayout(layoutEvent(400)));
+    expect(result.current.isBelow).toBe(true);
+
+    rerender({ allocatedWidth: 547 });
+    act(() => result.current.onLayout(layoutEvent(400)));
+    expect(result.current.isBelow).toBe(false);
+    rerender({ allocatedWidth: 400 });
+    expect(result.current.isBelow).toBe(true);
+  });
 });

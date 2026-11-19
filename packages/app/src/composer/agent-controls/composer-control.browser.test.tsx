@@ -2,6 +2,7 @@ import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Scan } from "lucide-react-native";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { page } from "vitest/browser";
 import type { AgentOptionControl } from "@getpaseo/protocol/agent-types";
 import type { ToastApi } from "@/components/toast-host";
 import { ToastApiProvider } from "@/contexts/toast-api-context";
@@ -9,7 +10,10 @@ import { ComposerControls, type ComposerControlItem } from "./composer-control";
 import { useAgentControlItems } from "./control-items";
 import { resolveComposerControlPresentation } from "./layout";
 
-beforeEach(() => vi.stubGlobal("React", React));
+beforeEach(async () => {
+  vi.stubGlobal("React", React);
+  await page.viewport(1280, 900);
+});
 afterEach(cleanup);
 
 const base = { id: "x", title: "Context", icon: Scan };

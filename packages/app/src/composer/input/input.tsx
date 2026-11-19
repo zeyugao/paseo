@@ -10,11 +10,11 @@ import {
   View,
   Platform,
   Text,
-  useWindowDimensions,
   NativeSyntheticEvent,
   TextInputKeyPressEventData,
   TextInputSelectionChangeEventData,
   type LayoutChangeEvent,
+  type TextStyle,
 } from "react-native";
 import {
   useState,
@@ -27,14 +27,17 @@ import {
   forwardRef,
 } from "react";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
+import { WindowLayoutVariantView, type WindowLayoutVariants } from "@/window-layout/variant-view";
 import { useTranslation } from "react-i18next";
 import type { Theme } from "@/styles/theme";
 import {
   controlSizingForLayout,
   TOOLBAR_CONTROL_GAP,
+  TOOLBAR_CONTROL_GAPS,
   TOOLBAR_CONTROL_HEIGHT,
-  TOOLBAR_DISC_GLYPH_SIZES,
   TOOLBAR_DISC_SIZE,
+  TOOLBAR_DISC_SIZES,
   toolbarGlyphsFor,
   toolbarGlyphTone,
   type ToolbarGlyph,
@@ -42,10 +45,9 @@ import {
 } from "@/components/ui/control-geometry";
 import { bySizing } from "@/components/ui/control-sizing";
 import {
-  COMPOSER_PADDING_BOTTOM,
-  COMPOSER_PADDING_HORIZONTAL,
-  COMPOSER_CORNER_RADIUS,
-  COMPOSER_PADDING_TOP,
+  COMPOSER_ACTION_DISC_SIZE,
+  COMPOSER_ACTION_ICON_SIZE,
+  COMPOSER_ACTION_TARGET_SIZE,
   composerToolbarOverhang,
   resolveComposerLeadingEdge,
 } from "@/composer/input/toolbar-rails";
@@ -83,10 +85,13 @@ import type { MessageInputKeyboardActionKind } from "@/keyboard/actions";
 import { isImeComposingKeyboardEvent } from "@/utils/keyboard-ime";
 import { isNative, isWeb } from "@/constants/platform";
 import { useIsCompactFormFactor } from "@/constants/layout";
+import { useAppWindowIsLandscape, useAppWindowSize } from "@/hooks/use-app-window-size";
+import { ComposerControlInteractionContext } from "@/composer/agent-controls/interaction-context";
 import { useComposerKeyboardScope } from "@/composer/keyboard-scope";
 import { RenderProfile } from "@/utils/render-profiler";
 import { useComposerHeight } from "./height";
 import { ComposerInputPresentation } from "./presentation";
+import { useComposerSurfaceTransition } from "./surface-frame";
 import { resolveComposerInputMode, type ComposerInputMode } from "@/composer/input-mode";
 import { pasteLinkedClipboardText } from "@/composer/pasted-text";
 import type { NativePastedFile } from "@/composer/native-pasted-image";
@@ -111,6 +116,7 @@ import {
   computeCanStartDictation,
   resolveAlternateSendAction,
   resolveComposerSurfacePresentation,
+  resolveComposerCollapsed,
   resolveComposerSurfaceText,
   resolveMessageInputEnterAction,
   resolveRetainedSelection,
@@ -241,9 +247,15 @@ export interface MessageInputRef {
 
 const MIN_INPUT_HEIGHT_MOBILE = 30;
 const MIN_INPUT_HEIGHT_DESKTOP = 46;
-const DEFAULT_MAX_INPUT_HEIGHT = 160;
-const MAX_INPUT_VIEWPORT_RATIO = 0.5;
 const MIN_INPUT_HEIGHT = isWeb ? MIN_INPUT_HEIGHT_DESKTOP : MIN_INPUT_HEIGHT_MOBILE;
+const DEFAULT_MAX_INPUT_HEIGHT = 160;
+const TOOLBAR_TOP_MARGIN = { touch: -12, pointer: -4 } as const;
+const MAX_INPUT_VIEWPORT_RATIO = 0.5;
+const EDITOR_HEIGHT_LIMIT = {
+  collapsed: MIN_INPUT_HEIGHT,
+  minimumExpanded: DEFAULT_MAX_INPUT_HEIGHT,
+  expandedFraction: MAX_INPUT_VIEWPORT_RATIO,
+};
 type WebTextInputKeyPressEvent = NativeSyntheticEvent<
   TextInputKeyPressEventData & {
     metaKey?: boolean;
@@ -319,6 +331,7 @@ function AttachmentDropdown({
   isConnected,
   disabled,
   attachButtonStyle,
+  onOpenChange,
   renderAttachButtonIcon,
   attachmentMenuItems,
   addAttachmentLabel,
@@ -329,12 +342,13 @@ function AttachmentDropdown({
   attachButtonStyle: React.ComponentProps<typeof DropdownMenuTrigger>["style"];
   renderAttachButtonIcon: (input: { hovered?: boolean }) => React.ReactElement;
   attachmentMenuItems: AttachmentMenuItem[];
+  onOpenChange?: (open: boolean) => void;
   addAttachmentLabel: string;
 }) {
   const isButtonDisabled = !isConnected || disabled;
   if (!visible) return null;
   return (
-    <DropdownMenu compactMode="sheet">
+    <DropdownMenu compactMode="sheet" onOpenChange={onOpenChange}>
       <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
         <TooltipTrigger asChild>
           <DropdownMenuTrigger
@@ -370,18 +384,16 @@ function VoiceButtonIcon({
   isDictating,
   isMutedRealtime,
   glyph,
-  discGlyphSize,
 }: {
   hovered: boolean;
   isDictating: boolean;
   isMutedRealtime: boolean;
   glyph: ToolbarGlyph;
-  discGlyphSize: number;
 }) {
   if (isDictating) {
     return (
       <View style={styles.voiceButtonRecordingDisc}>
-        <Square size={discGlyphSize} color="white" fill="white" />
+        <Square size={COMPOSER_ACTION_ICON_SIZE} color="white" fill="white" />
       </View>
     );
   }
@@ -442,7 +454,7 @@ function SendButtonContent({
   if (submitIcon === "return") {
     return (
       <ThemedCornerDownLeft
-        size={glyph.size}
+        size={COMPOSER_ACTION_ICON_SIZE}
         strokeWidth={glyph.strokeWidth}
         uniProps={iconAccentForegroundMapping}
       />
@@ -450,7 +462,7 @@ function SendButtonContent({
   }
   return (
     <ThemedArrowUp
-      size={glyph.size}
+      size={COMPOSER_ACTION_ICON_SIZE}
       strokeWidth={glyph.strokeWidth}
       uniProps={iconAccentForegroundMapping}
     />
@@ -695,12 +707,18 @@ function FocusHint({
   );
 }
 
+const COLLAPSED_PLACEHOLDER_LAYOUT: WindowLayoutVariants = {
+  expanded: { display: "none" },
+  collapsed: { display: "flex" },
+};
+
 interface ComposerTextSurfaceProps {
   readOnly: boolean;
   value: string;
   textReplacementKey: string;
   textInputRef: React.Ref<ComposerTextInputHandle>;
   textInputStyle: EditingTextInputProps["style"];
+  measuredHeightStyle: TextStyle;
   readOnlyTextStyle: React.ComponentProps<typeof Text>["style"];
   placeholder: string;
   accessibilityLabel: string;
@@ -715,7 +733,10 @@ interface ComposerTextSurfaceProps {
   onPasteImages: ((files: readonly NativePastedFile[]) => void) | undefined;
   onPasteError: (message: string) => void;
   fullscreen: boolean;
+  expandedMaxHeight?: number;
   compact: boolean;
+  collapsed: boolean;
+  collapseInLandscape: boolean;
   onRenderedLinesChange: (lines: number) => void;
   focusHintVisible: boolean;
   focusInputKeys: ShortcutChord | null | undefined;
@@ -754,8 +775,26 @@ function ComposerTextSurface(props: ComposerTextSurfaceProps): React.ReactElemen
       </View>
     );
   }
+  const nativePlaceholder = Platform.OS === "ios" && !props.fullscreen;
   return (
-    <View style={[styles.textInputScrollWrapper, props.fullscreen && styles.fullscreenTextSurface]}>
+    <WindowLayoutVariantView
+      style={[
+        styles.textInputScrollWrapper,
+        props.fullscreen && styles.fullscreenTextSurface,
+        // withUnistyles drops animated-lane styles on the textarea. Size this View
+        // through its inline lane and let the textarea fill it without new CSS rules per height.
+        isWeb && !props.fullscreen && inlineUnistylesStyle(props.measuredHeightStyle),
+        props.expandedMaxHeight == null
+          ? undefined
+          : inlineUnistylesStyle({
+              maxHeight: props.collapsed ? MIN_INPUT_HEIGHT : props.expandedMaxHeight,
+            }),
+      ]}
+      viewportHeightLimit={props.expandedMaxHeight == null ? undefined : EDITOR_HEIGHT_LIMIT}
+      editorPlaceholder={nativePlaceholder ? props.placeholder : undefined}
+      collapsed={props.collapsed}
+      collapseInLandscape={props.collapseInLandscape}
+    >
       {!isWeb && props.compact && !props.fullscreen ? (
         <Text
           accessible={false}
@@ -771,7 +810,7 @@ function ComposerTextSurface(props: ComposerTextSurfaceProps): React.ReactElemen
         dataSet={COMPOSER_INPUT_DATASET}
         initialValue={props.value}
         onChangeText={handleTextChange}
-        placeholder={props.placeholder}
+        placeholder={props.collapsed ? "" : props.placeholder}
         accessibilityLabel={props.accessibilityLabel}
         onFocus={props.onFocus}
         onBlur={props.onBlur}
@@ -785,12 +824,31 @@ function ComposerTextSurface(props: ComposerTextSurfaceProps): React.ReactElemen
         onPasteError={props.onPasteError}
         autoFocus={props.autoFocus}
       />
+      {(nativePlaceholder || props.collapsed) && measurementText.length === 0 ? (
+        <WindowLayoutVariantView
+          pointerEvents="none"
+          style={styles.collapsedPlaceholder}
+          variants={COLLAPSED_PLACEHOLDER_LAYOUT}
+          collapsed={props.collapsed}
+          collapseInLandscape={props.collapseInLandscape}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          <Text
+            accessible={false}
+            numberOfLines={1}
+            style={[styles.textInput, styles.placeholderText]}
+          >
+            {props.placeholder}
+          </Text>
+        </WindowLayoutVariantView>
+      ) : null}
       <FocusHint
         visible={props.focusHintVisible}
         focusInputKeys={props.focusInputKeys}
         label={props.focusHintLabel}
       />
-    </View>
+    </WindowLayoutVariantView>
   );
 }
 
@@ -1110,6 +1168,24 @@ function resolveMaxInputHeight(windowHeight: number, compact: boolean): number {
   return Math.max(DEFAULT_MAX_INPUT_HEIGHT, Math.floor(windowHeight * MAX_INPUT_VIEWPORT_RATIO));
 }
 
+function resolveComposerInputMaxHeight(windowHeight: number, compact: boolean, collapsed: boolean) {
+  if (collapsed) return MIN_INPUT_HEIGHT;
+  return resolveMaxInputHeight(windowHeight, compact);
+}
+
+function resolveEditorSlotMaxHeight(windowHeight: number, compact: boolean, fullscreen: boolean) {
+  if (Platform.OS !== "ios" || fullscreen) return undefined;
+  // Seed sheet-local and initial layout before the owning native candidate runs.
+  return resolveMaxInputHeight(windowHeight, compact);
+}
+
+function resolveEditorHeightStyle(fullscreen: boolean, heightStyle: TextStyle) {
+  if (fullscreen) return styles.fullscreenTextInput;
+  if (isWeb) return styles.webInlineTextInput;
+  if (Platform.OS === "ios") return styles.nativeEditorMinHeight;
+  return inlineUnistylesStyle(heightStyle);
+}
+
 function isTextAreaLike(v: unknown): v is TextAreaHandle {
   return typeof v === "object" && v !== null && "scrollHeight" in v;
 }
@@ -1289,6 +1365,68 @@ function shouldShowFullscreenControl(
   return compact && !readOnly && !overlayVisible && renderedLines > 2;
 }
 
+interface ComposerToolbarLayoutInput {
+  controlSizing: ReturnType<typeof controlSizingForLayout>;
+  isCompact: boolean;
+  showsAttachments: boolean;
+  hasLeft: boolean;
+  hasBeforeVoice: boolean;
+}
+
+function useComposerToolbarLayout({
+  controlSizing,
+  isCompact,
+  showsAttachments,
+  hasLeft,
+  hasBeforeVoice,
+}: ComposerToolbarLayoutInput) {
+  return useMemo(() => {
+    const leadingEdge = resolveComposerLeadingEdge({
+      showsAttach: showsAttachments,
+      showsAgentControls: hasLeft,
+    });
+    const expandedHeight = TOOLBAR_CONTROL_HEIGHT[isCompact ? "xs" : "md"];
+    const discSize = TOOLBAR_DISC_SIZES[controlSizing];
+    const isTouch = controlSizing === "touch";
+    const attachWidth = discSize - (isTouch ? 2 : 0);
+    const attachmentWidth = showsAttachments ? attachWidth : 0;
+    const left = -composerToolbarOverhang("attach", controlSizing);
+    const marginRight = -composerToolbarOverhang("disc", controlSizing);
+    const minWidth = discSize * (hasBeforeVoice ? 4 : 3) + (isTouch ? 6 : 0);
+    const attachmentGap = hasLeft ? TOOLBAR_CONTROL_GAPS[controlSizing] : 0;
+    const attachmentLayout: WindowLayoutVariants = {
+      expanded: { left, bottom: 0, height: expandedHeight },
+      collapsed: { left, bottom: 0, top: 0 },
+    };
+    const buttonRowLayout: WindowLayoutVariants = {
+      expanded: {
+        minHeight: expandedHeight,
+        marginTop: TOOLBAR_TOP_MARGIN[controlSizing],
+        flexShrink: 0,
+        marginLeft: -composerToolbarOverhang(leadingEdge, controlSizing),
+        marginRight,
+      },
+      collapsed: {
+        minHeight: discSize,
+        marginTop: 0,
+        width: hasLeft ? "60%" : undefined,
+        minWidth: hasLeft ? minWidth : undefined,
+        flexShrink: hasLeft ? 1 : 0,
+        marginLeft: 0,
+        marginRight,
+      },
+    };
+    const leftGroupLayout: WindowLayoutVariants = {
+      expanded: {
+        display: "flex",
+        paddingLeft: showsAttachments ? attachmentWidth + attachmentGap : 0,
+      },
+      collapsed: { display: hasLeft ? "flex" : "none", paddingLeft: 0 },
+    };
+    return { attachmentWidth, attachmentLayout, buttonRowLayout, leftGroupLayout };
+  }, [controlSizing, isCompact, showsAttachments, hasLeft, hasBeforeVoice]);
+}
+
 export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
   function MessageInput(props, ref) {
     const {
@@ -1341,20 +1479,45 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
     const mode = resolveComposerInputMode(inputMode);
     const { t } = useTranslation();
     const isCompact = useIsCompactFormFactor();
-    const { height: windowHeight } = useWindowDimensions();
+    const windowSize = useAppWindowSize();
+    const isLandscape = useAppWindowIsLandscape();
     const editingSession = useComposerEditingSession(inputMode, props.editingSession);
     const isFullscreen = useComposerFullscreen(editingSession);
     const [renderedLines, setRenderedLines] = useState(1);
-    const maxInputHeight = resolveMaxInputHeight(windowHeight, isCompact);
     const controlSizing = controlSizingForLayout(isCompact);
     const toolbarGlyph = toolbarGlyphsFor(controlSizing).icon;
-    const discGlyphSize = TOOLBAR_DISC_GLYPH_SIZES[controlSizing];
     const toast = useToast();
     const voice = useVoiceOptional();
     const voiceMuteToggleKeys = useShortcutKeys("voice-mute-toggle");
     const dictationToggleKeys = useShortcutKeys("dictation-toggle");
     const focusInputKeys = useShortcutKeys("focus-message-input");
     const [isInputFocused, setIsInputFocused] = useState(false);
+    const [settingsEditorFocused, setSettingsEditorFocused] = useState<boolean | null>(null);
+    const collapseInLandscape = resolveComposerCollapsed({
+      native: isNative,
+      isLandscape: true,
+      fullscreen: isFullscreen,
+      editorFocused: isInputFocused,
+      settingsEditorFocused,
+    });
+    const collapsed = isLandscape && collapseInLandscape;
+    const { prepare: prepareSurfaceTransition, layout: surfaceLayoutTransition } =
+      useComposerSurfaceTransition(collapsed, isFullscreen);
+    const updateInputFocus = useCallback(
+      (editorFocused: boolean) => {
+        prepareSurfaceTransition?.(
+          resolveComposerCollapsed({
+            native: isNative,
+            isLandscape,
+            fullscreen: isFullscreen,
+            editorFocused,
+            settingsEditorFocused,
+          }),
+        );
+        setIsInputFocused(editorFocused);
+      },
+      [prepareSurfaceTransition, isLandscape, isFullscreen, settingsEditorFocused],
+    );
     useKeyboardFocusSurface("message-input", isInputFocused && isPaneFocused);
     // Web text is DOM-owned between deferred draft publications. The action button only needs
     // this boundary, so publish empty/non-empty transitions without rerendering for every key.
@@ -1366,6 +1529,31 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
     const textInputRef = useRef<ComposerTextInputHandle | null>(null);
     const isInputFocusedRef = useRef(false);
     const focusIntentRef = useRef(false);
+    const openSettings = useCallback(() => {
+      const focused = isInputFocusedRef.current;
+      setSettingsEditorFocused((current) => current ?? focused);
+    }, []);
+    const closeSettings = useCallback(() => setSettingsEditorFocused(null), []);
+    const handleAttachmentOpenChange = useCallback(
+      (open: boolean) => {
+        if (!isNative || !isLandscape) return;
+        if (open) openSettings();
+        else closeSettings();
+      },
+      [closeSettings, openSettings, isLandscape],
+    );
+    const controlInteraction = useMemo(
+      () =>
+        isNative && isLandscape
+          ? { collapsed, onOpen: openSettings, onClose: closeSettings }
+          : null,
+      [collapsed, closeSettings, openSettings, isLandscape],
+    );
+    useEffect(() => {
+      if (!isPaneFocused || !isLandscape) {
+        setSettingsEditorFocused(null);
+      }
+    }, [isPaneFocused, isLandscape]);
     const valueRef = useRef(value);
     const selectionRef = useRef({ start: value.length, end: value.length });
     const paneFocusedRef = useRef(isPaneFocused);
@@ -1439,11 +1627,16 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       getText: getLiveText,
       textareaRef: webTextareaRef,
       minHeight: MIN_INPUT_HEIGHT,
-      maxHeight: maxInputHeight,
+      maxHeight: resolveComposerInputMaxHeight(windowSize.height, isCompact, collapsed),
       onRenderedLinesChange: setRenderedLines,
       presentationKey: isFullscreen,
     });
     const { style: composerHeightStyle, scrollEnabled: isComposerScrollEnabled } = composerHeight;
+    const expandedEditorMaxHeight = resolveEditorSlotMaxHeight(
+      windowSize.height,
+      isCompact,
+      isFullscreen,
+    );
     const measuredComposerHeight = composerHeight.mode === "measured" ? composerHeight : undefined;
     const updateComposerHeightForText = measuredComposerHeight?.onTextChange;
     const resetComposerHeight = measuredComposerHeight?.reset;
@@ -1968,17 +2161,22 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
     const handleInputFocus = useCallback(() => {
       focusIntentRef.current = true;
       isInputFocusedRef.current = true;
-      setIsInputFocused(true);
+      updateInputFocus(true);
       onFocusChange?.(true);
-    }, [onFocusChange]);
+    }, [onFocusChange, updateInputFocus]);
+
+    const focusInput = useMemo(() => {
+      if (readOnly || disabled || isDictating || isRealtimeVoiceForCurrentAgent) return undefined;
+      return () => textInputRef.current?.focus();
+    }, [readOnly, disabled, isDictating, isRealtimeVoiceForCurrentAgent]);
 
     const handleInputBlur = useCallback(() => {
       // A blur in the active pane is a dismissal; only hiding the pane preserves intent.
       if (paneFocusedRef.current) focusIntentRef.current = false;
       isInputFocusedRef.current = false;
-      setIsInputFocused(false);
+      updateInputFocus(false);
       onFocusChange?.(false);
-    }, [onFocusChange]);
+    }, [onFocusChange, updateInputFocus]);
 
     const handlePasteError = useCallback(
       (message: string) => {
@@ -2011,16 +2209,6 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       void handleStopRealtimeVoice();
     }, [handleStopRealtimeVoice]);
 
-    const inputWrapperCombinedStyle = useMemo(
-      () => [
-        styles.inputWrapper,
-        Platform.OS !== "ios" && isCompact && !isFullscreen && styles.inputWrapperCompact,
-        readOnly && styles.inputWrapperReadOnly,
-        inputWrapperStyle,
-        { opacity: surfacePresentation.input.opacity },
-      ],
-      [inputWrapperStyle, isCompact, isFullscreen, readOnly, surfacePresentation.input.opacity],
-    );
     // `withUnistyles` maps this component's `style` into a `.hash > *` child
     // rule, which ties on specificity with react-native-web's own
     // `.css-textinput-*` class and loses on source order — so a themed
@@ -2030,10 +2218,13 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       () => [
         styles.textInput,
         mode.isMonospace && styles.textInputMonospace,
-        isFullscreen ? styles.fullscreenTextInput : composerHeightStyle,
-        isCompact && !isFullscreen && styles.compactTextInput,
+        resolveEditorHeightStyle(isFullscreen, composerHeightStyle),
+        isWeb && isCompact && !isFullscreen && styles.compactWebTextInput,
+        !isWeb &&
+          Platform.OS !== "ios" &&
+          inlineUnistylesStyle({ paddingRight: isCompact && !isFullscreen && !collapsed ? 36 : 0 }),
       ],
-      [composerHeightStyle, mode.isMonospace, isFullscreen, isCompact],
+      [composerHeightStyle, mode.isMonospace, isFullscreen, isCompact, collapsed],
     );
     // Static content has no textarea to mirror, so it grows with its own text
     // instead of the measured input height.
@@ -2085,10 +2276,9 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
           isDictating={isDictating}
           isMutedRealtime={Boolean(isRealtimeVoiceForCurrentAgent && voice?.isMuted)}
           glyph={toolbarGlyph}
-          discGlyphSize={discGlyphSize}
         />
       ),
-      [isDictating, isRealtimeVoiceForCurrentAgent, voice?.isMuted, toolbarGlyph, discGlyphSize],
+      [isDictating, isRealtimeVoiceForCurrentAgent, voice?.isMuted, toolbarGlyph],
     );
 
     const sendButton = useMemo(
@@ -2153,6 +2343,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
             textReplacementKey={textReplacement.key}
             textInputRef={assignTextInput}
             textInputStyle={textInputStyle}
+            measuredHeightStyle={composerHeightStyle}
             readOnlyTextStyle={readOnlyTextStyle}
             placeholder={placeholder ?? t("composer.placeholders.fallback")}
             accessibilityLabel={t(mode.accessibilityLabelKey)}
@@ -2167,7 +2358,10 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
             onPasteImages={onPasteImages}
             onPasteError={handlePasteError}
             fullscreen={isFullscreen}
+            expandedMaxHeight={expandedEditorMaxHeight}
             compact={isCompact}
+            collapsed={collapsed}
+            collapseInLandscape={collapseInLandscape}
             onRenderedLinesChange={setRenderedLines}
             focusHintVisible={!isFullscreen && isWeb && !isInputFocused && !hasLiveText}
             focusInputKeys={focusInputKeys}
@@ -2182,6 +2376,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
         textReplacement,
         assignTextInput,
         textInputStyle,
+        composerHeightStyle,
         readOnlyTextStyle,
         placeholder,
         t,
@@ -2199,48 +2394,69 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
         onPasteImages,
         handlePasteError,
         isFullscreen,
+        expandedEditorMaxHeight,
         isCompact,
+        collapsed,
+        collapseInLandscape,
         isInputFocused,
         hasLiveText,
         value,
         focusInputKeys,
       ],
     );
-    const leadingEdge = resolveComposerLeadingEdge({
-      showsAttach: mode.showAttachments,
-      showsAgentControls: leftContent != null,
-    });
-    // The trailing control is always a disc: voice mode, then Send or Stop.
-    const trailingEdge = "disc";
-    const buttonRowStyle = useMemo(
-      () => [
-        styles.buttonRow,
-        {
-          marginLeft: -composerToolbarOverhang(leadingEdge, controlSizing),
-          marginRight: -composerToolbarOverhang(trailingEdge, controlSizing),
-        },
+    const { attachmentWidth, attachmentLayout, buttonRowLayout, leftGroupLayout } =
+      useComposerToolbarLayout({
+        controlSizing,
+        isCompact,
+        showsAttachments: mode.showAttachments,
+        hasLeft: leftContent != null,
+        hasBeforeVoice: beforeVoiceContent != null,
+      });
+    const attachmentButton = useMemo(
+      () => (
+        <AttachmentDropdown
+          visible={mode.showAttachments}
+          isConnected={isConnected}
+          disabled={disabled}
+          attachButtonStyle={attachButtonStyle}
+          renderAttachButtonIcon={renderAttachButtonIcon}
+          attachmentMenuItems={attachmentMenuItems}
+          addAttachmentLabel={t("composer.input.addAttachment")}
+          onOpenChange={handleAttachmentOpenChange}
+        />
+      ),
+      [
+        mode.showAttachments,
+        isConnected,
+        disabled,
+        attachButtonStyle,
+        renderAttachButtonIcon,
+        attachmentMenuItems,
+        t,
+        handleAttachmentOpenChange,
       ],
-      [controlSizing, leadingEdge, trailingEdge],
     );
     const toolbar = useMemo(
       () => (
-        <View style={buttonRowStyle}>
-          {/* Toolbar left: attachment button + agent controls */}
-          <View style={styles.leftButtonGroup}>
-            <AttachmentDropdown
-              visible={mode.showAttachments}
-              isConnected={isConnected}
-              disabled={disabled}
-              attachButtonStyle={attachButtonStyle}
-              renderAttachButtonIcon={renderAttachButtonIcon}
-              attachmentMenuItems={attachmentMenuItems}
-              addAttachmentLabel={t("composer.input.addAttachment")}
-            />
+        <WindowLayoutVariantView
+          style={styles.buttonRow}
+          variants={buttonRowLayout}
+          collapsed={collapsed}
+          collapseInLandscape={collapseInLandscape}
+          pointerEvents="box-none"
+        >
+          <WindowLayoutVariantView
+            style={styles.leftButtonGroup}
+            variants={leftGroupLayout}
+            collapsed={collapsed}
+            collapseInLandscape={collapseInLandscape}
+            pointerEvents="box-none"
+          >
             {leftContent}
-          </View>
+          </WindowLayoutVariantView>
 
           {/* Right: dictation, then the trailing action (voice mode, send or stop) */}
-          <View style={styles.rightButtonGroup}>
+          <View style={styles.rightButtonGroup} pointerEvents="box-none">
             {beforeVoiceContent}
             <VoiceButtonTooltip
               visible={mode.showVoice}
@@ -2256,17 +2472,13 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
             />
             <View style={styles.trailingDisc}>{sendButton}</View>
           </View>
-        </View>
+        </WindowLayoutVariantView>
       ),
       [
-        buttonRowStyle,
-        mode.showAttachments,
-        isConnected,
-        disabled,
-        attachButtonStyle,
-        renderAttachButtonIcon,
-        attachmentMenuItems,
-        t,
+        buttonRowLayout,
+        collapsed,
+        collapseInLandscape,
+        leftGroupLayout,
         leftContent,
         beforeVoiceContent,
         mode.showVoice,
@@ -2328,43 +2540,57 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       ],
     );
     return (
-      <View
-        ref={rootRef}
-        style={
-          isFullscreen
-            ? styles.fullscreenContainer
-            : [styles.container, Platform.OS === "ios" && isCompact && styles.inputWrapperCompact]
-        }
-        testID="message-input-root"
-        onLayout={handleComposerLayout}
-      >
-        <MessageInputAutoFocus
-          enabled={autoFocus}
-          autoFocusKey={autoFocusKey}
-          textInputRef={textInputRef}
-        />
-        <ComposerInputPresentation
-          fullscreen={isFullscreen}
-          controlSizing={controlSizing}
-          surface={textSurface}
-          toolbar={toolbar}
-          send={sendButton}
-          error={props.submissionError}
-          onExit={exitFullscreen}
-          inputWrapperRef={inputWrapperRef}
-          inputWrapperStyle={inputWrapperCombinedStyle}
-          inputPointerEvents={surfacePresentation.input.pointerEvents}
-          attachmentSlot={attachmentSlot}
-          showFullscreenButton={shouldShowFullscreenControl(
-            isCompact,
-            readOnly,
-            showOverlay,
-            renderedLines,
-          )}
-          onEnter={enterFullscreen}
-          overlay={voiceOverlay}
-        />
-      </View>
+      <ComposerControlInteractionContext.Provider value={controlInteraction}>
+        <View
+          ref={rootRef}
+          // Keep the native stacking boundary when only the compact mode paints a shadow.
+          collapsable={false}
+          style={
+            isFullscreen
+              ? styles.fullscreenContainer
+              : [styles.container, Platform.OS === "ios" && isCompact && styles.inputWrapperCompact]
+          }
+          testID="message-input-root"
+          onLayout={handleComposerLayout}
+        >
+          <MessageInputAutoFocus
+            enabled={autoFocus}
+            autoFocusKey={autoFocusKey}
+            textInputRef={textInputRef}
+          />
+          <ComposerInputPresentation
+            fullscreen={isFullscreen}
+            collapsed={collapsed}
+            collapseInLandscape={collapseInLandscape}
+            layoutTransition={surfaceLayoutTransition}
+            isCompact={isCompact}
+            readOnly={readOnly}
+            opacity={surfacePresentation.input.opacity}
+            attachmentControl={attachmentButton}
+            attachmentControlLayout={attachmentLayout}
+            attachmentControlWidth={attachmentWidth}
+            controlSizing={controlSizing}
+            surface={textSurface}
+            toolbar={toolbar}
+            send={sendButton}
+            error={props.submissionError}
+            onExit={exitFullscreen}
+            onFocusInput={focusInput}
+            inputWrapperRef={inputWrapperRef}
+            inputWrapperStyle={inputWrapperStyle}
+            inputPointerEvents={surfacePresentation.input.pointerEvents}
+            attachmentSlot={attachmentSlot}
+            showFullscreenButton={shouldShowFullscreenControl(
+              isCompact,
+              readOnly,
+              showOverlay,
+              renderedLines,
+            )}
+            onEnter={enterFullscreen}
+            overlay={voiceOverlay}
+          />
+        </View>
+      </ComposerControlInteractionContext.Provider>
     );
   },
 );
@@ -2378,42 +2604,16 @@ const styles = StyleSheet.create((theme: Theme) => ({
     flex: 1,
     position: "relative",
   },
-  inputWrapper: {
-    ...(Platform.OS === "ios" ? { overflow: "hidden" as const } : {}),
-    flexShrink: 1,
-    flexDirection: "column",
-    gap: theme.spacing[3],
-    backgroundColor: theme.colors.surface1,
-    borderWidth: theme.borderWidth[1],
-    borderColor: theme.colors.borderAccent,
-    borderRadius: COMPOSER_CORNER_RADIUS,
-    paddingTop: COMPOSER_PADDING_TOP,
-    paddingBottom: COMPOSER_PADDING_BOTTOM,
-    paddingHorizontal: COMPOSER_PADDING_HORIZONTAL,
-    ...(isWeb
-      ? {
-          transitionProperty: "border-color",
-          transitionDuration: "200ms",
-          transitionTimingFunction: "ease-in-out",
-        }
-      : {}),
-  },
   // Lifts the composer off the chat it sits under on phones.
   inputWrapperCompact: {
     ...theme.shadow.sm,
   },
-  // Dotted says "this surface is the same box, but there is nothing to type
-  // into it" without swapping the border colour, which reads as an error state.
-  inputWrapperReadOnly: {
-    borderStyle: "dotted",
-  },
-  // The band the fullscreen glyph sits in is the input's own padding, so a tap
-  // anywhere in it (under the glyph, or where the glyph would be) is a tap on the
-  // editor: it focuses, shows the keyboard, and places the caret. Reserved whether
-  // or not the glyph shows, so text never reflows when it appears.
-  compactTextInput: { paddingRight: 36 },
   fullscreenTextSurface: { flex: 1, minHeight: 0 },
   fullscreenTextInput: { flex: 1, height: "100%", textAlignVertical: "top" },
+  webInlineTextInput: { flex: 1, minHeight: 0 },
+  // Keep the reserved band inside the textarea so it places the caret even without the button.
+  compactWebTextInput: { paddingRight: 36 },
+  nativeEditorMinHeight: { minHeight: MIN_INPUT_HEIGHT },
   lineMeasurement: {
     position: "absolute",
     top: 0,
@@ -2428,6 +2628,15 @@ const styles = StyleSheet.create((theme: Theme) => ({
     flexShrink: 1,
     position: "relative",
   },
+  collapsedPlaceholder: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    justifyContent: "center",
+  },
+  placeholderText: { color: theme.colors.surface4 },
   focusHintText: {
     position: "absolute",
     top: 0,
@@ -2466,6 +2675,8 @@ const styles = StyleSheet.create((theme: Theme) => ({
   // The row keeps a full touch target's height; its disc-sized controls centre in it.
   buttonRow: {
     minHeight: TOOLBAR_CONTROL_HEIGHT,
+    // Preserve the attachment gap; only bring the toolbar closer to the editor.
+    marginTop: bySizing({ touch: -theme.spacing[3], pointer: -theme.spacing[1] }),
     flexShrink: 0,
     flexDirection: "row",
     alignItems: "center",
@@ -2506,28 +2717,29 @@ const styles = StyleSheet.create((theme: Theme) => ({
     justifyContent: "center",
   },
   voiceButton: {
-    ...toolbarSlot(),
+    width: COMPOSER_ACTION_TARGET_SIZE,
+    height: COMPOSER_ACTION_TARGET_SIZE,
     borderRadius: theme.borderRadius.full,
     alignItems: "center",
     justifyContent: "center",
   },
   voiceButtonRecordingDisc: {
-    width: TOOLBAR_DISC_SIZE,
-    height: TOOLBAR_DISC_SIZE,
+    width: COMPOSER_ACTION_DISC_SIZE,
+    height: COMPOSER_ACTION_DISC_SIZE,
     borderRadius: theme.borderRadius.full,
     backgroundColor: theme.colors.destructive,
     alignItems: "center",
     justifyContent: "center",
   },
   sendButton: {
-    minWidth: TOOLBAR_DISC_SIZE,
-    height: TOOLBAR_DISC_SIZE,
+    minWidth: COMPOSER_ACTION_TARGET_SIZE,
+    height: COMPOSER_ACTION_TARGET_SIZE,
     alignItems: "center",
     justifyContent: "center",
   },
   sendButtonDisc: {
-    width: TOOLBAR_DISC_SIZE,
-    height: TOOLBAR_DISC_SIZE,
+    width: COMPOSER_ACTION_DISC_SIZE,
+    height: COMPOSER_ACTION_DISC_SIZE,
     borderRadius: theme.borderRadius.full,
     backgroundColor: theme.colors.accent,
     alignItems: "center",

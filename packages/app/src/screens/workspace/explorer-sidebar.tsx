@@ -15,7 +15,8 @@ import type { WorkspacePaneContentModel } from "@/screens/workspace/workspace-pa
 import type { WorkspaceTabDescriptor } from "@/screens/workspace/workspace-tabs-types";
 import type { SplitPane } from "@/stores/workspace-layout-store";
 import type { WorkspaceTab } from "@/workspace-tabs/model";
-import { WindowChromeRegion, WindowChromeSafeArea } from "@/utils/desktop-window";
+import { WindowChromeRegion } from "@/utils/desktop-window";
+import { ExplorerRailChrome } from "./explorer-sidebar/rail-chrome";
 
 interface ExplorerSidebarDockProps extends Pick<
   WorkspaceDesktopTabsRowProps,
@@ -123,44 +124,46 @@ export function ExplorerSidebarDock({
     <RetainedPanel active>
       <WindowChromeRegion corners="top-right">
         <View style={styles.dock} testID="workspace-explorer-sidebar">
-          <WindowChromeSafeArea placement="inline" style={styles.tabRail}>
-            <TitlebarDragRegion />
-            <View style={styles.tabRow}>
-              <WorkspaceDesktopTabsRow
-                host="explorer"
-                launchPurpose="supporting"
-                isFocused={isWorkspaceFocused}
-                ownsKeyboardShortcuts={false}
-                setHoveredCloseTabKey={setHoveredCloseTabKey}
-                onCopyResumeCommand={onCopyResumeCommand}
-                onCopyAgentId={onCopyAgentId}
-                onCopyTerminalId={onCopyTerminalId}
-                onCopyFilePath={onCopyFilePath}
-                onReloadAgent={onReloadAgent}
-                onRenameTab={onRenameTab}
-                onCloseTabsToLeft={handleCloseTabsToLeft}
-                onCloseTabsToRight={handleCloseTabsToRight}
-                onCloseOtherTabs={handleCloseOtherTabs}
-                focusModeEnabled={false}
-                onExitFocusMode={onExitFocusMode}
-                externalDndContext={externalDndContext}
-                paneId={pane.id}
-                tabs={tabItems}
-                normalizedServerId={normalizedServerId}
-                normalizedWorkspaceId={normalizedWorkspaceId}
-                activeDragTabId={activeDragTabId}
-                tabDropPreviewIndex={
-                  tabDropPreview?.paneId === pane.id ? tabDropPreview.indicatorIndex : null
-                }
-                onNavigateTab={handleSelectTab}
-                onCloseTab={onCloseTab}
-                onCreateNewTab={onCreateNewTab}
-                onReorderTabs={handleReorderTabs}
-              />
-            </View>
-            {headerAction ? <View style={styles.headerAction}>{headerAction}</View> : null}
+          <View style={styles.tabRail}>
+            <ExplorerRailChrome>
+              <TitlebarDragRegion />
+              <View style={styles.tabRow}>
+                <WorkspaceDesktopTabsRow
+                  host="explorer"
+                  launchPurpose="supporting"
+                  isFocused={isWorkspaceFocused}
+                  ownsKeyboardShortcuts={false}
+                  setHoveredCloseTabKey={setHoveredCloseTabKey}
+                  onCopyResumeCommand={onCopyResumeCommand}
+                  onCopyAgentId={onCopyAgentId}
+                  onCopyTerminalId={onCopyTerminalId}
+                  onCopyFilePath={onCopyFilePath}
+                  onReloadAgent={onReloadAgent}
+                  onRenameTab={onRenameTab}
+                  onCloseTabsToLeft={handleCloseTabsToLeft}
+                  onCloseTabsToRight={handleCloseTabsToRight}
+                  onCloseOtherTabs={handleCloseOtherTabs}
+                  focusModeEnabled={false}
+                  onExitFocusMode={onExitFocusMode}
+                  externalDndContext={externalDndContext}
+                  paneId={pane.id}
+                  tabs={tabItems}
+                  normalizedServerId={normalizedServerId}
+                  normalizedWorkspaceId={normalizedWorkspaceId}
+                  activeDragTabId={activeDragTabId}
+                  tabDropPreviewIndex={
+                    tabDropPreview?.paneId === pane.id ? tabDropPreview.indicatorIndex : null
+                  }
+                  onNavigateTab={handleSelectTab}
+                  onCloseTab={onCloseTab}
+                  onCreateNewTab={onCreateNewTab}
+                  onReorderTabs={handleReorderTabs}
+                />
+              </View>
+              {headerAction ? <View style={styles.headerAction}>{headerAction}</View> : null}
+            </ExplorerRailChrome>
             <View pointerEvents="none" style={styles.tabRailDivider} />
-          </WindowChromeSafeArea>
+          </View>
           <View style={styles.content}>
             <WorkspacePanelHost
               paneId={pane.id}

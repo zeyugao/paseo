@@ -1,10 +1,24 @@
 import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { Button } from "@/components/ui/button";
+import { ComposerTrackBar } from "@/composer/tracks";
+import {
+  ComposerDockContentInsetsContext,
+  type ComposerDockContentInsets,
+} from "@/composer/dock/content-insets";
+import {
+  COMPOSER_PILL_MIN_HEIGHT,
+  composerPillStyles,
+  resolveComposerTrackTailClearance,
+} from "@/composer/pill-styles";
+import { useReadingPositionRestore } from "./use-reading-position-restore";
+import type { CapturedReadingPosition, ReadingPositionPersistence } from "./reading-position";
 import React, {
   forwardRef,
   memo,
   useCallback,
   useEffect,
+  useContext,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -254,10 +268,8 @@ export interface AgentStreamViewProps {
   isAuthoritativeHistoryReady?: boolean;
   isInitialHistoryLoading?: boolean;
   revealInitialHistory?: boolean;
-  /** Tail space required by a transparent overlay rendered at the bottom edge. */
-  bottomOverlayTailClearance?: number;
-  /** Bottom offset required for controls floating above that overlay. */
-  bottomOverlayControlClearance?: number;
+  readingPosition?: ReadingPositionPersistence;
+  bottomBarContent?: ReactNode;
   toast?: ToastApi | null;
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
   readOnly?: boolean;
@@ -293,10 +305,6 @@ function useRetainedValue<T>(value: T, active: boolean): T {
 const EMPTY_PENDING_MESSAGE_SUBMISSIONS: readonly PendingMessageSubmission[] = [];
 const GROUPED_TOOL_CALL_DETAIL_MAX_HEIGHT = 200;
 
-function resolveBottomOverlayControlOffset(clearance: number | undefined): number {
-  return Math.max(16, clearance ?? 0);
-}
-
 // Keep entry/exit animations off on Android due to RN dispatchDraw crashes
 // tracked in react-native-reanimated#8422.
 const shouldDisableEntryExitAnimations = Platform.OS === "android";
@@ -306,34 +314,72 @@ const scrollIndicatorFadeOut = shouldDisableEntryExitAnimations ? undefined : Fa
 function ScrollToBottomButton({
   nearBottom,
   isTimelineDetached,
-  bottomOffset,
   onPress,
 }: {
   nearBottom: NearBottom;
   isTimelineDetached: boolean;
-  bottomOffset: number;
   onPress: () => void;
 }) {
   const { t } = useTranslation();
   const isNearBottom = useIsNearBottom(nearBottom);
-  const containerStyle = useMemo(
-    () => [stylesheet.scrollToBottomContainer, { bottom: bottomOffset }],
-    [bottomOffset],
-  );
   if (isNearBottom && !isTimelineDetached) return null;
   return (
-    <View style={containerStyle} pointerEvents="box-none">
-      <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
-        <Pressable
-          style={stylesheet.scrollToBottomButton}
-          onPress={onPress}
-          accessibilityRole="button"
-          accessibilityLabel={t("agentStream.scrollToBottom")}
-          testID="scroll-to-bottom-button"
-        >
-          <ChevronDown size={24} color={stylesheet.scrollToBottomIcon.color} />
-        </Pressable>
-      </Animated.View>
+    <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
+      <Button
+        size="sm"
+        variant="outline"
+        style={[composerPillStyles.body, stylesheet.scrollToBottomButton]}
+        leftIcon={ChevronDown}
+        onPress={onPress}
+        accessibilityLabel={t("agentStream.scrollToBottom")}
+        testID="scroll-to-bottom-button"
+      />
+    </Animated.View>
+  );
+}
+
+function useReadingDisclosures(agentId: string, persistence?: ReadingPositionPersistence) {
+  const saved = persistence?.initial?.agentId === agentId ? persistence.initial : null;
+  const toolCallExpansion = useAgentToolCallExpansion(agentId, saved?.toolCallExpansion);
+  const userMessageExpansion = useAgentUserMessageExpansion(agentId, saved?.expandedUserMessageIds);
+  const [expandedTurnHostIds, setExpandedTurnHostIds] = useState<ReadonlySet<string>>(
+    () => new Set(saved?.expandedTurnHostIds ?? []),
+  );
+  const saveReadingPosition = useStableEvent((position: CapturedReadingPosition | null) => {
+    persistence?.save(
+      position
+        ? {
+            ...position,
+            expandedTurnHostIds: Array.from(expandedTurnHostIds),
+            expandedUserMessageIds: userMessageExpansion.capture(),
+            toolCallExpansion: toolCallExpansion.capture(),
+          }
+        : null,
+    );
+  });
+  return {
+    toolCallExpansion,
+    userMessageExpansion,
+    expandedTurnHostIds,
+    setExpandedTurnHostIds,
+    saveReadingPosition,
+  };
+}
+
+function ReadingPositionLoading({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <View style={stylesheet.emptyState}>
+      {failed ? (
+        <>
+          <Text style={stylesheet.syncingIndicatorText}>{t("agentStream.historyLoadFailed")}</Text>
+          <Button variant="ghost" size="sm" onPress={onRetry}>
+            {t("paneFind.retry")}
+          </Button>
+        </>
+      ) : (
+        <ThemedLoadingSpinner size="large" uniProps={mutedColorMapping} />
+      )}
     </View>
   );
 }
@@ -353,8 +399,8 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       isAuthoritativeHistoryReady = true,
       isInitialHistoryLoading,
       revealInitialHistory,
-      bottomOverlayTailClearance = 0,
-      bottomOverlayControlClearance,
+      readingPosition,
+      bottomBarContent,
       toast,
       onOpenWorkspaceFile,
       readOnly = false,
@@ -363,6 +409,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     ref,
   ) {
     const { t } = useTranslation();
+    const contentInsets = useContext(ComposerDockContentInsetsContext);
     const autoExpandReasoning = useSettings((settings) => settings.autoExpandReasoning);
     const chatDisplay = useSettings((settings) => settings.chatDisplay);
     const chatOutlineEnabled = useSettings((settings) => settings.chatOutlineEnabled);
@@ -373,6 +420,11 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       [pendingMessageSubmissions],
     );
     const isMobile = useIsCompactFormFactor();
+    const [bottomBarContentHeight, setBottomBarContentHeight] = useState(0);
+    const bottomOverlayTailClearance = resolveComposerTrackTailClearance({
+      isCompact: isMobile,
+      contentHeight: bottomBarContentHeight,
+    });
     const streamRenderStrategy = useMemo(
       () =>
         resolveStreamRenderStrategy({
@@ -385,10 +437,14 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const [expandedInlineToolCallIds, setExpandedInlineToolCallIds] = useState<Set<string>>(
       new Set(),
     );
-    const toolCallExpansion = useAgentToolCallExpansion(agentId);
-    const userMessageExpansion = useAgentUserMessageExpansion(agentId);
+    const {
+      toolCallExpansion,
+      userMessageExpansion,
+      expandedTurnHostIds,
+      setExpandedTurnHostIds,
+      saveReadingPosition,
+    } = useReadingDisclosures(agentId, readingPosition);
     const expandedToolCallGroups = useExpandedToolCallGroups(toolCallExpansion);
-    const [expandedTurnHostIds, setExpandedTurnHostIds] = useState<ReadonlySet<string>>(new Set());
 
     // Get serverId (fallback to agent's serverId if not provided)
     const resolvedServerId = serverId ?? context.serverId ?? "";
@@ -550,6 +606,17 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         effectiveTurnPresentation.turnId,
       ],
     );
+    const readingRestore = useReadingPositionRestore({
+      agentId,
+      serverId: resolvedServerId,
+      epoch: timelineEpoch,
+      isAuthoritativeHistoryReady,
+      isActive,
+      tail: presentation.tail,
+      head: presentation.head,
+      replacements: presentation.readingRowReplacements,
+      persistence: isWeb ? undefined : readingPosition,
+    });
     const {
       start: historyWindowStart,
       hasLocalHistory,
@@ -557,6 +624,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       loadOlder,
     } = useStreamHistoryWindow({
       items: presentation.tail,
+      initialRowId: readingRestore.position?.rowId,
       loadRemoteOlder,
     });
     const isLoadingOlder = remoteIsLoadingOlder;
@@ -630,20 +698,25 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       revealLoadedMessage: revealLoadedHistory,
     });
 
+    const requestBottomAnchor = useStableEvent((reason: BottomAnchorLocalRequest["reason"]) => {
+      readingRestore.cancel();
+      viewportRef.current?.scrollToBottom(reason);
+    });
     useImperativeHandle(
       ref,
       () => ({
         scrollToBottom(reason = "jump-to-bottom") {
-          viewportRef.current?.scrollToBottom(reason);
+          requestBottomAnchor(reason);
         },
         prepareForViewportChange() {
           viewportRef.current?.prepareForViewportChange();
         },
       }),
-      [],
+      [requestBottomAnchor],
     );
 
-    const scrollToBottom = useCallback(() => {
+    const scrollToBottom = useStableEvent(() => {
+      readingRestore.cancel();
       if (!isTimelineDetached) {
         viewportRef.current?.scrollToBottom("jump-to-bottom");
         return;
@@ -656,7 +729,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         scrollToBottom: () => viewportRef.current?.scrollToBottom("jump-to-bottom"),
         onError: handleTimelineHistoryLoadError,
       });
-    }, [agentId, handleTimelineHistoryLoadError, isTimelineDetached, resolvedServerId]);
+    });
 
     const setInlineDetailsExpanded = useCallback(
       (itemId: string, expanded: boolean) => {
@@ -677,18 +750,21 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     );
 
     // The summary line holds its row around this; chat find opens a turn without a hold.
-    const setTurnExpanded = useCallback((hostId: string, expanded: boolean) => {
-      setExpandedTurnHostIds((previous) => {
-        if (previous.has(hostId) === expanded) return previous;
-        const next = new Set(previous);
-        if (expanded) {
-          next.add(hostId);
-        } else {
-          next.delete(hostId);
-        }
-        return next;
-      });
-    }, []);
+    const setTurnExpanded = useCallback(
+      (hostId: string, expanded: boolean) => {
+        setExpandedTurnHostIds((previous) => {
+          if (previous.has(hostId) === expanded) return previous;
+          const next = new Set(previous);
+          if (expanded) {
+            next.add(hostId);
+          } else {
+            next.delete(hostId);
+          }
+          return next;
+        });
+      },
+      [setExpandedTurnHostIds],
+    );
     // Chat find reveals a match inside a collapsed turn by opening the turn first.
     const revealLoadedMessage = useStableEvent((messageId: string): boolean => {
       const hostId = presentation.turns.hostIdByFoldedMessageId.get(messageId);
@@ -1034,7 +1110,6 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     }, [baseRenderModel, pendingPermissionsNode, turnFooterNode]);
 
     const emptyStateStyle = useMemo(() => [stylesheet.emptyState, stylesheet.contentWrapper], []);
-    const scrollToBottomOffset = resolveBottomOverlayControlOffset(bottomOverlayControlClearance);
     const listEmptyComponent = useMemo(
       () =>
         renderListEmptyComponent({
@@ -1162,6 +1237,16 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       () => [...effectiveStreamItems, ...(effectiveStreamHead ?? [])],
       [effectiveStreamItems, effectiveStreamHead],
     );
+    const bottomBarTrailing = useMemo(
+      () => (
+        <ScrollToBottomButton
+          nearBottom={nearBottom}
+          isTimelineDetached={isTimelineDetached}
+          onPress={scrollToBottom}
+        />
+      ),
+      [nearBottom, isTimelineDetached, scrollToBottom],
+    );
     return (
       <ChatFind
         agentId={agentId}
@@ -1177,32 +1262,41 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             <MessageOuterSpacingProvider disableOuterSpacing>
               <ToolCallExpansionContext.Provider value={toolCallExpansion}>
                 <UserMessageExpansionContext.Provider value={userMessageExpansion}>
-                  {streamRenderStrategy.render({
-                    readingRowReplacements: presentation.readingRowReplacements,
-                    agentId,
-                    segments: renderModel.segments,
-                    historyRowRevision,
-                    liveHeadRowRevision: expandedToolCallGroups,
-                    boundary,
-                    renderers,
-                    listEmptyComponent,
-                    viewportRef,
-                    routeBottomAnchorRequest,
-                    isAuthoritativeHistoryReady,
-                    isInitialHistoryLoading,
-                    revealInitialHistory,
-                    onNearBottomChange: nearBottom.set,
-                    onReadingPositionChange: handleReadingPositionChange,
-                    onNearHistoryStart: loadOlder,
-                    isLoadingOlderHistory: isLoadingOlder,
-                    hasOlderHistory: hasOlder,
-                    olderHistoryProgressKey: progressKey,
-                    scrollEnabled: streamScrollEnabled,
-                    listStyle: stylesheet.list,
-                    baseListContentContainerStyle: stylesheet.listContentContainer,
-                    forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
-                    contentMaxWidth,
-                  })}
+                  {readingRestore.pending ? (
+                    <ReadingPositionLoading
+                      failed={readingRestore.failed}
+                      onRetry={readingRestore.retry}
+                    />
+                  ) : (
+                    streamRenderStrategy.render({
+                      readingRowReplacements: presentation.readingRowReplacements,
+                      agentId,
+                      segments: renderModel.segments,
+                      historyRowRevision,
+                      liveHeadRowRevision: expandedToolCallGroups,
+                      boundary,
+                      renderers,
+                      listEmptyComponent,
+                      viewportRef,
+                      routeBottomAnchorRequest,
+                      isAuthoritativeHistoryReady,
+                      isInitialHistoryLoading,
+                      revealInitialHistory,
+                      onNearBottomChange: nearBottom.set,
+                      onReadingPositionChange: handleReadingPositionChange,
+                      initialReadingPosition: readingRestore.position,
+                      onSaveReadingPosition: readingPosition ? saveReadingPosition : undefined,
+                      onNearHistoryStart: loadOlder,
+                      isLoadingOlderHistory: isLoadingOlder,
+                      hasOlderHistory: hasOlder,
+                      olderHistoryProgressKey: progressKey,
+                      scrollEnabled: streamScrollEnabled,
+                      listStyle: stylesheet.list,
+                      baseListContentContainerStyle: stylesheet.listContentContainer(contentInsets),
+                      forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
+                      contentMaxWidth,
+                    })
+                  )}
                 </UserMessageExpansionContext.Provider>
               </ToolCallExpansionContext.Provider>
             </MessageOuterSpacingProvider>
@@ -1211,12 +1305,12 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               activePrompt={chatOutline.activePrompt}
               onJumpToPrompt={chatOutline.jumpToPrompt}
             />
-            <ScrollToBottomButton
-              nearBottom={nearBottom}
-              isTimelineDetached={isTimelineDetached}
-              bottomOffset={scrollToBottomOffset}
-              onPress={scrollToBottom}
-            />
+            <ComposerTrackBar
+              trailing={bottomBarTrailing}
+              onContentHeightChange={setBottomBarContentHeight}
+            >
+              {bottomBarContent}
+            </ComposerTrackBar>
           </AssistantSelectionCopySurface>
         </ToolCallSheetProvider>
       </ChatFind>
@@ -1341,11 +1435,9 @@ function agentStreamViewPropsEqual(
   if (left.revealInitialHistory !== right.revealInitialHistory) {
     reasons.push("revealInitialHistory");
   }
-  if (left.bottomOverlayTailClearance !== right.bottomOverlayTailClearance) {
-    reasons.push("bottomOverlayTailClearance");
-  }
-  if (left.bottomOverlayControlClearance !== right.bottomOverlayControlClearance) {
-    reasons.push("bottomOverlayControlClearance");
+  if (left.readingPosition !== right.readingPosition) reasons.push("readingPosition");
+  if (left.bottomBarContent !== right.bottomBarContent) {
+    reasons.push("bottomBarContent");
   }
   if (left.toast !== right.toast) reasons.push("toast");
   if (left.onOpenWorkspaceFile !== right.onOpenWorkspaceFile) reasons.push("onOpenWorkspaceFile");
@@ -1719,14 +1811,18 @@ const stylesheet = StyleSheet.create((theme) => ({
     alignSelf: "center",
     paddingHorizontal: theme.spacing[2],
   },
-  listContentContainer: {
+  listContentContainer: ({ paddingLeft, paddingRight }: ComposerDockContentInsets) => ({
     paddingVertical: 0,
     flexGrow: 1,
-    paddingHorizontal: {
-      xs: theme.spacing[3],
-      md: theme.spacing[4],
+    paddingLeft: {
+      xs: theme.spacing[3] + paddingLeft,
+      md: theme.spacing[4] + paddingLeft,
     },
-  },
+    paddingRight: {
+      xs: theme.spacing[3] + paddingRight,
+      md: theme.spacing[4] + paddingRight,
+    },
+  }),
   forwardListContentContainer: {
     paddingTop: theme.spacing[4],
     paddingBottom: theme.spacing[4],
@@ -1768,23 +1864,13 @@ const stylesheet = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.base,
     textAlign: "center",
   },
-  scrollToBottomContainer: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    alignItems: "center",
-  },
   scrollToBottomButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: theme.colors.surface2,
-    alignItems: "center",
-    justifyContent: "center",
-    ...theme.shadow.sm,
-  },
-  scrollToBottomIcon: {
-    color: theme.colors.foreground,
+    width: COMPOSER_PILL_MIN_HEIGHT,
+    height: COMPOSER_PILL_MIN_HEIGHT,
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+    borderRadius: theme.borderRadius.full,
+    flexShrink: 0,
   },
 }));
 

@@ -7,6 +7,8 @@ import {
   type ReactElement,
 } from "react";
 import { ScrollView, Text, View } from "react-native";
+import { GestureDetector } from "react-native-gesture-handler";
+import { usePanelAwareVerticalScrollGesture } from "@/mobile-panels/gestures";
 import { useIsFocused } from "expo-router/react-navigation";
 import { CalendarClock, Plus } from "lucide-react-native";
 import { StyleSheet } from "react-native-unistyles";
@@ -221,6 +223,7 @@ function SchedulesScreenBody({
   onCreate: () => void;
   onEdit: (schedule: AggregatedSchedule) => void;
 }): ReactElement {
+  const scrollGesture = usePanelAwareVerticalScrollGesture();
   const bodyState = resolveSchedulesScreenBodyState({ loadState, showLoadError });
 
   if (bodyState.kind === "loading") {
@@ -287,16 +290,18 @@ function SchedulesScreenBody({
           New schedule
         </Button>
       </View>
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-        testID="schedules-list"
-      >
-        {hostErrors.length > 0 ? <ScheduleHostErrorsBanner errors={hostErrors} /> : null}
-        {schedulesContent}
-      </ScrollView>
+      <GestureDetector gesture={scrollGesture}>
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          testID="schedules-list"
+        >
+          {hostErrors.length > 0 ? <ScheduleHostErrorsBanner errors={hostErrors} /> : null}
+          {schedulesContent}
+        </ScrollView>
+      </GestureDetector>
     </View>
   );
 }

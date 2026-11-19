@@ -25,6 +25,8 @@ import { HighlightedText } from "@/components/ui/highlighted-text";
 import { ArchivedBadge } from "@/components/archived-badge";
 import { StatusBadge, type StatusBadgeVariant } from "@/components/ui/status-badge";
 import { findHighlightRanges } from "@/components/ui/highlighted-text-segments";
+import { GestureDetector } from "react-native-gesture-handler";
+import { usePanelAwareVerticalScrollGesture } from "@/mobile-panels/gestures";
 
 interface AgentListProps {
   agents: AggregatedAgent[];
@@ -340,6 +342,7 @@ export function AgentList({
   showHostColumn = false,
   search,
 }: AgentListProps) {
+  const scrollGesture = usePanelAwareVerticalScrollGesture();
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
@@ -492,17 +495,19 @@ export function AgentList({
 
   return (
     <>
-      <FlatList
-        data={flatItems}
-        style={styles.list}
-        contentContainerStyle={styles.listContent}
-        keyExtractor={keyExtractor}
-        renderItem={renderItem}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-        ListFooterComponent={listFooterComponent}
-        refreshControl={refreshControl}
-      />
+      <GestureDetector gesture={scrollGesture}>
+        <FlatList
+          data={flatItems}
+          style={styles.list}
+          contentContainerStyle={styles.listContent}
+          keyExtractor={keyExtractor}
+          renderItem={renderItem}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          ListFooterComponent={listFooterComponent}
+          refreshControl={refreshControl}
+        />
+      </GestureDetector>
 
       <Modal
         visible={isActionSheetVisible}
